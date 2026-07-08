@@ -2,14 +2,16 @@
 //
 // Draws the CEF off-screen page texture as a quad placed at the surf-zone
 // rectangle (given in NDC via the uniform), sampled and composited over the
-// shell (background + ring) with a rounded-corner mask. The page is a citizen
-// of our compositor, not a window on top.
+// shell (background + ring) with a rounded-corner mask. The edge is either
+// feathered (a soft SDF-based alpha falloff, default) or the CD-02 hard rounded
+// corner, toggled live via the `feather` uniform. The page is a citizen of our
+// compositor, not a window on top.
 
 struct PageUniform {
     rect_ndc : vec4<f32>,   // left, top, right, bottom in normalized device coords
     px_size  : vec2<f32>,   // page texture size in device pixels
     corner_radius : f32,    // rounded-corner radius in device pixels
-    _pad : f32,
+    feather : f32,          // soft edge falloff width in px; 0 = CD-02 hard edge
 };
 
 @group(0) @binding(0) var<uniform> U : PageUniform;
@@ -51,12 +53,23 @@ fn rounded_box_sdf(p : vec2<f32>, half : vec2<f32>, radius : f32) -> f32 {
 fn fs_main(in : VOut) -> @location(0) vec4<f32> {
     let color = textureSample(page_tex, page_smp, in.uv);
 
-    // Rounded-corner coverage in the page's local pixel space.
+    // Rounded-corner coverage in the page's local pixel space. `sdf` is < 0
+    // inside the rounded box, 0 at the edge, > 0 outside.
     let half = U.px_size * 0.5;
     let p = in.uv * U.px_size - half;
     let sdf = rounded_box_sdf(p, half, U.corner_radius);
-    let aa = 1.5;
-    let mask = 1.0 - smoothstep(0.0, aa, sdf);
+
+    // Edge coverage, toggled live via the uniform (single pipeline, no recompile):
+    //   feather > 0 : soft alpha falloff over `feather` px inward from the edge,
+    //                 following the rounded contour — the surf zone dissolves into
+    //                 the Deep Field instead of ending on a hard line.
+    //   feather = 0 : CD-02 hard rounded edge (1.5px anti-alias straddling it).
+    var mask : f32;
+    if (U.feather > 0.5) {
+        mask = 1.0 - smoothstep(-U.feather, 0.0, sdf);
+    } else {
+        mask = 1.0 - smoothstep(-0.75, 0.75, sdf);
+    }
 
     // CEF delivers premultiplied BGRA; scale premultiplied so the OVER blend
     // (One, OneMinusSrcAlpha) reveals the shell through the rounded corners.

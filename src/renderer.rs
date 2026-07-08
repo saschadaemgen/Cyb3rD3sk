@@ -60,7 +60,7 @@ struct PageUniforms {
     rect_ndc: [f32; 4],
     px_size: [f32; 2],
     corner_radius: f32,
-    _pad: f32,
+    feather: f32,
 }
 
 fn ring_pipeline(
@@ -638,9 +638,15 @@ impl SurfaceRenderer {
     /// (x, y, w, h). `feather` and `deep_field` are the live settings toggles
     /// (consumed by the page feathering in Stage C and the background in Stage B).
     pub fn render(&mut self, time: f32, zone: (f32, f32, f32, f32), feather: bool, deep_field: bool) {
-        let _ = feather; // consumed in CD-03 Stage C
         let (win_w, win_h) = (self.config.width as f32, self.config.height as f32);
         let corner_radius = self.theme.page.corner_radius;
+        // Feathering on -> soft SDF falloff of `feather_width` px; off -> 0.0,
+        // which the page shader reads as the CD-02 hard rounded edge.
+        let feather_px = if feather {
+            self.theme.page.feather_width
+        } else {
+            0.0
+        };
 
         // Ring uniforms (all values from theme tokens).
         let ring = RingUniforms::from_theme(&self.theme, [win_w, win_h], time, 0);
@@ -660,7 +666,7 @@ impl SurfaceRenderer {
             ],
             px_size: [self.page.width.max(1) as f32, self.page.height.max(1) as f32],
             corner_radius,
-            _pad: 0.0,
+            feather: feather_px,
         };
         self.queue
             .write_buffer(&self.page.uniform_buf, 0, bytemuck::bytes_of(&page));
