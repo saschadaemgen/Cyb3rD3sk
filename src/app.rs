@@ -14,9 +14,9 @@ use winit::window::{CursorIcon, Fullscreen, Window, WindowId};
 use crate::browser;
 use crate::renderer::SurfaceRenderer;
 
-/// Rounded-corner radius for the page (device pixels). Stage B: sharp (0);
-/// Stage C introduces the rounded-corner effect.
-const PAGE_CORNER_RADIUS: f32 = 0.0;
+/// Rounded-corner radius for the page (device pixels) — Stage C compositing
+/// effect proving per-pixel control over the page texture.
+const PAGE_CORNER_RADIUS: f32 = 16.0;
 
 /// Surf-zone rectangle in device pixels: 60% width, 70% height, centered.
 fn zone_rect(width: u32, height: u32) -> (f32, f32, f32, f32) {

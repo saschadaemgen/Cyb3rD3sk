@@ -46,7 +46,9 @@ fn fs_main(@builtin(position) frag : vec4<f32>) -> @location(0) vec4<f32> {
     var col = bg;
 
     // --- Outer ring: open arc with a slowly rotating gap --------------------
-    let r_out  = 0.32;
+    // Sized so the arc stays visible in the margins around the centered
+    // surf-zone page (60% x 70%), framing it rather than hiding behind it.
+    let r_out  = 0.40;
     let hw_out = 0.010;
     let d_out  = abs(r - r_out) - hw_out;   // signed distance to the stroke
 
