@@ -28,8 +28,9 @@ USAGE:
 OPTIONS:
     --windowed          Start in a 1600x900 dev window (default: borderless
                         fullscreen on the primary monitor).
-    --capture <PATH>    Render a single ring frame off-screen to a PNG and exit
-                        (visual self-test; does not open a window).
+    --capture <PATH>    Render a single shell-background frame (the Pulse Grid)
+                        off-screen to a PNG and exit (visual self-test; does not
+                        open a window).
     -h, --help          Print this help.
 
 Press ESC to quit.
@@ -76,8 +77,7 @@ fn main() -> ExitCode {
                 Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
             })
             .unwrap_or((1600u32, 900u32));
-        // A representative moment in the rotation (gap off the vertical axis).
-        renderer::capture(&path, cw, ch, 3.0, &theme::Theme::load());
+        renderer::capture(&path, cw, ch, &theme::Theme::load());
         println!("wrote {path}");
         return ExitCode::SUCCESS;
     }

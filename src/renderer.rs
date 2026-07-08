@@ -1,15 +1,21 @@
 //! wgpu renderer for the CyberDesk shell.
 //!
 //! Composites, every frame:
-//!   1. the shell — dark background + rotating CARVILON ring (`ring.wgsl`), and
+//!   1. the shell background — the Pulse Grid circuit board (`pulsegrid_*.wgsl`),
+//!      the sole background since CD-06 (D-0013), and
 //!   2. the surf-zone page — the CEF off-screen texture drawn at the zone
 //!      rectangle with rounded corners (`page.wgsl`), blended over the shell.
+//!
+//! The CARVILON ring (`ring.wgsl`, [`RingUniforms`], [`ring_pipeline`]) is kept
+//! dormant in the tree — nothing renders it anymore; its motif migrates to the
+//! start animation / Energy Core in Season 2 (D-0013).
 //!
 //! All wgpu work lives on the main thread. CEF's `on_paint` (on the CEF UI
 //! thread) only hands over raw BGRA bytes; [`upload_page`](SurfaceRenderer::upload_page)
 //! copies them into the persistent page texture here.
 //!
-//! The off-screen [`capture`] path renders the ring only (headless self-test).
+//! The off-screen [`capture`] path renders the full shell background (the Pulse
+//! Grid) to a PNG for headless visual self-tests.
 
 use std::sync::Arc;
 
@@ -22,6 +28,9 @@ use crate::pulsegrid;
 /// through unchanged (matches the cef-rs OSR example).
 const SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 
+// Dormant since CD-06 (D-0013): the ring no longer renders in the shell or the
+// capture path. Kept in the tree for the Season-2 start animation / Energy Core.
+#[allow(dead_code)]
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct RingUniforms {
@@ -35,6 +44,7 @@ struct RingUniforms {
 }
 
 impl RingUniforms {
+    #[allow(dead_code)]
     fn from_theme(theme: &crate::theme::Theme, resolution: [f32; 2], time: f32, is_srgb: u32) -> Self {
         let c = &theme.colors;
         let r = &theme.ring;
@@ -89,6 +99,7 @@ struct LoadingUniforms {
     brand: [f32; 4],
 }
 
+#[allow(dead_code)] // Dormant since CD-06 (D-0013); kept for the Season-2 motif.
 fn ring_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
@@ -1263,9 +1274,6 @@ pub struct SurfaceRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    ring_pipeline: wgpu::RenderPipeline,
-    ring_uniform_buf: wgpu::Buffer,
-    ring_bind_group: wgpu::BindGroup,
     page: PagePass,
     panel: PagePass,
     gear: Gear,
@@ -1310,7 +1318,6 @@ impl SurfaceRenderer {
         config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&device, &config);
 
-        let (ring_pipeline, ring_uniform_buf, ring_bind_group) = ring_pipeline(&device, SURFACE_FORMAT);
         let page = PagePass::new(&device, SURFACE_FORMAT);
         let panel = PagePass::new(&device, SURFACE_FORMAT);
         let gear = Gear::new(&device, SURFACE_FORMAT);
@@ -1323,9 +1330,6 @@ impl SurfaceRenderer {
             device,
             queue,
             config,
-            ring_pipeline,
-            ring_uniform_buf,
-            ring_bind_group,
             page,
             panel,
             gear,
@@ -1426,11 +1430,6 @@ impl SurfaceRenderer {
         } else {
             0.0
         };
-
-        // Ring uniforms (all values from theme tokens).
-        let ring = RingUniforms::from_theme(&self.theme, [win_w, win_h], time, 0);
-        self.queue
-            .write_buffer(&self.ring_uniform_buf, 0, bytemuck::bytes_of(&ring));
 
         // Page uniforms: zone rect -> NDC (y flipped).
         let (zx, zy, zw, zh) = zone;
@@ -1590,9 +1589,10 @@ impl SurfaceRenderer {
                 multiview_mask: None,
             });
 
-            // Backmost: the selected background. Pulse Grid composites its baked
-            // circuit (scaled by glow intensity); the Deep Field upscales its
-            // half-res target. Either is the Cyber/Calm template choice.
+            // Backmost and sole background (CD-06, D-0013): the Pulse Grid alone —
+            // the ring no longer renders in the shell. Pulse Grid composites its
+            // baked circuit (scaled by glow intensity); the Deep Field upscales
+            // its half-res target. Either is the Cyber/Calm template choice.
             if do_pulse {
                 self.pulse.composite(&mut pass);
                 // Life layer (pulses + flares) over the baked circuit.
@@ -1604,11 +1604,6 @@ impl SurfaceRenderer {
                     pass.draw(0..3, 0..1);
                 }
             }
-
-            // Ring (transparent, composited over the background).
-            pass.set_pipeline(&self.ring_pipeline);
-            pass.set_bind_group(0, &self.ring_bind_group, &[]);
-            pass.draw(0..3, 0..1);
 
             // Surf-zone page, if a frame has arrived.
             if let Some(tex_bind_group) = self.page.tex_bind_group.as_ref() {
@@ -1646,12 +1641,12 @@ impl SurfaceRenderer {
 }
 
 /// Render a single shell frame off-screen to a PNG (headless self-test: the
-/// Pulse Grid background + the CARVILON ring, no CEF surf zone). Because the
-/// background shaders write token colors directly to a non-sRGB target — exactly
-/// as the on-screen `Bgra8Unorm` path does — the PNG shows the circuit as it
-/// appears fullscreen, which is the sanctioned way to eyeball it without
-/// screen-scraping the desktop.
-pub fn capture(path: &str, width: u32, height: u32, time: f32, theme: &crate::theme::Theme) {
+/// Pulse Grid background alone, no CEF surf zone and — since CD-06 — no ring).
+/// Because the background shaders write token colors directly to a non-sRGB
+/// target — exactly as the on-screen `Bgra8Unorm` path does — the PNG shows the
+/// circuit as it appears fullscreen, which is the sanctioned way to eyeball it
+/// without screen-scraping the desktop.
+pub fn capture(path: &str, width: u32, height: u32, theme: &crate::theme::Theme) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
@@ -1671,12 +1666,6 @@ pub fn capture(path: &str, width: u32, height: u32, time: f32, theme: &crate::th
     .expect("failed to create GPU device");
 
     let format = wgpu::TextureFormat::Rgba8Unorm;
-    let (pipeline, uniform_buf, bind_group) = ring_pipeline(&device, format);
-    // `is_srgb = 0`: the ring paints its transparent premultiplied path (as
-    // on-screen) so it composites OVER the Pulse Grid background rather than an
-    // opaque fill — the PNG then matches the fullscreen framebuffer exactly.
-    let ring = RingUniforms::from_theme(theme, [width as f32, height as f32], time, 0);
-    queue.write_buffer(&uniform_buf, 0, bytemuck::bytes_of(&ring));
 
     // Pulse Grid background (skipped when the template selects the Deep Field —
     // that path is surface-bound and not wired into the headless capture).
@@ -1764,14 +1753,12 @@ pub fn capture(path: &str, width: u32, height: u32, time: f32, theme: &crate::th
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        // Backmost: the Pulse Grid + its life layer, then the ring over it.
+        // The shell background is the Pulse Grid alone (CD-06, D-0013): the
+        // baked circuit + its life layer, no ring.
         if do_pulse {
             pulse.composite(&mut pass);
             pulse.draw_life(&mut pass);
         }
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.draw(0..3, 0..1);
     }
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
