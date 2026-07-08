@@ -127,12 +127,11 @@ impl Store {
     /// All settings as (key, value) pairs, for the get_settings IPC command.
     pub fn all_settings(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        if let Ok(mut stmt) = self.conn.prepare("SELECT key, value FROM settings") {
-            if let Ok(rows) = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            }) {
-                out.extend(rows.filter_map(Result::ok));
-            }
+        if let Ok(mut stmt) = self.conn.prepare("SELECT key, value FROM settings")
+            && let Ok(rows) =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        {
+            out.extend(rows.filter_map(Result::ok));
         }
         out
     }

@@ -1130,13 +1130,13 @@ impl PulseGrid {
         pass.set_pipeline(&self.lattice_pipeline);
         pass.set_bind_group(0, &self.lattice_bg, &[]);
         pass.draw(0..3, 0..1);
-        if let (Some(prim_buf), count) = (self.prim_buf.as_ref(), self.prim_count) {
-            if count > 0 {
-                pass.set_pipeline(&self.sprite_bake_pipeline);
-                pass.set_bind_group(0, &self.bake_globals_bg, &[]);
-                pass.set_vertex_buffer(0, prim_buf.slice(..));
-                pass.draw(0..6, 0..count);
-            }
+        if let (Some(prim_buf), count) = (self.prim_buf.as_ref(), self.prim_count)
+            && count > 0
+        {
+            pass.set_pipeline(&self.sprite_bake_pipeline);
+            pass.set_bind_group(0, &self.bake_globals_bg, &[]);
+            pass.set_vertex_buffer(0, prim_buf.slice(..));
+            pass.draw(0..6, 0..count);
         }
     }
 
@@ -1520,7 +1520,7 @@ impl SurfaceRenderer {
         let do_field = do_deep && {
             self.field
                 .ensure_target(&self.device, self.config.width, self.config.height);
-            self.field.frame % 2 == 0 || self.field.needs_render
+            self.field.frame.is_multiple_of(2) || self.field.needs_render
         };
         if do_field {
             let fu = FieldUniforms::from_theme(
@@ -1615,12 +1615,12 @@ impl SurfaceRenderer {
                 self.pulse.composite(&mut pass);
                 // Life layer (pulses + flares) over the baked circuit.
                 self.pulse.draw_life(&mut pass);
-            } else if do_deep {
-                if let Some(bg) = self.field.composite_bind_group.as_ref() {
-                    pass.set_pipeline(&self.field.composite_pipeline);
-                    pass.set_bind_group(0, bg, &[]);
-                    pass.draw(0..3, 0..1);
-                }
+            } else if do_deep
+                && let Some(bg) = self.field.composite_bind_group.as_ref()
+            {
+                pass.set_pipeline(&self.field.composite_pipeline);
+                pass.set_bind_group(0, bg, &[]);
+                pass.draw(0..3, 0..1);
             }
 
             // Surf-zone page, if a frame has arrived.
@@ -1639,13 +1639,13 @@ impl SurfaceRenderer {
             }
 
             // Internal overlay (settings card or command bar), over the page.
-            if overlay_open {
-                if let Some(tex_bind_group) = self.panel.tex_bind_group.as_ref() {
-                    pass.set_pipeline(&self.panel.pipeline);
-                    pass.set_bind_group(0, &self.panel.uniform_bind_group, &[]);
-                    pass.set_bind_group(1, tex_bind_group, &[]);
-                    pass.draw(0..6, 0..1);
-                }
+            if overlay_open
+                && let Some(tex_bind_group) = self.panel.tex_bind_group.as_ref()
+            {
+                pass.set_pipeline(&self.panel.pipeline);
+                pass.set_bind_group(0, &self.panel.uniform_bind_group, &[]);
+                pass.set_bind_group(1, tex_bind_group, &[]);
+                pass.draw(0..6, 0..1);
             }
 
             // Gear button, on top of everything.

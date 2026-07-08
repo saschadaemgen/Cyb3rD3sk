@@ -435,33 +435,34 @@ impl ApplicationHandler for Shell {
                     return;
                 }
                 // Surf navigation shortcuts (only while the surf view is active).
-                if event.state == ElementState::Pressed && self.active_role() == Role::Surf {
-                    if let PhysicalKey::Code(code) = event.physical_key {
-                        let (ctrl, alt, shift) =
-                            (self.mods.control_key(), self.mods.alt_key(), self.mods.shift_key());
-                        match code {
-                            KeyCode::F5 => {
-                                browser::reload(Role::Surf);
-                                return;
-                            }
-                            KeyCode::KeyR if ctrl => {
-                                if shift {
-                                    browser::reload_ignore_cache(Role::Surf);
-                                } else {
-                                    browser::reload(Role::Surf);
-                                }
-                                return;
-                            }
-                            KeyCode::ArrowLeft if alt => {
-                                browser::go_back(Role::Surf);
-                                return;
-                            }
-                            KeyCode::ArrowRight if alt => {
-                                browser::go_forward(Role::Surf);
-                                return;
-                            }
-                            _ => {}
+                if event.state == ElementState::Pressed
+                    && self.active_role() == Role::Surf
+                    && let PhysicalKey::Code(code) = event.physical_key
+                {
+                    let (ctrl, alt, shift) =
+                        (self.mods.control_key(), self.mods.alt_key(), self.mods.shift_key());
+                    match code {
+                        KeyCode::F5 => {
+                            browser::reload(Role::Surf);
+                            return;
                         }
+                        KeyCode::KeyR if ctrl => {
+                            if shift {
+                                browser::reload_ignore_cache(Role::Surf);
+                            } else {
+                                browser::reload(Role::Surf);
+                            }
+                            return;
+                        }
+                        KeyCode::ArrowLeft if alt => {
+                            browser::go_back(Role::Surf);
+                            return;
+                        }
+                        KeyCode::ArrowRight if alt => {
+                            browser::go_forward(Role::Surf);
+                            return;
+                        }
+                        _ => {}
                     }
                 }
                 let role = self.active_role();
@@ -510,14 +511,15 @@ impl ApplicationHandler for Shell {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         // Create both OSR views once the CEF context is initialised.
-        if !self.views_started && browser::context_ready() {
-            if let Some(window) = self.window.clone() {
-                self.push_geometry();
-                let hwnd = window_hwnd(&window);
-                browser::create_browser(Role::Surf, hwnd);
-                browser::create_browser(Role::Internal, hwnd);
-                self.views_started = true;
-            }
+        if !self.views_started
+            && browser::context_ready()
+            && let Some(window) = self.window.clone()
+        {
+            self.push_geometry();
+            let hwnd = window_hwnd(&window);
+            browser::create_browser(Role::Surf, hwnd);
+            browser::create_browser(Role::Internal, hwnd);
+            self.views_started = true;
         }
 
         // The command bar's navigate request closes the overlay (set from the
@@ -539,27 +541,26 @@ impl ApplicationHandler for Shell {
         // In windowed dev mode, reflect the page title in the OS window title.
         if self.windowed {
             let title = browser::surf_title();
-            if title != self.applied_title {
-                if let Some(window) = self.window.as_ref() {
-                    let full = if title.is_empty() {
-                        "CARVILON CyberDesk".to_string()
-                    } else {
-                        format!("{title} — CARVILON CyberDesk")
-                    };
-                    window.set_title(&full);
-                    self.applied_title = title;
-                }
+            if title != self.applied_title
+                && let Some(window) = self.window.as_ref()
+            {
+                let full = if title.is_empty() {
+                    "CARVILON CyberDesk".to_string()
+                } else {
+                    format!("{title} — CARVILON CyberDesk")
+                };
+                window.set_title(&full);
+                self.applied_title = title;
             }
         }
 
         // Apply a pending cursor request from the active view.
-        if let Some(icon) = browser::take_cursor(self.active_role()) {
-            if icon != self.applied_cursor {
-                if let Some(window) = self.window.as_ref() {
-                    window.set_cursor(icon);
-                    self.applied_cursor = icon;
-                }
-            }
+        if let Some(icon) = browser::take_cursor(self.active_role())
+            && icon != self.applied_cursor
+            && let Some(window) = self.window.as_ref()
+        {
+            window.set_cursor(icon);
+            self.applied_cursor = icon;
         }
 
         // Upload freshly painted frames into their textures.

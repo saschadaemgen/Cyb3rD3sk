@@ -279,10 +279,10 @@ fn argb_from_hex(hex: &str) -> u32 {
 /// RequestHandler will refuse anything that is not `cyberdesk://`.
 pub fn load_url(role: Role, url: &str) {
     let browser = view(role).browser.lock().unwrap().clone();
-    if let Some(browser) = browser {
-        if let Some(frame) = browser.main_frame() {
-            frame.load_url(Some(&CefString::from(url)));
-        }
+    if let Some(browser) = browser
+        && let Some(frame) = browser.main_frame()
+    {
+        frame.load_url(Some(&CefString::from(url)));
     }
 }
 
@@ -306,10 +306,10 @@ pub fn take_cursor(role: Role) -> Option<CursorIcon> {
 
 fn with_host(role: Role, f: impl FnOnce(BrowserHost)) {
     let browser = view(role).browser.lock().unwrap().clone();
-    if let Some(browser) = browser {
-        if let Some(host) = browser.host() {
-            f(host);
-        }
+    if let Some(browser) = browser
+        && let Some(host) = browser.host()
+    {
+        f(host);
     }
 }
 
@@ -717,17 +717,16 @@ wrap_client! {
             source_process: ProcessId,
             message: Option<&mut ProcessMessage>,
         ) -> c_int {
-            if self.role == Role::Internal {
-                if let Some(router) = BROWSER_ROUTER.get() {
-                    if router.on_process_message_received(
-                        browser.map(|b| b.clone()),
-                        frame.map(|f| f.clone()),
-                        source_process,
-                        message.map(|m| m.clone()),
-                    ) {
-                        return 1;
-                    }
-                }
+            if self.role == Role::Internal
+                && let Some(router) = BROWSER_ROUTER.get()
+                && router.on_process_message_received(
+                    browser.map(|b| b.clone()),
+                    frame.map(|f| f.clone()),
+                    source_process,
+                    message.map(|m| m.clone()),
+                )
+            {
+                return 1;
             }
             0
         }
@@ -881,12 +880,12 @@ wrap_life_span_handler! {
             _extra_info: Option<&mut Option<DictionaryValue>>,
             _no_javascript_access: Option<&mut c_int>,
         ) -> c_int {
-            if self.role == Role::Surf && user_gesture != 0 {
-                if let (Some(browser), Some(url)) = (browser, target_url) {
-                    if let Some(frame) = browser.main_frame() {
-                        frame.load_url(Some(url));
-                    }
-                }
+            if self.role == Role::Surf
+                && user_gesture != 0
+                && let (Some(browser), Some(url)) = (browser, target_url)
+                && let Some(frame) = browser.main_frame()
+            {
+                frame.load_url(Some(url));
             }
             1
         }
