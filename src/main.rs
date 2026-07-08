@@ -2,7 +2,15 @@
 //!
 //! Copyright (c) 2026 Sascha Daemgen IT and More Systems. All rights reserved.
 
+// Release builds are GUI apps (no console window); debug keeps a console for
+// logs. CEF sub-processes reuse this same executable.
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
+
 mod app;
+mod browser;
 mod renderer;
 
 use std::process::ExitCode;
@@ -24,6 +32,10 @@ Press ESC to quit.
 ";
 
 fn main() -> ExitCode {
+    // MUST run first: handle CEF sub-processes (renderer/GPU/utility). For a
+    // sub-process this never returns; for the browser process it returns here.
+    browser::run_subprocess_if_needed();
+
     let mut windowed = false;
     let mut capture: Option<String> = None;
 

@@ -17,6 +17,10 @@ wgpu = "30"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+# CEF binding — exact pin (see docs/cyberdesk-decisions.md, D-0002).
+# default-features = false disables the Windows sandbox feature (no_sandbox);
+# see D-0008 for the tracked deviation from the "sandbox stays active" doctrine.
+cef = { version = "=149.3.0", default-features = false }
 
 [profile.release]
 opt-level = 3

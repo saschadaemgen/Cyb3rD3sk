@@ -216,7 +216,7 @@ impl SurfaceRenderer {
                 self.surface.configure(&self.device, &self.config);
                 return;
             }
-            // Occluded / Timeout: skip this frame and try again next tick.
+            // Occluded / Timeout / Validation / other: skip this frame.
             _ => return,
         };
 

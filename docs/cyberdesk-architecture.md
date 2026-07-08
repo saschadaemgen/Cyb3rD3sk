@@ -26,4 +26,9 @@ Entwicklung: Windows 11 (MSVC). Später: Linux-Appliance. Fernziel: CARVILON OS 
 
 ## Status
 
-CD-01 (Shell-Skeleton + CEF-Feasibility) bei CC in Arbeit. Dieses Dokument wird nach jeder Season, bei Bedarf auch zwischendurch, aktualisiert.
+CD-01 (Shell-Skeleton + CEF-Feasibility) **abgeschlossen**: Vollbild-Shell mit
+rotierendem Ring (Etappe A) und chromelos eingebettetem CEF-View, der google.com
+laedt (Etappe B) - beides verifiziert. Offene Punkte aus CD-01 stehen in
+`cyberdesk-decisions.md` (D-0008: Sandbox-Wiederaktivierung, GPU-Unterprozess im
+Release). Dieses Dokument wird nach jeder Season, bei Bedarf auch zwischendurch,
+aktualisiert.

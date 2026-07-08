@@ -1,19 +1,19 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-    Lädt die für CyberDesk gepinnte Chromium-Embedded-Framework-Version herunter
+    Laedt die fuer CyberDesk gepinnte Chromium-Embedded-Framework-Version herunter
     und richtet sie unter vendor/cef/ ein.
 
 .DESCRIPTION
-    Die CEF-Binaries sind mehrere hundert MB groß und liegen NIEMALS im Repo.
-    Dieses Skript lädt die exakt gepinnte CEF-Distribution (siehe
+    Die CEF-Binaries sind mehrere hundert MB gross und liegen NIEMALS im Repo.
+    Dieses Skript laedt die exakt gepinnte CEF-Distribution (siehe
     docs/decisions.md, D-0002) von der offiziellen Spotify-CDN, verifiziert die
     SHA1-Summe, entpackt sie und flacht sie in genau das Layout ab, das das
     Crate `cef-dll-sys` erwartet (Release/ + Resources/ + include/ + libcef_dll/
     + cmake/ ins Wurzelverzeichnis, plus einen archive.json-Marker). Dadurch
     verwendet der Build vendor/cef/ direkt (kein erneuter Download).
 
-    Idempotent: ein erneuter Aufruf ohne -Force erkennt eine vorhandene, gültige
+    Idempotent: ein erneuter Aufruf ohne -Force erkennt eine vorhandene, gueltige
     Installation und tut nichts.
 
 .PARAMETER Dest
@@ -29,12 +29,19 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Dest = (Join-Path $PSScriptRoot '..\vendor\cef'),
+    [string]$Dest,
     [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# Robustly resolve the script directory (-File with forward slashes can leave
+# $PSScriptRoot empty), then default $Dest to <repo>/vendor/cef.
+$ScriptDir = $PSScriptRoot
+if (-not $ScriptDir) { $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $ScriptDir) { $ScriptDir = (Get-Location).Path }
+if (-not $Dest) { $Dest = Join-Path $ScriptDir '..\vendor\cef' }
 
 # --- Gepinnte CEF-Distribution (D-0002) -------------------------------------
 $CdnBase          = 'https://cef-builds.spotifycdn.com'
@@ -48,7 +55,7 @@ function Write-Step([string]$Message) { Write-Host "==> $Message" -ForegroundCol
 $Dest = [System.IO.Path]::GetFullPath($Dest)
 $archiveJsonPath = Join-Path $Dest 'archive.json'
 
-# --- Idempotenz-Prüfung -----------------------------------------------------
+# --- Idempotenz-Pruefung -----------------------------------------------------
 if ((Test-Path -LiteralPath $archiveJsonPath) -and -not $Force) {
     Write-Step "CEF ist bereits eingerichtet unter: $Dest"
     Write-Host "    (mit -Force neu einrichten)"
@@ -59,7 +66,7 @@ if ((Test-Path -LiteralPath $archiveJsonPath) -and -not $Force) {
 $TarExe = Join-Path $env:SystemRoot 'System32\tar.exe'
 if (-not (Test-Path -LiteralPath $TarExe)) { $TarExe = 'tar' }
 
-# --- Download in temporäres Verzeichnis -------------------------------------
+# --- Download in temporaeres Verzeichnis -------------------------------------
 $TmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("cyberdesk-cef-" + [System.IO.Path]::GetRandomFileName())
 New-Item -ItemType Directory -Path $TmpRoot -Force | Out-Null
 
@@ -85,7 +92,7 @@ try {
     Write-Step "Verifiziere SHA1-Summe ..."
     $actual = (Get-FileHash -Algorithm SHA1 -LiteralPath $ArchivePath).Hash.ToLowerInvariant()
     if ($actual -ne $CefSha1.ToLowerInvariant()) {
-        throw "SHA1-Fehler: erwartet $CefSha1, erhalten $actual. Download beschädigt."
+        throw "SHA1-Fehler: erwartet $CefSha1, erhalten $actual. Download beschaedigt."
     }
     Write-Host "    OK ($actual)"
 
@@ -108,8 +115,8 @@ try {
     New-Item -ItemType Directory -Path $Dest -Force | Out-Null
 
     # --- Ins von cef-dll-sys erwartete Layout abflachen ---------------------
-    # Reihenfolge/Inhalt gemäß download-cef::extract_target_archive:
-    #   Release/*   -> vendor/cef/      (libcef.dll, libcef.dll.lib, chrome_elf.dll, *.bin, ...)
+    # Reihenfolge/Inhalt gemaess download-cef::extract_target_archive:
+    #   Release/*   -> vendor/cef/      (libcef.dll, libcef.lib, chrome_elf.dll, *.bin, ...)
     #   Resources/* -> vendor/cef/      (icudtl.dat, *.pak, locales/)
     #   include, libcef_dll, cmake, CMakeLists.txt, CREDITS.html -> vendor/cef/
     Write-Step "Richte Layout ein unter: $Dest"
@@ -135,8 +142,8 @@ try {
     $archiveJson = ([ordered]@{ type = 'minimal'; name = $CefArchive; sha1 = $CefSha1 } | ConvertTo-Json)
     [System.IO.File]::WriteAllText($archiveJsonPath, $archiveJson)  # UTF-8 ohne BOM
 
-    # --- Plausibilitätsprüfung ---------------------------------------------
-    $required = @('libcef.dll', 'libcef.dll.lib', 'icudtl.dat', 'CMakeLists.txt')
+    # --- Plausibilitaetspruefung ---------------------------------------------
+    $required = @('libcef.dll', 'libcef.lib', 'icudtl.dat', 'CMakeLists.txt')
     $missing = @()
     foreach ($r in $required) {
         if (-not (Test-Path -LiteralPath (Join-Path $Dest $r))) { $missing += $r }
@@ -145,14 +152,14 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $Dest 'libcef_dll'))) { $missing += 'libcef_dll/' }
     if (-not (Test-Path -LiteralPath (Join-Path $Dest 'locales'))) { $missing += 'locales/' }
     if ($missing.Count -gt 0) {
-        throw ("Layout unvollständig, fehlend: " + ($missing -join ', '))
+        throw ("Layout unvollstaendig, fehlend: " + ($missing -join ', '))
     }
 
     Write-Host ""
     Write-Step "Fertig. CEF ist eingerichtet."
     Write-Host "    Version: $ExtractedDirName"
     Write-Host "    Pfad   : $Dest"
-    Write-Host "    Als Nächstes: cargo run --release   (bzw. -- --windowed)"
+    Write-Host "    Als Naechstes: cargo run --release   (bzw. -- --windowed)"
 }
 finally {
     if (Test-Path -LiteralPath $TmpRoot) {

@@ -1,0 +1,5 @@
+# CEF_PATH points cef-dll-sys at the CEF distribution fetched by
+# scripts/fetch-cef.ps1. `relative = true` resolves it against this config
+# file's directory (the repo root), so it works regardless of the shell CWD.
+[env]
+CEF_PATH = { value = "vendor/cef", relative = true }

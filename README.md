@@ -128,3 +128,11 @@ cyberdesk/
   `./scripts/fetch-cef.ps1 -Force` erneut ausführen.
 * **Schwarzer statt dunkler Hintergrund / kein Ring:** Grafiktreiber prüfen;
   wgpu benötigt einen funktionierenden D3D12- oder Vulkan-Backend-Adapter.
+* **`GPU process exited unexpectedly` auf stderr:** bekannt und harmlos – CEF
+  fällt auf Software-Rendering (SwiftShader) zurück, die Seite rendert korrekt.
+  Details und der Plan zur Behebung stehen in `docs/cyberdesk-decisions.md`
+  (D-0008). Im Release-Vollbild (kein Konsolenfenster) ist die Meldung ohnehin
+  unsichtbar.
+* **CEF-Profil/Cache:** liegt isoliert unter `target/<profil>/cyberdesk-cache/`
+  (git-ignoriert) – die Surf-Zone teilt bewusst keinen Zustand mit einem
+  separat installierten Chrome.
