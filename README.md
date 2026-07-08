@@ -13,7 +13,7 @@ feathered compositing, and an isolated in-shell settings surface.
 
 ---
 
-## State after CD-06 (Season 1 extended)
+## State after CD-07 (Season 1 extended)
 
 * **Shell:** Borderless fullscreen on the primary monitor, dark background
   (`#04070A`), vsync. The shell background is the Pulse Grid alone — the CARVILON
@@ -46,24 +46,34 @@ feathered compositing, and an isolated in-shell settings surface.
   the wider CD-05 band that read as a vignette; toggleable back to the hard
   rounded corner). Mouse and keyboard are forwarded into the page (a Google
   search, clicking, and scrolling all work) and the cursor follows the page.
-* **Free surfing (command bar + history):** `Ctrl+L` summons a command bar over
-  the surf zone; its text is classified host-side as a URL or a Google search.
-  Back / forward / reload and the mouse's forward/back buttons drive the page
-  history, an amber glyph flags a plain-`http://` page, and a loading line traces
-  the top of the zone. Popups follow a gesture-aware policy (D-0011): a real
-  click on a `target=_blank` link navigates the surf view in place, script
-  `window.open` is dropped — no second window ever opens.
+* **Free surfing (command palette + memory):** `Ctrl+L` summons the command
+  palette over the surf zone; its text is classified host-side as a URL or a
+  search on the chosen engine. As you type it shows up to six live **suggestions**
+  drawn from your favorites and history — favorites first, then history by a
+  simple frecency (empty input lists the top favorites); `Arrow` keys move the
+  selection, `Enter` navigates the selected entry (or the raw text), a click
+  navigates. **`Ctrl+D`** favorites the current page and a star in the bar
+  reflects and toggles it live. Back / forward / reload and the mouse's
+  forward/back buttons drive the page history, an amber glyph flags a
+  plain-`http://` page, and a loading line traces the top of the zone. Popups
+  follow a gesture-aware policy (D-0011): a real click on a `target=_blank` link
+  navigates the surf view in place, script `window.open` is dropped — no second
+  window ever opens. There is **no favorites bar** by design — the palette is the
+  favorites/history surface (D-0014).
 * **Settings:** a gear button (top-right) opens an in-shell settings card — a
   **second, web-isolated OSR view** locked to an internal `cyberdesk://` custom
   scheme (D-0010), served entirely in-process from embedded assets. It can never
-  reach the web (its navigation is confined to `cyberdesk://`). A **glow-intensity**
-  slider (50–220 %) plus three toggles (animated background, feathered edges, and
-  stay-in-foreground) are wired over a CEF message-router IPC bridge
-  (`get_settings` / `set_setting`), applied live and persisted to SQLite.
+  reach the web (its navigation is confined to `cyberdesk://`). A **search-engine**
+  select (Google / DuckDuckGo / Bing / Startpage, a token-styled custom dropdown,
+  D-0015), a **glow-intensity** slider (50–220 %), and three toggles (animated
+  background, feathered edges, and stay-in-foreground) are wired over a CEF
+  message-router IPC bridge (`get_settings` / `set_setting`), applied live and
+  persisted to SQLite.
 * **One token source:** every style value — colors, radii, periods, amplitudes —
   comes from an embedded theme (`src/theme.toml`), resolved both into wgpu shader
-  uniforms and into the settings page's CSS custom properties. App state lives in
-  a schema-versioned SQLite store under `%LOCALAPPDATA%\CyberDesk\`.
+  uniforms and into the settings/command pages' CSS custom properties. App state
+  lives in a schema-versioned SQLite store under `%LOCALAPPDATA%\CyberDesk\` —
+  settings plus local history and favorites (D-0014), all local, no sync.
 
 The accelerated (zero-copy GPU) OSR path was researched; CyberDesk stays on the
 CPU path for now — see `docs/cyberdesk-decisions.md` (D-0009).
@@ -124,10 +134,10 @@ cargo run --release
 cargo run --release -- --windowed
 ```
 
-* **`Ctrl+L`** opens the command bar; **`ESC`** closes an open overlay (command
-  bar or settings), otherwise quits. See **Controls** below for the full map.
-* The **gear** button (top-right) opens the settings card; the three toggles
-  apply live and persist across restarts.
+* **`Ctrl+L`** opens the command palette; **`ESC`** closes an open overlay
+  (palette or settings), otherwise quits. See **Controls** below for the full map.
+* The **gear** button (top-right) opens the settings card; the search-engine
+  select, the slider, and the toggles apply live and persist across restarts.
 * The first build is slow because CMake+Ninja compile `libcef_dll_wrapper`. The
   CEF runtime files (`libcef.dll`, resources, `locales/`) are copied next to the
   `.exe` in `target/<profile>/` automatically.
@@ -154,22 +164,26 @@ you summon it. All navigation shortcuts act on the surf view.
 
 | Input | Action |
 | --- | --- |
-| `Ctrl+L` | Open the command bar over the surf zone (from any state) |
-| type + `Enter` (in the bar) | Navigate — a scheme, a dotted host, or `localhost` loads as a URL (default `https://`); anything else becomes a Google search |
+| `Ctrl+L` | Open the command palette over the surf zone (from any state) |
+| type (in the palette) | Filter live suggestions from favorites + history (empty input lists the top favorites) |
+| `↑` / `↓` | Move the suggestion selection |
+| `Enter` (in the palette) | Navigate the selected suggestion, or the typed text — a scheme, a dotted host, or `localhost` loads as a URL (default `https://`); anything else searches the chosen engine |
+| `Ctrl+D` | Favorite / unfavorite the current page (star reflects it live) |
 | `Alt+←` / `Alt+→` | History back / forward |
 | Mouse button 4 / 5 | History back / forward |
 | `F5` / `Ctrl+R` | Reload |
 | `Ctrl+Shift+R` | Hard reload (ignore cache) |
-| `ESC` | Close the command bar or settings card if open, otherwise quit |
+| `ESC` | Close the command palette or settings card if open, otherwise quit |
 
-An amber glyph in the command bar marks a page served over plain `http://`
+An amber glyph in the command palette marks a page served over plain `http://`
 (e.g. `neverssl.com`, which stays http by design); `https` and internal pages
 show no warning. The **gear** (top-right) opens the settings card with a live,
-persisted **glow-intensity** slider (50–220 %, brightness of the animated
-background) and three toggles: **animated background** (the Pulse Grid, or
-whichever background the template selects), **feathered edges**, and **stay in
-foreground** (keep the fullscreen shell above other windows; always off in
-`--windowed` dev mode).
+persisted **search-engine** select (Google / DuckDuckGo / Bing / Startpage — the
+command-palette search fallback), a **glow-intensity** slider (50–220 %,
+brightness of the animated background), and three toggles: **animated background**
+(the Pulse Grid, or whichever background the template selects), **feathered
+edges**, and **stay in foreground** (keep the fullscreen shell above other
+windows; always off in `--windowed` dev mode).
 
 ---
 
@@ -181,11 +195,12 @@ cyberdesk/
 │  ├─ main.rs        # entry point, CLI, process model
 │  ├─ app.rs         # winit event loop, window, input routing, nav keys, foreground guard
 │  ├─ renderer.rs    # wgpu renderer: shell + page/panel compositing, capture
-│  ├─ browser.rs     # CEF OSR (two views), custom scheme, isolation, settings + nav IPC
-│  ├─ theme.rs       # theme tokens -> shader uniforms + settings CSS vars
+│  ├─ browser.rs     # CEF OSR (two views), custom scheme, isolation, settings/nav/palette IPC
+│  ├─ theme.rs       # theme tokens -> shader uniforms + settings/command CSS vars
 │  ├─ theme.toml     # the embedded "cyber" token set (single style source)
-│  ├─ store.rs       # schema-versioned SQLite app-state store
-│  ├─ settings.rs    # live settings state (owns the store) shared with the IPC
+│  ├─ store.rs       # schema-versioned SQLite store (settings, history, favorites)
+│  ├─ settings.rs    # live settings state (search engine, glow, toggles) over the shared store
+│  ├─ memory.rs      # history + favorites domain layer (frecency suggestions) over the store
 │  ├─ pulsegrid.rs   # Pulse Grid background: seeded generator + life simulation
 │  ├─ settings.html/.css/.js   # embedded internal settings page assets
 │  ├─ command.html/.css/.js    # embedded command-bar page assets
@@ -199,9 +214,9 @@ cyberdesk/
 │  └─ fetch-cef.ps1  # downloads the pinned CEF version into vendor/cef/
 ├─ docs/                          # living project documents (English)
 │  ├─ cyberdesk-architecture.md
-│  ├─ cyberdesk-decisions.md      # D-0001 … D-0013
+│  ├─ cyberdesk-decisions.md      # D-0001 … D-0015
 │  ├─ cyberdesk-security.md
-│  ├─ cyberdesk-wire-format.md    # settings + navigation IPC schema
+│  ├─ cyberdesk-wire-format.md    # settings + navigation + command-palette IPC schema
 │  ├─ cyberdesk-feature-backlog.md
 │  └─ cyberdesk-roadmap.txt
 ├─ .cargo/config.toml

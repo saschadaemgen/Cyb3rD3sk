@@ -2,6 +2,59 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0015 - 2026-07-08 - CD-07: the settings "select" is a custom in-page dropdown
+
+The search-engine setting needs a select control, but the internal views are
+**off-screen (OSR)** and `RenderHandler::on_paint` only composites the main VIEW
+element — native popup widgets (`PaintElementType::POPUP`) are deliberately
+ignored (consistent with "no context menu" through Season 5). A native
+`<select>` would open its option list as exactly such a popup, which would never
+paint — the dropdown would be invisible.
+
+So the "select control" is a **custom in-page dropdown**: a button plus an
+absolutely-positioned `<ul>` menu, all ordinary markup that composites in the one
+VIEW texture like everything else on the page. It also themes perfectly to the
+token world (native option lists can't be fully styled anyway) and matches the
+slider's design language. The menu opens downward within the settings card (the
+search-engine row sits at the top, with room below). Reasoned deviation from the
+literal "select"; the behaviour and look are a select, the mechanism is ours.
+
+## D-0014 - 2026-07-08 - CD-07: the command palette IS the favorites/history surface
+
+CyberDesk gains local memory — a `history` table (url, title, last_visit,
+visit_count) and a `favorites` table (url, title, added_at, position) in the same
+`state.db` (schema v2). Recorded on the surf view only; `cyberdesk://` and blank
+navigations never enter either table. No sync, no export.
+
+**No favorites bar — the command bar becomes a command palette.** The deliberate
+design law: CyberDesk shows NO favorites bar and NO browser-chrome imitation. The
+one command surface (`Ctrl+L`) is where favorites and history live — as live
+suggestions below the input. A visual favorites surface with its own buttons is
+**Season-2 design-law material**, not this ticket. `Ctrl+D` (or the command-bar
+star) favorites the current page; the star reflects and toggles the current
+page's state live.
+
+**History cap + pruning.** History is capped at **~10,000 rows**; each insert
+prunes the least-recently-visited rows past the cap (`DELETE … ORDER BY
+last_visit DESC LIMIT -1 OFFSET 10000`). A visit is one upsert per real address
+change (bump `visit_count`, refresh `last_visit`); the title is filled in when it
+arrives (it lands after the address commit).
+
+**Frecency (kept honest and simple).** History suggestions rank by
+`visit_count * recency_weight`, where the weight is bucketed by the age of the
+last visit: `<1 h → 100`, `<1 day → 80`, `<1 week → 60`, `<30 days → 40`, else
+`20`. Favorites always outrank history and are shown first (in their saved
+order); a favorite is excluded from the history half so it appears once. Matching
+is a case-insensitive substring on url + title, with LIKE wildcards in the input
+escaped. The whole ranking and matching runs **host-side** in the IPC handler;
+the page only renders what it is given (query per keystroke, debounced ~90 ms).
+
+**Palette sizing.** The palette view is resized to fit exactly `input bar + N
+rows` (grows and shrinks with the live suggestion count, primed on open). The row
+and input dimensions are theme tokens (`[command]` in `theme.toml`), emitted as
+`--cmd-*` CSS vars, so the page CSS and the host-side rect share one source of
+truth — no hardcoded sizes, and no favorites-area scrim over empty space.
+
 ## D-0013 - 2026-07-08 - CD-06: depth overhaul, ring removed, feather corrected, autonomous push
 
 Sascha's verdict on the CD-05 visuals: the background looked like "800x600 Amiga
