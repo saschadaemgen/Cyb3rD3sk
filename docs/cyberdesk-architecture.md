@@ -1,6 +1,6 @@
 # CyberDesk - Architecture
 
-Project CARVILON CyberDesk - living document - Status: 2026-07-08 (before CD-01 completion)
+Project CARVILON CyberDesk - living document - Status: 2026-07-08 (Season 1 extended - CD-04 complete)
 Proprietary - Copyright (c) 2026 Sascha Daemgen IT and More Systems. All rights reserved.
 
 ## What CyberDesk is
@@ -26,4 +26,4 @@ Development: Windows 11 (MSVC). Later: Linux appliance. Long-term goal: CARVILON
 
 ## Status
 
-CD-01 complete: shell (winit/wgpu, borderless fullscreen, rotating ring) plus chromeless CEF windowed embed of google.com, verified on the 5120x1440 ultrawide target display. Next: CD-02 (OSR - the page becomes a GPU texture). This document is updated after every season, and mid-season when necessary.
+Season 1 extended (CD-04) complete. CD-01: shell (winit/wgpu, borderless fullscreen, rotating ring) plus a chromeless CEF windowed embed of google.com. CD-02: off-screen rendering - the page becomes a wgpu texture composited inside our own frame (CPU path; accelerated path researched, D-0009). CD-03: feathered surf-zone edges, the procedural Deep Field background, and a web-isolated `cyberdesk://` settings view over a message-router IPC bridge (D-0010). CD-04: free surfing - a `Ctrl+L` command bar (host-side URL-vs-search), history navigation (Alt+arrows, mouse buttons 4/5, F5 / Ctrl+R / Ctrl+Shift+R), a gesture-aware popup policy (D-0011), a loading line, and a tier-1 foreground guard. Next: Season 2 (zone layout and the Edit Mode grid). This document is updated after every season, and mid-season when necessary.

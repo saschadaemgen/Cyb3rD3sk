@@ -39,6 +39,48 @@ Transport: `window.cefQuery({ request, persistent: false, onSuccess, onFailure }
 
 Unknown commands are rejected with code 4. There is no passthrough channel.
 
+## Command bar / navigation IPC (CD-04, live)
+
+The command bar view (`cyberdesk://command/`) drives the surf zone's navigation
+over the same message-router bridge as the settings view (`window.cefQuery`,
+process messages only, registered on `cyberdesk://` contexts only). Every command
+here targets the surf view (`Role::Surf`); the internal views are never navigated
+through this channel. Error codes share the single space defined above (1 =
+malformed request JSON, 2 = missing/wrong-typed field, 4 = unknown `cmd`).
+
+### `get_nav_state` (view -> host)
+
+- Request: `{"cmd":"get_nav_state"}`
+- Success: `{"url":<str>,"title":<str>,"can_back":<bool>,"can_forward":<bool>,"loading":<bool>,"scheme":<str>}`
+  - `scheme` ∈ { `https`, `http`, `other` }, derived host-side from `url`. The
+    command bar paints the amber "insecure" hint when `scheme == "http"`.
+- Failure: code 1 (malformed request JSON).
+
+### `navigate` (view -> host)
+
+- Request: `{"cmd":"navigate","input":"<str>"}`
+- `input` is the raw command-bar text; the host classifies it (URL vs. search):
+  - contains `://` -> used verbatim (an explicit `http://` stays http)
+  - `localhost` (optionally `:port`/`/path`), or a dot with no whitespace ->
+    `https://<input>`
+  - empty -> `about:blank`
+  - otherwise -> `https://www.google.com/search?q=<urlencoded>`
+- Effect: loads the resolved URL in the surf view and closes the command overlay.
+- Success: `{"ok":true,"url":"<resolved-url>"}`
+- Failure: code 1 (malformed request), 2 (missing `input`).
+
+### `go_back` / `go_forward` / `reload` (view -> host)
+
+- Request: `{"cmd":"go_back"}` | `{"cmd":"go_forward"}` | `{"cmd":"reload"}`
+- Effect: the surf view steps back / forward in session history, or reloads.
+  Back/forward are no-ops when `can_back` / `can_forward` (from `get_nav_state`)
+  is false.
+- Success: `{"ok":true}`
+- Failure: code 1 (malformed request JSON).
+
+The F5 / Ctrl+R reload and Ctrl+Shift+R hard reload accelerators are handled
+host-side from the shell key map, not over this channel.
+
 ## NetGuard policy (sketch)
 
 - Per zone: allowed destinations (host, port, protocol), optional pinning fingerprint, limits (rate, volume).

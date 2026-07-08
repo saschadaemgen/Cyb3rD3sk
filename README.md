@@ -13,7 +13,7 @@ feathered compositing, and an isolated in-shell settings surface.
 
 ---
 
-## State after CD-03 (Season 1 complete)
+## State after CD-04 (Season 1 extended)
 
 * **Shell:** Borderless fullscreen on the primary monitor, dark background
   (`#04070A`), a slowly rotating CARVILON ring (open arc + hollow inner ring,
@@ -30,12 +30,20 @@ feathered compositing, and an isolated in-shell settings surface.
   that dissolves the page into the Deep Field; toggleable back to the hard
   rounded corner). Mouse and keyboard are forwarded into the page (a Google
   search, clicking, and scrolling all work) and the cursor follows the page.
+* **Free surfing (command bar + history):** `Ctrl+L` summons a command bar over
+  the surf zone; its text is classified host-side as a URL or a Google search.
+  Back / forward / reload and the mouse's forward/back buttons drive the page
+  history, an amber glyph flags a plain-`http://` page, and a loading line traces
+  the top of the zone. Popups follow a gesture-aware policy (D-0011): a real
+  click on a `target=_blank` link navigates the surf view in place, script
+  `window.open` is dropped — no second window ever opens.
 * **Settings:** a gear button (top-right) opens an in-shell settings card — a
   **second, web-isolated OSR view** locked to an internal `cyberdesk://` custom
   scheme (D-0010), served entirely in-process from embedded assets. It can never
-  reach the web (its navigation is confined to `cyberdesk://`). Two toggles
-  (feathered edges, Deep Field) are wired over a CEF message-router IPC bridge
-  (`get_settings` / `set_setting`), applied live and persisted to SQLite.
+  reach the web (its navigation is confined to `cyberdesk://`). Three toggles
+  (feathered edges, Deep Field, and stay-in-foreground) are wired over a CEF
+  message-router IPC bridge (`get_settings` / `set_setting`), applied live and
+  persisted to SQLite.
 * **One token source:** every style value — colors, radii, periods, amplitudes —
   comes from an embedded theme (`src/theme.toml`), resolved both into wgpu shader
   uniforms and into the settings page's CSS custom properties. App state lives in
@@ -100,9 +108,10 @@ cargo run --release
 cargo run --release -- --windowed
 ```
 
-* **`ESC`** quits the application cleanly (or closes the settings card if open).
-* The **gear** button (top-right) opens the settings card; the two toggles apply
-  live and persist across restarts.
+* **`Ctrl+L`** opens the command bar; **`ESC`** closes an open overlay (command
+  bar or settings), otherwise quits. See **Controls** below for the full map.
+* The **gear** button (top-right) opens the settings card; the three toggles
+  apply live and persist across restarts.
 * The first build is slow because CMake+Ninja compile `libcef_dll_wrapper`. The
   CEF runtime files (`libcef.dll`, resources, `locales/`) are copied next to the
   `.exe` in `target/<profile>/` automatically.
@@ -118,31 +127,57 @@ cargo run --release -- --capture ring.png
 
 ---
 
+## Controls
+
+The surf zone behaves like a stripped-down browser with no visible chrome until
+you summon it. All navigation shortcuts act on the surf view.
+
+| Input | Action |
+| --- | --- |
+| `Ctrl+L` | Open the command bar over the surf zone (from any state) |
+| type + `Enter` (in the bar) | Navigate — a scheme, a dotted host, or `localhost` loads as a URL (default `https://`); anything else becomes a Google search |
+| `Alt+←` / `Alt+→` | History back / forward |
+| Mouse button 4 / 5 | History back / forward |
+| `F5` / `Ctrl+R` | Reload |
+| `Ctrl+Shift+R` | Hard reload (ignore cache) |
+| `ESC` | Close the command bar or settings card if open, otherwise quit |
+
+An amber glyph in the command bar marks a page served over plain `http://`
+(e.g. `neverssl.com`, which stays http by design); `https` and internal pages
+show no warning. The **gear** (top-right) opens the settings card with three
+live, persisted toggles: **feathered edges**, **Deep Field** background, and
+**stay in foreground** (keep the fullscreen shell above other windows; always
+off in `--windowed` dev mode).
+
+---
+
 ## Project layout
 
 ```
 cyberdesk/
 ├─ src/
 │  ├─ main.rs        # entry point, CLI, process model
-│  ├─ app.rs         # winit event loop, window, input routing, gear, ESC
+│  ├─ app.rs         # winit event loop, window, input routing, nav keys, foreground guard
 │  ├─ renderer.rs    # wgpu renderer: shell + page/panel compositing, capture
-│  ├─ browser.rs     # CEF OSR (two views), custom scheme, isolation, IPC
+│  ├─ browser.rs     # CEF OSR (two views), custom scheme, isolation, settings + nav IPC
 │  ├─ theme.rs       # theme tokens -> shader uniforms + settings CSS vars
 │  ├─ theme.toml     # the embedded "cyber" token set (single style source)
 │  ├─ store.rs       # schema-versioned SQLite app-state store
 │  ├─ settings.rs    # live settings state (owns the store) shared with the IPC
 │  ├─ settings.html/.css/.js   # embedded internal settings page assets
+│  ├─ command.html/.css/.js    # embedded command-bar page assets
 │  ├─ ring.wgsl      # background + CARVILON ring
 │  ├─ deepfield.wgsl # procedural Deep Field background   ·  blit.wgsl (upscale)
 │  ├─ page.wgsl      # surf-zone page / settings panel compositing (feathering)
+│  ├─ loading.wgsl   # surf-zone loading line
 │  └─ gear.wgsl      # settings gear button
 ├─ scripts/
 │  └─ fetch-cef.ps1  # downloads the pinned CEF version into vendor/cef/
 ├─ docs/                          # living project documents (English)
 │  ├─ cyberdesk-architecture.md
-│  ├─ cyberdesk-decisions.md      # D-0001 … D-0010
+│  ├─ cyberdesk-decisions.md      # D-0001 … D-0011
 │  ├─ cyberdesk-security.md
-│  ├─ cyberdesk-wire-format.md    # settings IPC schema
+│  ├─ cyberdesk-wire-format.md    # settings + navigation IPC schema
 │  ├─ cyberdesk-feature-backlog.md
 │  └─ cyberdesk-roadmap.txt
 ├─ .cargo/config.toml

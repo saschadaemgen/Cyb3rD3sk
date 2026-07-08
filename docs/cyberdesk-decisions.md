@@ -2,6 +2,30 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0011 - 2026-07-08 - CD-04: gesture-aware popup policy
+
+The surf view's `LifeSpanHandler::on_before_popup` always returns `1` — no
+separate browser window is ever created. When the popup carries a genuine user
+gesture (`user_gesture != 0`) and the source is the surf zone, the target URL is
+loaded into the surf view's **own main frame**; popups without a user gesture are
+suppressed outright.
+
+**Why the user gesture is the discriminator.** Two earlier extremes both failed:
+
+- CD-01 navigated the surf view on *any* popup. A foreign session's ad/script
+  `window.open` then hijacked the view (the foreign-session ad hijack).
+- CD-02/03 suppressed *all* popups. That killed legitimate `target=_blank` links
+  and click-to-open flows — clicking such a link did nothing.
+
+CEF's `user_gesture` flag cleanly separates the two: a real click that opens a
+link is a gesture; an ad/script `window.open` fired from a timer or load handler
+is not. So gesture -> navigate in place; no gesture -> drop. Either way no new
+window opens, which also preserves the single-surface shell model.
+
+**Scope.** The navigate-on-gesture branch is gated on `Role::Surf`. The internal
+views are already navigation-isolated (D-0010) and never spawn popups; the return
+value still suppresses any window unconditionally.
+
 ## D-0010 - 2026-07-08 - CD-03: internal view uses a `cyberdesk://` custom scheme
 
 The settings view is a second OSR browser locked to a registered custom scheme,
