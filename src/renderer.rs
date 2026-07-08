@@ -26,6 +26,32 @@ struct RingUniforms {
     resolution: [f32; 2],
     time: f32,
     is_srgb: u32,
+    bg: [f32; 4],
+    brand: [f32; 4],
+    geom: [f32; 4],  // radius, stroke, gap_half_rad, rotation_speed
+    inner: [f32; 4], // inner_radius, inner_stroke, glow, _pad
+}
+
+impl RingUniforms {
+    fn from_theme(theme: &crate::theme::Theme, resolution: [f32; 2], time: f32, is_srgb: u32) -> Self {
+        let c = &theme.colors;
+        let r = &theme.ring;
+        let rgb4 = |v: [f32; 3]| [v[0], v[1], v[2], 1.0];
+        Self {
+            resolution,
+            time,
+            is_srgb,
+            bg: rgb4(c.background_rgb()),
+            brand: rgb4(c.brand_rgb()),
+            geom: [
+                r.radius,
+                r.stroke,
+                r.gap_degrees.to_radians(),
+                theme.ring_rotation_speed(),
+            ],
+            inner: [r.inner_radius, r.inner_stroke, r.glow, 0.0],
+        }
+    }
 }
 
 #[repr(C)]
@@ -301,10 +327,11 @@ pub struct SurfaceRenderer {
     ring_uniform_buf: wgpu::Buffer,
     ring_bind_group: wgpu::BindGroup,
     page: PagePass,
+    theme: crate::theme::Theme,
 }
 
 impl SurfaceRenderer {
-    pub fn new(window: Arc<Window>) -> Self {
+    pub fn new(window: Arc<Window>, theme: crate::theme::Theme) -> Self {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
@@ -350,6 +377,7 @@ impl SurfaceRenderer {
             ring_uniform_buf,
             ring_bind_group,
             page,
+            theme,
         }
     }
 
@@ -371,16 +399,15 @@ impl SurfaceRenderer {
     }
 
     /// Render one frame. `zone` is the surf-zone rect in device pixels
-    /// (x, y, w, h); `corner_radius` is in device pixels.
-    pub fn render(&mut self, time: f32, zone: (f32, f32, f32, f32), corner_radius: f32) {
+    /// (x, y, w, h). `feather` and `deep_field` are the live settings toggles
+    /// (consumed by the page feathering in Stage C and the background in Stage B).
+    pub fn render(&mut self, time: f32, zone: (f32, f32, f32, f32), feather: bool, deep_field: bool) {
+        let _ = (feather, deep_field); // wired now; consumed in CD-03 Stage B/C
         let (win_w, win_h) = (self.config.width as f32, self.config.height as f32);
+        let corner_radius = self.theme.page.corner_radius;
 
-        // Ring uniforms.
-        let ring = RingUniforms {
-            resolution: [win_w, win_h],
-            time,
-            is_srgb: 0,
-        };
+        // Ring uniforms (all values from theme tokens).
+        let ring = RingUniforms::from_theme(&self.theme, [win_w, win_h], time, 0);
         self.queue
             .write_buffer(&self.ring_uniform_buf, 0, bytemuck::bytes_of(&ring));
 
@@ -457,7 +484,7 @@ impl SurfaceRenderer {
 
 /// Render a single ring frame off-screen to a PNG (headless self-test; renders
 /// the shell only, no CEF).
-pub fn capture(path: &str, width: u32, height: u32, time: f32) {
+pub fn capture(path: &str, width: u32, height: u32, time: f32, theme: &crate::theme::Theme) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
@@ -478,11 +505,8 @@ pub fn capture(path: &str, width: u32, height: u32, time: f32) {
 
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let (pipeline, uniform_buf, bind_group) = ring_pipeline(&device, format);
-    let ring = RingUniforms {
-        resolution: [width as f32, height as f32],
-        time,
-        is_srgb: 0,
-    };
+    // sRGB target: convert the token sRGB values to linear in-shader.
+    let ring = RingUniforms::from_theme(theme, [width as f32, height as f32], time, 1);
     queue.write_buffer(&uniform_buf, 0, bytemuck::bytes_of(&ring));
 
     let texture = device.create_texture(&wgpu::TextureDescriptor {

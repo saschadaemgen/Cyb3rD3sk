@@ -1,0 +1,42 @@
+# CARVILON CyberDesk — the "cyber" template.
+#
+# Templates are DATA, not code. Every style value (color, radius, period,
+# amplitude) in the shell lives here and is resolved into wgpu uniforms and the
+# settings page's CSS custom properties from this single source. Nothing
+# style-related is hardcoded in shaders or Rust.
+
+name = "cyber"
+
+[colors]
+background   = "#04070A"  # base dark
+brand        = "#009FE3"  # CARVILON blue
+panel        = "#080D14"  # settings surface
+panel_border = "#123246"
+text         = "#DCE9F2"
+text_dim     = "#7C9CB4"
+accent       = "#009FE3"
+
+[ring]
+radius          = 0.40   # fraction of min viewport dimension
+stroke          = 0.010  # fraction of min dimension
+gap_degrees     = 32.0   # opening of the arc
+rotation_period = 22.4   # seconds per full rotation
+inner_radius    = 0.058
+inner_stroke    = 0.0072
+glow            = 0.22    # relative glow intensity
+
+[page]
+corner_radius = 16.0  # device px (also the OFF-state hard corner)
+feather_width = 34.0  # device px, edge softness in the ON state
+
+[deep_field]
+breathing_period    = 12.0  # s, base glow "breathing"
+breathing_amplitude = 0.07  # brightness delta (<= 0.08)
+nebula_a_period     = 42.0  # s, drifting gradient A
+nebula_b_period     = 57.0  # s, drifting gradient B
+nebula_amplitude    = 0.06
+dust_amplitude      = 0.05  # dust brightness
+dust_twinkle_period = 6.0   # s
+sweep_period_min    = 45.0  # s, rare scan sweep window
+sweep_period_max    = 90.0
+sweep_amplitude     = 0.06

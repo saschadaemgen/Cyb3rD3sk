@@ -12,6 +12,8 @@
 mod app;
 mod browser;
 mod renderer;
+mod store;
+mod theme;
 
 use std::process::ExitCode;
 
@@ -64,7 +66,7 @@ fn main() -> ExitCode {
 
     if let Some(path) = capture {
         // A representative moment in the rotation (gap off the vertical axis).
-        renderer::capture(&path, 1600, 900, 3.0);
+        renderer::capture(&path, 1600, 900, 3.0, &theme::Theme::load());
         println!("wrote {path}");
         return ExitCode::SUCCESS;
     }

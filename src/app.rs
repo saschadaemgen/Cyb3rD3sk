@@ -13,10 +13,8 @@ use winit::window::{CursorIcon, Fullscreen, Window, WindowId};
 
 use crate::browser;
 use crate::renderer::SurfaceRenderer;
-
-/// Rounded-corner radius for the page (device pixels) — Stage C compositing
-/// effect proving per-pixel control over the page texture.
-const PAGE_CORNER_RADIUS: f32 = 16.0;
+use crate::store::Store;
+use crate::theme::Theme;
 
 /// Surf-zone rectangle in device pixels: 60% width, 70% height, centered.
 fn zone_rect(width: u32, height: u32) -> (f32, f32, f32, f32) {
@@ -32,6 +30,10 @@ pub fn run(windowed: bool) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
 
+    let store = Store::open();
+    let feather_edges = store.get_bool("feather_edges", true);
+    let deep_field = store.get_bool("deep_field", true);
+
     let mut app = Shell {
         windowed,
         window: None,
@@ -44,7 +46,12 @@ pub fn run(windowed: bool) {
         key_mods: 0,
         button_flags: 0,
         applied_cursor: CursorIcon::Default,
+        feather_edges,
+        deep_field,
     };
+    // The store is created and seeded here (state.db). The settings IPC in
+    // Stage D takes ownership of it for live writes.
+    drop(store);
     event_loop.run_app(&mut app).expect("event loop error");
 
     browser::shutdown_cef();
@@ -62,6 +69,8 @@ struct Shell {
     key_mods: u32,
     button_flags: u32,
     applied_cursor: CursorIcon,
+    feather_edges: bool,
+    deep_field: bool,
 }
 
 fn window_hwnd(window: &Window) -> isize {
@@ -156,7 +165,7 @@ impl ApplicationHandler for Shell {
                 .expect("failed to create window"),
         );
         self.scale = window.scale_factor() as f32;
-        let renderer = SurfaceRenderer::new(window.clone());
+        let renderer = SurfaceRenderer::new(window.clone(), Theme::load());
         self.window = Some(window);
         self.renderer = Some(renderer);
 
@@ -255,7 +264,7 @@ impl ApplicationHandler for Shell {
                 if let Some(r) = self.renderer.as_mut() {
                     let (w, h) = r.size();
                     let zone = zone_rect(w, h);
-                    r.render(time, zone, PAGE_CORNER_RADIUS);
+                    r.render(time, zone, self.feather_edges, self.deep_field);
                 }
             }
 
