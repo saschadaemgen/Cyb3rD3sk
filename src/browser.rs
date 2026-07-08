@@ -172,6 +172,12 @@ pub fn surf_url() -> String {
     surf_nav().lock().unwrap().url.clone()
 }
 
+/// Toggle the favorite state of the current surf page (Ctrl+D from the surf
+/// view). Returns the new state; internal/blank URLs are ignored (memory.rs).
+pub fn toggle_current_favorite() -> bool {
+    crate::memory::toggle_favorite(&surf_url(), &surf_title())
+}
+
 // --- Process / lifecycle ----------------------------------------------------
 
 /// Must be the first thing `main` does. Binds the CEF API version and runs the
@@ -543,6 +549,7 @@ fn nav_state_json() -> String {
         "can_forward": surf_can_forward(),
         "loading": surf_loading(),
         "scheme": scheme,
+        "favorite": crate::memory::is_favorite(&url),
     })
     .to_string()
 }
@@ -601,6 +608,18 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
         "reload" => {
             reload(Role::Surf);
             Ok(serde_json::json!({ "ok": true }).to_string())
+        }
+        // Favorites (CD-07). Toggles the favorite state of an explicit URL — used
+        // by the star glyph in the command bar; the surf-view Ctrl+D toggles
+        // host-side (see `toggle_current_favorite`).
+        "toggle_favorite" => {
+            let url = v
+                .get("url")
+                .and_then(|x| x.as_str())
+                .ok_or((2, "missing 'url'".to_string()))?;
+            let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("");
+            let favorite = crate::memory::toggle_favorite(url, title);
+            Ok(serde_json::json!({ "favorite": favorite }).to_string())
         }
         other => Err((4, format!("unknown cmd: {other}"))),
     }
@@ -820,13 +839,32 @@ wrap_display_handler! {
             url: Option<&CefString>,
         ) {
             if self.role == Role::Surf {
-                surf_nav().lock().unwrap().url = url.map(|u| u.to_string()).unwrap_or_default();
+                let new_url = url.map(|u| u.to_string()).unwrap_or_default();
+                // Record a visit only when the address actually changes, so the
+                // repeated address-change events one navigation can emit don't
+                // over-count. The title arrives later (on_title_change), so this
+                // records with an empty title and lets that update fill it in.
+                let changed = {
+                    let mut nav = surf_nav().lock().unwrap();
+                    let changed = nav.url != new_url;
+                    nav.url = new_url.clone();
+                    changed
+                };
+                if changed {
+                    crate::memory::record_visit(&new_url, "");
+                }
             }
         }
 
         fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
             if self.role == Role::Surf {
-                surf_nav().lock().unwrap().title = title.map(|t| t.to_string()).unwrap_or_default();
+                let new_title = title.map(|t| t.to_string()).unwrap_or_default();
+                let url = {
+                    let mut nav = surf_nav().lock().unwrap();
+                    nav.title = new_title.clone();
+                    nav.url.clone()
+                };
+                crate::memory::update_title(&url, &new_title);
             }
         }
     }

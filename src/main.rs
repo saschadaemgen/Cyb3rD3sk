@@ -11,6 +11,7 @@
 
 mod app;
 mod browser;
+mod memory;
 mod pulsegrid;
 mod renderer;
 mod settings;

@@ -7,15 +7,15 @@
 //! lock-free atomics so the render loop can read them every frame without
 //! touching SQLite.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 use crate::store::Store;
 
-/// The persisted key/value store (owned for the process lifetime).
+/// The persisted key/value store (shared process-wide with the history/favorites
+/// layer — see [`crate::store::shared`]).
 fn store() -> &'static Mutex<Store> {
-    static S: OnceLock<Mutex<Store>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(Store::open()))
+    crate::store::shared()
 }
 
 static FEATHER_EDGES: AtomicBool = AtomicBool::new(true);

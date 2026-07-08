@@ -425,6 +425,17 @@ impl ApplicationHandler for Shell {
                     self.set_overlay(Overlay::Command);
                     return;
                 }
+                // Ctrl+D toggles the current surf page's favorite. Handled host-
+                // side only while the surf view is active; when the command bar
+                // is open the page owns the shortcut and updates its star live.
+                if event.state == ElementState::Pressed
+                    && self.mods.control_key()
+                    && event.physical_key == PhysicalKey::Code(KeyCode::KeyD)
+                    && self.overlay == Overlay::Closed
+                {
+                    browser::toggle_current_favorite();
+                    return;
+                }
                 // ESC chain: command bar / settings first, then quit the shell.
                 if vk == 0x1B && event.state == ElementState::Pressed {
                     if self.overlay != Overlay::Closed {

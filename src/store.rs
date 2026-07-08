@@ -1,21 +1,42 @@
 //! Persistent application state (SQLite via rusqlite).
 //!
 //! A schema-versioned `settings` key/value table plus a `meta` table holding the
-//! selected `template` (only value: "cyber"). Lives in the OS app-data
-//! directory, never in the repo.
+//! selected `template` (only value: "cyber"). CD-07 (D-0014) adds the `history`
+//! and `favorites` tables — the local memory behind the command palette. Lives
+//! in the OS app-data directory, never in the repo.
 
-// The full store API is defined in Stage A; the get/set/all_settings/template
-// methods are consumed by the settings IPC in Stage D.
+// Some store methods are consumed only by specific IPC paths (settings, memory);
+// keep the surface complete even where a given build doesn't touch every method.
 #![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+
+/// History is capped at this many rows; the oldest are pruned on each insert
+/// (D-0014). Local only — no sync, no export.
+const HISTORY_CAP: i64 = 10_000;
+
+/// One command-palette suggestion row: a favorite or a history entry.
+pub struct Suggestion {
+    pub url: String,
+    pub title: String,
+    pub favorite: bool,
+}
 
 pub struct Store {
     conn: Connection,
+}
+
+/// The process-wide store, opened on first use. The settings IPC (settings.rs)
+/// and the history/favorites layer (memory.rs) share this one connection behind
+/// a single Mutex — one `state.db`, one lock.
+pub fn shared() -> &'static Mutex<Store> {
+    static S: OnceLock<Mutex<Store>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(Store::open()))
 }
 
 fn data_dir() -> PathBuf {
@@ -55,6 +76,29 @@ impl Store {
                      );",
                 )
                 .expect("failed to create schema");
+        }
+        if version < 2 {
+            // CD-07 (D-0014): local history + favorites. `url` is the identity in
+            // both tables (upsert on revisit / re-favorite); history is capped at
+            // HISTORY_CAP rows, favorites keep an explicit order via `position`.
+            self.conn
+                .execute_batch(
+                    "CREATE TABLE IF NOT EXISTS history (
+                         url         TEXT PRIMARY KEY,
+                         title       TEXT NOT NULL DEFAULT '',
+                         last_visit  INTEGER NOT NULL,
+                         visit_count INTEGER NOT NULL DEFAULT 1
+                     );
+                     CREATE INDEX IF NOT EXISTS idx_history_last_visit
+                         ON history (last_visit);
+                     CREATE TABLE IF NOT EXISTS favorites (
+                         url      TEXT PRIMARY KEY,
+                         title    TEXT NOT NULL DEFAULT '',
+                         added_at INTEGER NOT NULL,
+                         position INTEGER NOT NULL
+                     );",
+                )
+                .expect("failed to migrate to schema v2 (history + favorites)");
         }
         self.conn
             .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -134,5 +178,86 @@ impl Store {
             out.extend(rows.filter_map(Result::ok));
         }
         out
+    }
+
+    // --- History (D-0014) ---------------------------------------------------
+
+    /// Record a visit to `url`: insert a new row, or bump the existing row's
+    /// `visit_count` and `last_visit`. A non-empty `title` refreshes the stored
+    /// one; an empty title (address change before the page's title arrives) is
+    /// left untouched. Prunes the oldest rows past the cap afterwards.
+    pub fn record_visit(&self, url: &str, title: &str) {
+        self.conn
+            .execute(
+                "INSERT INTO history (url, title, last_visit, visit_count)
+                 VALUES (?1, ?2, CAST(strftime('%s','now') AS INTEGER), 1)
+                 ON CONFLICT(url) DO UPDATE SET
+                     last_visit  = CAST(strftime('%s','now') AS INTEGER),
+                     visit_count = visit_count + 1,
+                     title       = CASE WHEN excluded.title <> ''
+                                        THEN excluded.title ELSE history.title END",
+                (url, title),
+            )
+            .ok();
+        self.prune_history();
+    }
+
+    /// Refresh the stored title of an existing history row without bumping the
+    /// visit count (the page title usually arrives after the address commit).
+    pub fn update_history_title(&self, url: &str, title: &str) {
+        self.conn
+            .execute("UPDATE history SET title = ?2 WHERE url = ?1", (url, title))
+            .ok();
+    }
+
+    /// Drop the least-recently-visited rows beyond `HISTORY_CAP`.
+    fn prune_history(&self) {
+        self.conn
+            .execute(
+                "DELETE FROM history WHERE url IN (
+                     SELECT url FROM history
+                     ORDER BY last_visit DESC, rowid DESC
+                     LIMIT -1 OFFSET ?1
+                 )",
+                [HISTORY_CAP],
+            )
+            .ok();
+    }
+
+    // --- Favorites (D-0014) -------------------------------------------------
+
+    /// Is `url` a favorite?
+    pub fn is_favorite(&self, url: &str) -> bool {
+        self.conn
+            .query_row("SELECT 1 FROM favorites WHERE url = ?1", [url], |_| Ok(()))
+            .is_ok()
+    }
+
+    /// Toggle `url`'s favorite state; returns the new state (true = now a
+    /// favorite). New favorites append at the end of the ordered list.
+    pub fn toggle_favorite(&self, url: &str, title: &str) -> bool {
+        if self.is_favorite(url) {
+            self.conn
+                .execute("DELETE FROM favorites WHERE url = ?1", [url])
+                .ok();
+            false
+        } else {
+            let position: i64 = self
+                .conn
+                .query_row(
+                    "SELECT COALESCE(MAX(position), -1) + 1 FROM favorites",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            self.conn
+                .execute(
+                    "INSERT INTO favorites (url, title, added_at, position)
+                     VALUES (?1, ?2, CAST(strftime('%s','now') AS INTEGER), ?3)",
+                    (url, title, position),
+                )
+                .ok();
+            true
+        }
     }
 }

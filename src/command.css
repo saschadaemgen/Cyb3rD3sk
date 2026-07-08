@@ -71,3 +71,10 @@ html, body {
   border-color: var(--brand);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand) 30%, transparent);
 }
+
+/* Favorite star: hollow (text-dim) when not favorited, filled brand when it is.
+   Reflects the current surf page; the click and Ctrl+D toggle it live. */
+.star { flex: none; }
+.star .star-path { transition: fill 120ms ease; }
+.glyph.star.on { color: var(--brand); }
+.glyph.star.on .star-path { fill: currentColor; }
