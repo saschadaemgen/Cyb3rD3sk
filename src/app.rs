@@ -46,11 +46,26 @@ fn gear_geom(width: u32, scale: f32) -> (f32, f32, f32) {
     (w - margin - r, margin + r, r)
 }
 
-/// Command-bar rectangle in device pixels: a centered strip in the upper third.
-fn command_rect(width: u32, height: u32, scale: f32) -> (f32, f32, f32, f32) {
+/// Command-palette rectangle in device pixels: a centered strip in the upper
+/// third, sized to `input bar + N suggestion rows`. The dimensions come from the
+/// theme (D-0014), so this and the page CSS stay in lockstep as the palette
+/// grows and shrinks with the live suggestion count.
+fn command_rect(
+    width: u32,
+    height: u32,
+    scale: f32,
+    rows: usize,
+    cmd: &crate::theme::Command,
+) -> (f32, f32, f32, f32) {
     let (w, h) = (width as f32, height as f32);
     let pw = (w * 0.5).clamp(560.0, 960.0).min(w);
-    let ph = (76.0 * scale).min(h);
+    let input_h = cmd.input_height * scale;
+    let list_h = if rows > 0 {
+        (rows as f32 * cmd.row_height + 2.0 * cmd.list_pad) * scale
+    } else {
+        0.0
+    };
+    let ph = (input_h + list_h).min(h);
     let px = ((w - pw) * 0.5).round();
     let py = (h * 0.20).round();
     (px, py, pw.round(), ph.round())
@@ -93,6 +108,7 @@ pub fn run(windowed: bool) {
         applied_title: String::new(),
         applied_topmost: false,
         isolation_tested: false,
+        applied_command_rows: 0,
     };
     event_loop.run_app(&mut app).expect("event loop error");
 
@@ -120,6 +136,9 @@ struct Shell {
     applied_title: String,
     applied_topmost: bool,
     isolation_tested: bool,
+    /// Suggestion-row count the palette view is currently sized for (drives the
+    /// resize in `about_to_wait`).
+    applied_command_rows: usize,
 }
 
 fn window_hwnd(window: &Window) -> isize {
@@ -180,7 +199,9 @@ impl Shell {
     /// The internal view's rectangle (device px) for the current overlay.
     fn internal_rect(&self, w: u32, h: u32) -> (f32, f32, f32, f32) {
         match self.overlay {
-            Overlay::Command => command_rect(w, h, self.scale),
+            Overlay::Command => {
+                command_rect(w, h, self.scale, browser::command_rows(), &self.theme.command)
+            }
             _ => panel_rect(w, h),
         }
     }
@@ -216,6 +237,11 @@ impl Shell {
     /// move keyboard focus accordingly. Closed <-> Settings <-> Command.
     fn set_overlay(&mut self, next: Overlay) {
         self.overlay = next;
+        // Pre-size the palette to its opening suggestion count so it appears at
+        // the right height instead of resizing a frame later.
+        if next == Overlay::Command {
+            browser::prime_command_rows();
+        }
         // Match the internal OSR view's size to the new overlay before it paints.
         if let Some(r) = self.renderer.as_ref() {
             let (w, h) = r.size();
@@ -223,6 +249,7 @@ impl Shell {
             browser::set_view_geometry(Role::Internal, iw as u32, ih as u32, self.scale);
             browser::notify_resized(Role::Internal);
         }
+        self.applied_command_rows = browser::command_rows();
         match next {
             Overlay::Settings => {
                 browser::show_internal_settings();
@@ -537,6 +564,21 @@ impl ApplicationHandler for Shell {
         // IPC thread).
         if browser::take_overlay_close() {
             self.set_overlay(Overlay::Closed);
+        }
+
+        // Resize the palette when its live suggestion count changes: it grows
+        // and shrinks to fit `input bar + N rows` (favorites + history).
+        if self.overlay == Overlay::Command {
+            let rows = browser::command_rows();
+            if rows != self.applied_command_rows {
+                self.applied_command_rows = rows;
+                if let Some(r) = self.renderer.as_ref() {
+                    let (w, h) = r.size();
+                    let (_, _, iw, ih) = self.internal_rect(w, h);
+                    browser::set_view_geometry(Role::Internal, iw as u32, ih as u32, self.scale);
+                    browser::notify_resized(Role::Internal);
+                }
+            }
         }
 
         // Apply the foreground guard (acts only when the setting changes).

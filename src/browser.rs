@@ -178,6 +178,31 @@ pub fn toggle_current_favorite() -> bool {
     crate::memory::toggle_favorite(&surf_url(), &surf_title())
 }
 
+// --- Command palette sizing (CD-07) -----------------------------------------
+// The palette view is sized to `input bar + N suggestion rows`. The IPC handler
+// stores the live suggestion count here; the main thread reads it to resize the
+// internal view (see app::Shell and `command_rows`).
+static COMMAND_ROWS: AtomicUsize = AtomicUsize::new(0);
+
+/// Max suggestions the palette shows (theme token `command.max_results`, read
+/// once).
+fn command_max_results() -> usize {
+    static M: OnceLock<usize> = OnceLock::new();
+    *M.get_or_init(|| crate::theme::Theme::load().command.max_results.max(0) as usize)
+}
+
+/// Suggestion rows the palette is currently showing (0 = input bar only).
+pub fn command_rows() -> usize {
+    COMMAND_ROWS.load(Ordering::Relaxed)
+}
+
+/// Pre-compute the row count for the palette's opening input (the current surf
+/// URL) so it opens at the right height instead of resizing a frame later.
+pub fn prime_command_rows() {
+    let n = crate::memory::query_suggestions(&surf_url(), command_max_results()).len();
+    COMMAND_ROWS.store(n, Ordering::Relaxed);
+}
+
 // --- Process / lifecycle ----------------------------------------------------
 
 /// Must be the first thing `main` does. Binds the CEF API version and runs the
@@ -608,6 +633,18 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
         "reload" => {
             reload(Role::Surf);
             Ok(serde_json::json!({ "ok": true }).to_string())
+        }
+        // Command palette (CD-07). Live suggestions from favorites + history;
+        // the reply also drives the palette's height (COMMAND_ROWS).
+        "query_suggestions" => {
+            let input = v.get("input").and_then(|x| x.as_str()).unwrap_or("");
+            let suggestions = crate::memory::query_suggestions(input, command_max_results());
+            COMMAND_ROWS.store(suggestions.len(), Ordering::Relaxed);
+            let arr: Vec<serde_json::Value> = suggestions
+                .iter()
+                .map(|s| serde_json::json!({ "url": s.url, "title": s.title, "favorite": s.favorite }))
+                .collect();
+            Ok(serde_json::Value::Array(arr).to_string())
         }
         // Favorites (CD-07). Toggles the favorite state of an explicit URL — used
         // by the star glyph in the command bar; the surf-view Ctrl+D toggles

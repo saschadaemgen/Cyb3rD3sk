@@ -5,7 +5,7 @@
 //! only in the local `state.db` (D-0014) — no sync, no export. Internal
 //! `cyberdesk://` pages and blank navigations never enter either table.
 
-use crate::store;
+use crate::store::{self, Suggestion};
 
 /// URLs that must never be recorded or favorited: the internal scheme and blank
 /// navigations. Only real web pages from the surf view enter history/favorites.
@@ -40,4 +40,10 @@ pub fn is_favorite(url: &str) -> bool {
 /// for internal/blank URLs.
 pub fn toggle_favorite(url: &str, title: &str) -> bool {
     is_recordable(url) && store::shared().lock().unwrap().toggle_favorite(url, title)
+}
+
+/// Command-palette suggestions for `input` (favorites first, then history by
+/// frecency), capped at `limit`. Empty input returns the top favorites.
+pub fn query_suggestions(input: &str, limit: usize) -> Vec<Suggestion> {
+    store::shared().lock().unwrap().query_suggestions(input, limit)
 }

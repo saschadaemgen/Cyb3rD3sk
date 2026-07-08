@@ -260,4 +260,84 @@ impl Store {
             true
         }
     }
+
+    // --- Suggestions (D-0014) -----------------------------------------------
+
+    /// Command-palette suggestions for `input`, capped at `limit`: matching
+    /// favorites first (by their order), then matching history by frecency.
+    /// Empty input returns the top favorites.
+    ///
+    /// Frecency = `visit_count * recency_weight`, where the weight is bucketed
+    /// by the age of the last visit: <1 h → 100, <1 day → 80, <1 week → 60,
+    /// <30 days → 40, else → 20. Deliberately simple and honest; favorites
+    /// always outrank history (D-0014). Matching is a case-insensitive substring
+    /// on url + title.
+    pub fn query_suggestions(&self, input: &str, limit: usize) -> Vec<Suggestion> {
+        let mut out: Vec<Suggestion> = Vec::new();
+        let trimmed = input.trim();
+
+        if trimmed.is_empty() {
+            // Empty input: the top favorites in their explicit order.
+            if let Ok(mut stmt) = self
+                .conn
+                .prepare("SELECT url, title FROM favorites ORDER BY position ASC LIMIT ?1")
+                && let Ok(rows) = stmt.query_map([limit as i64], |r| {
+                    Ok(Suggestion { url: r.get(0)?, title: r.get(1)?, favorite: true })
+                })
+            {
+                out.extend(rows.filter_map(Result::ok));
+            }
+            return out;
+        }
+
+        let pattern = format!("%{}%", like_escape(&trimmed.to_lowercase()));
+
+        // Matching favorites first (their order).
+        if let Ok(mut stmt) = self.conn.prepare(
+            "SELECT url, title FROM favorites
+             WHERE lower(url) LIKE ?1 ESCAPE '\\' OR lower(title) LIKE ?1 ESCAPE '\\'
+             ORDER BY position ASC LIMIT ?2",
+        ) && let Ok(rows) = stmt.query_map((pattern.as_str(), limit as i64), |r| {
+            Ok(Suggestion { url: r.get(0)?, title: r.get(1)?, favorite: true })
+        }) {
+            out.extend(rows.filter_map(Result::ok));
+        }
+
+        // Then matching history by frecency, excluding anything already a favorite.
+        let remaining = limit.saturating_sub(out.len());
+        if remaining > 0
+            && let Ok(mut stmt) = self.conn.prepare(
+                "SELECT url, title FROM history
+                 WHERE (lower(url) LIKE ?1 ESCAPE '\\' OR lower(title) LIKE ?1 ESCAPE '\\')
+                   AND url NOT IN (SELECT url FROM favorites)
+                 ORDER BY (visit_count * CASE
+                       WHEN (CAST(strftime('%s','now') AS INTEGER) - last_visit) < 3600    THEN 100
+                       WHEN (CAST(strftime('%s','now') AS INTEGER) - last_visit) < 86400   THEN 80
+                       WHEN (CAST(strftime('%s','now') AS INTEGER) - last_visit) < 604800  THEN 60
+                       WHEN (CAST(strftime('%s','now') AS INTEGER) - last_visit) < 2592000 THEN 40
+                       ELSE 20 END) DESC, last_visit DESC
+                 LIMIT ?2",
+            )
+            && let Ok(rows) = stmt.query_map((pattern.as_str(), remaining as i64), |r| {
+                Ok(Suggestion { url: r.get(0)?, title: r.get(1)?, favorite: false })
+            })
+        {
+            out.extend(rows.filter_map(Result::ok));
+        }
+
+        out
+    }
+}
+
+/// Escape LIKE wildcards so user input matches literally (paired with `ESCAPE
+/// '\'`), so a typed `%` or `_` doesn't act as a wildcard.
+fn like_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        if c == '\\' || c == '%' || c == '_' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }

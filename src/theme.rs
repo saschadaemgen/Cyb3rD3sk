@@ -20,6 +20,7 @@ pub struct Theme {
     pub page: Page,
     pub deep_field: DeepField,
     pub background: Background,
+    pub command: Command,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -149,6 +150,16 @@ pub struct PulseTokens {
     pub flare_glow: f32,
 }
 
+/// Command palette (CD-07, D-0014). These dimensions are shared between the
+/// page CSS (via [`Theme::to_css_vars`]) and the host-side view sizing.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Command {
+    pub input_height: f32,
+    pub row_height: f32,
+    pub list_pad: f32,
+    pub max_results: i32,
+}
+
 impl Background {
     /// True when the template selects the Pulse Grid (Cyber default); false
     /// routes the render loop to the Deep Field (Calm variant).
@@ -182,6 +193,9 @@ impl Theme {
              \x20 --accent: {accent};\n\
              \x20 --warn: {warn};\n\
              \x20 --corner-radius: {radius}px;\n\
+             \x20 --cmd-input-height: {cmd_input}px;\n\
+             \x20 --cmd-row-height: {cmd_row}px;\n\
+             \x20 --cmd-list-pad: {cmd_pad}px;\n\
              }}\n",
             bg = self.colors.background,
             brand = self.colors.brand,
@@ -192,6 +206,9 @@ impl Theme {
             accent = self.colors.accent,
             warn = self.colors.warn,
             radius = self.page.corner_radius,
+            cmd_input = self.command.input_height,
+            cmd_row = self.command.row_height,
+            cmd_pad = self.command.list_pad,
         )
     }
 }
