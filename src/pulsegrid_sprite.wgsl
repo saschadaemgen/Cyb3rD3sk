@@ -17,10 +17,34 @@ struct Globals {
     base           : vec4<f32>,   // background base color (composite only)
     resolution     : vec2<f32>,   // physical px
     glow_intensity : f32,         // 1.0 for the bake, slider value for the life pass
-    _pad           : f32,
+    zone_shadow    : f32,         // background multiplier under content
+    zone_feather   : f32,         // soft shadow edge width (px)
+    zone_count     : u32,         // active content rects (0 for the bake)
+    _pad           : vec2<f32>,
+    zones          : array<vec4<f32>, 4>,  // content rects (x, y, w, h) in px
 };
 
 @group(0) @binding(0) var<uniform> G : Globals;
+
+// Signed distance to an axis-aligned rect (negative inside).
+fn sd_rect(p : vec2<f32>, center : vec2<f32>, half : vec2<f32>) -> f32 {
+    let q = abs(p - center) - half;
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0);
+}
+
+// Background attenuation at a pixel: 1.0 in the margins, down to zone_shadow
+// under content, with a soft feathered edge straddling each rect boundary.
+fn zone_atten(px : vec2<f32>) -> f32 {
+    var atten = 1.0;
+    let half_feather = max(G.zone_feather * 0.5, 1.0);
+    for (var i = 0u; i < G.zone_count; i = i + 1u) {
+        let z = G.zones[i];
+        let d = sd_rect(px, z.xy + z.zw * 0.5, z.zw * 0.5);
+        let f = smoothstep(-half_feather, half_feather, d);
+        atten = min(atten, mix(G.zone_shadow, 1.0, f));
+    }
+    return atten;
+}
 
 struct VOut {
     @builtin(position) pos    : vec4<f32>,
@@ -105,6 +129,6 @@ fn fs_main(in : VOut) -> @location(0) vec4<f32> {
         cov = 1.0 - smoothstep(in.params.y - aa, in.params.y + aa, e);
     }
 
-    let a = cov * in.color.a * G.glow_intensity;
+    let a = cov * in.color.a * G.glow_intensity * zone_atten(in.pos.xy);
     return vec4<f32>(in.color.rgb * a, a);
 }

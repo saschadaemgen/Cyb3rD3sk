@@ -608,14 +608,20 @@ fn additive_blend() -> wgpu::BlendState {
     wgpu::BlendState { color: add, alpha: add }
 }
 
-/// Composite + life-pass globals (mirrors `Globals` in the shaders).
+/// Composite + life-pass globals (mirrors `Globals` in the shaders). The zone
+/// rects (Stage C) dim the background under content; `vec4` array aligns to 16
+/// bytes (std140), so `_pad` keeps `zones` on a 16-byte boundary.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SpriteGlobals {
     base: [f32; 4],
     resolution: [f32; 2],
     glow_intensity: f32,
-    _pad: f32,
+    zone_shadow: f32,
+    zone_feather: f32,
+    zone_count: u32,
+    _pad: [f32; 2],
+    zones: [[f32; 4]; 4], // up to 4 content rects (x, y, w, h) in physical px
 }
 
 /// Micro-lattice uniforms (mirrors `Lattice` in `pulsegrid_lattice.wgsl`).
@@ -936,6 +942,7 @@ impl PulseGrid {
     /// (Re)generate the board and bake resources when the frame size, DPI scale
     /// or seed changes, then write the live globals for this frame. Returns
     /// whether a bake pass must run (consumed by [`SurfaceRenderer::render`]).
+    #[allow(clippy::too_many_arguments)]
     fn prepare(
         &mut self,
         device: &wgpu::Device,
@@ -946,6 +953,7 @@ impl PulseGrid {
         theme: &crate::theme::Theme,
         base: [f32; 3],
         glow_intensity: f32,
+        zones: &[[f32; 4]],
     ) -> bool {
         let cfg = &theme.background;
         let dirty = self.bake_view.is_none()
@@ -1002,7 +1010,11 @@ impl PulseGrid {
                 base: [base[0], base[1], base[2], 1.0],
                 resolution: [w as f32, h as f32],
                 glow_intensity: 1.0, // bake stores raw glow; composite re-applies intensity
-                _pad: 0.0,
+                zone_shadow: 1.0,    // no zone shadow in the bake (it is raw glow)
+                zone_feather: 0.0,
+                zone_count: 0,
+                _pad: [0.0, 0.0],
+                zones: [[0.0; 4]; 4],
             };
             queue.write_buffer(&self.bake_globals_buf, 0, bytemuck::bytes_of(&bake_globals));
 
@@ -1051,12 +1063,20 @@ impl PulseGrid {
             );
         }
 
-        // Live globals for this frame.
+        // Live globals for this frame (including the content rects that dim the
+        // background beneath them — the zone shadow).
+        let mut zarr = [[0.0f32; 4]; 4];
+        let zc = zones.len().min(4);
+        zarr[..zc].copy_from_slice(&zones[..zc]);
         let globals = SpriteGlobals {
             base: [base[0], base[1], base[2], 1.0],
             resolution: [w as f32, h as f32],
             glow_intensity,
-            _pad: 0.0,
+            zone_shadow: cfg.zone_shadow,
+            zone_feather: (cfg.zone_feather * scale).max(1.0),
+            zone_count: zc as u32,
+            _pad: [0.0, 0.0],
+            zones: zarr,
         };
         queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
 
@@ -1372,6 +1392,14 @@ impl SurfaceRenderer {
         // Pulse Grid: (re)generate + bake on size/scale/seed change, write the
         // live globals. Must run before the frame encoder (creates GPU
         // resources + queues writes).
+        // Zone rects that dim the background (Stage C): always the surf zone,
+        // plus the internal overlay while it is open. Up to 4 are supported.
+        let mut zones: Vec<[f32; 4]> = Vec::with_capacity(2);
+        zones.push([zone.0, zone.1, zone.2, zone.3]);
+        if overlay_open {
+            zones.push([panel.0, panel.1, panel.2, panel.3]);
+        }
+
         let pulse_bake = if do_pulse {
             let bake = self.pulse.prepare(
                 &self.device,
@@ -1382,6 +1410,7 @@ impl SurfaceRenderer {
                 &self.theme,
                 base,
                 glow_intensity,
+                &zones,
             );
             // Advance the pulses/flares and upload this frame's sprites.
             self.pulse.update_life(&self.queue, time, &self.theme);
@@ -1659,7 +1688,17 @@ pub fn capture(path: &str, width: u32, height: u32, time: f32, theme: &crate::th
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(theme.background.glow_default / 100.0);
-        pulse.prepare(&device, &queue, width, height, 1.0, theme, base, glow);
+        // A representative surf-zone rect (60% × 70%, centered) so the zone
+        // shadow is visible in the self-test.
+        let zw = (width as f32 * 0.60).round();
+        let zh = (height as f32 * 0.70).round();
+        let surf = [
+            ((width as f32 - zw) * 0.5).round(),
+            ((height as f32 - zh) * 0.5).round(),
+            zw,
+            zh,
+        ];
+        pulse.prepare(&device, &queue, width, height, 1.0, theme, base, glow, &[surf]);
         // Advance the life sim to a representative animated moment (pulses have
         // travelled, at least one node flare is mid-expansion).
         for i in 1..=32 {
