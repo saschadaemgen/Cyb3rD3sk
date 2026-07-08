@@ -1,0 +1,14 @@
+# Rust build output
+/target
+
+# CEF binaries — fetched via scripts/fetch-cef.ps1, NEVER committed (hundreds of MB)
+/vendor/cef/
+
+# Editor / OS noise
+*.pdb
+*.rs.bk
+Thumbs.db
+.DS_Store
+
+# Local tooling / machine-specific config
+/.claude/

@@ -1,0 +1,22 @@
+[package]
+name = "cyberdesk"
+version = "0.1.0"
+edition = "2024"
+description = "CARVILON CyberDesk — desktop shell (Rust host + CEF)"
+authors = ["Sascha Daemgen IT and More Systems"]
+license-file = "LICENSE"
+publish = false
+
+[[bin]]
+name = "cyberdesk"
+path = "src/main.rs"
+
+[dependencies]
+winit = "0.30"
+wgpu = "30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.release]
+opt-level = 3

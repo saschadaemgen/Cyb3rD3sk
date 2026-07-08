@@ -1,0 +1,22 @@
+CARVILON CyberDesk
+Copyright (c) 2026 Sascha Daemgen IT and More Systems. All rights reserved.
+
+This product is proprietary software. See the LICENSE file for the full terms.
+
+------------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------------
+CyberDesk builds on third-party open-source software. These components are
+fetched at build time and are NOT distributed within this repository:
+
+  * Chromium Embedded Framework (CEF) — BSD 3-Clause License
+    Fetched by scripts/fetch-cef.ps1 into vendor/cef/ (git-ignored).
+    Copyright (c) The Chromium Embedded Framework Authors.
+    Includes components of the Chromium project (Google LLC) and others.
+
+  * Rust crates declared in Cargo.toml / Cargo.lock, each distributed under
+    its own license (predominantly MIT OR Apache-2.0).
+
+All third-party components remain the property of their respective owners and
+are used under their respective licenses. This NOTICE does not grant any
+rights to the proprietary CyberDesk software itself.
