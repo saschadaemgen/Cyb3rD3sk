@@ -82,6 +82,52 @@
       .catch(function (err) { setStatus(String(err), true); });
   });
 
+  // Search-engine select: a custom in-page dropdown (CEF OSR does not paint
+  // native <select> popups — see settings.css / D-0015). Applied live, persisted.
+  var engineSelect = document.getElementById("engine-select");
+  var engineBtn = document.getElementById("engine-btn");
+  var engineMenu = document.getElementById("engine-menu");
+  var engineVal = document.getElementById("engine-val");
+  var ENGINE_LABELS =
+    { google: "Google", duckduckgo: "DuckDuckGo", bing: "Bing", startpage: "Startpage" };
+
+  function paintEngine(value) {
+    var v = ENGINE_LABELS[value] ? value : "google";
+    engineVal.textContent = ENGINE_LABELS[v];
+    var opts = engineMenu.querySelectorAll("li");
+    for (var i = 0; i < opts.length; i++) {
+      opts[i].setAttribute("aria-selected", opts[i].dataset.value === v ? "true" : "false");
+    }
+  }
+
+  function openEngine(open) {
+    engineSelect.classList.toggle("open", open);
+    engineBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    engineMenu.hidden = !open;
+  }
+
+  engineBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    openEngine(!engineSelect.classList.contains("open"));
+  });
+
+  var engineOpts = engineMenu.querySelectorAll("li");
+  for (var i = 0; i < engineOpts.length; i++) {
+    (function (li) {
+      li.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var value = li.dataset.value;
+        paintEngine(value);
+        openEngine(false);
+        query({ cmd: "set_setting", key: "search_engine", value: value })
+          .catch(function (err) { setStatus(String(err), true); });
+      });
+    })(engineOpts[i]);
+  }
+
+  // Click anywhere else closes the menu.
+  document.addEventListener("click", function () { openEngine(false); });
+
   // Load current values on startup.
   query({ cmd: "get_settings" })
     .then(function (response) {
@@ -90,6 +136,7 @@
       paint("animated_background", s.animated_background);
       paint("stay_foreground", s.stay_foreground);
       paintGlow(s.glow_intensity);
+      paintEngine(s.search_engine);
     })
     .catch(function (err) { setStatus(String(err), true); });
 })();

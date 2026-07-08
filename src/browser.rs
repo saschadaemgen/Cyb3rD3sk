@@ -542,9 +542,20 @@ fn urlencode(s: &str) -> String {
     out
 }
 
+/// Build a search URL for `query` using the selected search engine (CD-07).
+fn search_url(query: &str) -> String {
+    let q = urlencode(query);
+    match crate::settings::search_engine() {
+        "duckduckgo" => format!("https://duckduckgo.com/?q={q}"),
+        "bing" => format!("https://www.bing.com/search?q={q}"),
+        "startpage" => format!("https://www.startpage.com/sp/search?query={q}"),
+        _ => format!("https://www.google.com/search?q={q}"),
+    }
+}
+
 /// Host-side URL-vs-search decision. A scheme, or a dot without spaces, or
 /// localhost is treated as a URL (defaulting to https://); everything else
-/// becomes a Google search.
+/// becomes a search on the selected engine (`search_engine` setting).
 fn classify_input(input: &str) -> String {
     let t = input.trim();
     if t.is_empty() {
@@ -559,7 +570,7 @@ fn classify_input(input: &str) -> String {
     if looks_url {
         format!("https://{t}")
     } else {
-        format!("https://www.google.com/search?q={}", urlencode(t))
+        search_url(t)
     }
 }
 
@@ -595,8 +606,14 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
             let value = v
                 .get("value")
                 .ok_or((2, "missing 'value'".to_string()))?;
-            // glow_intensity carries a number (percent); the toggles carry bools.
-            if key == crate::settings::KEY_GLOW_INTENSITY {
+            // search_engine carries a string, glow_intensity a number (percent);
+            // the toggles carry bools.
+            if key == crate::settings::KEY_SEARCH_ENGINE {
+                let s = value
+                    .as_str()
+                    .ok_or((2, "'value' must be a string for search_engine".to_string()))?;
+                crate::settings::set_search_engine(s).map_err(|e| (3, e))
+            } else if key == crate::settings::KEY_GLOW_INTENSITY {
                 let n = value
                     .as_i64()
                     .or_else(|| value.as_f64().map(|f| f.round() as i64))

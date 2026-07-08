@@ -8,7 +8,7 @@
 //! touching SQLite.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use crate::store::Store;
 
@@ -25,6 +25,9 @@ static STAY_FOREGROUND: AtomicBool = AtomicBool::new(true);
 /// the `background.glow_default` token, applied in [`init`]; this literal is
 /// only a pre-init placeholder.
 static GLOW_INTENSITY: AtomicU32 = AtomicU32::new(115);
+/// Search engine for the command-bar search fallback, as a small id (0=google
+/// default, 1=duckduckgo, 2=bing, 3=startpage).
+static SEARCH_ENGINE: AtomicU8 = AtomicU8::new(0);
 
 /// The settings keys the internal view is allowed to read and write. Anything
 /// outside this list is rejected by [`set`] / [`set_glow_intensity`].
@@ -35,10 +38,37 @@ pub const KEY_FEATHER_EDGES: &str = "feather_edges";
 pub const KEY_ANIMATED_BACKGROUND: &str = "animated_background";
 pub const KEY_STAY_FOREGROUND: &str = "stay_foreground";
 pub const KEY_GLOW_INTENSITY: &str = "glow_intensity";
+/// The command-bar search-engine choice (CD-07). One of the ids below.
+pub const KEY_SEARCH_ENGINE: &str = "search_engine";
 
 /// Glow-intensity slider bounds (percent).
 pub const GLOW_MIN: u32 = 50;
 pub const GLOW_MAX: u32 = 220;
+
+/// Map a search-engine id string to its small numeric code (and back). The
+/// allowlist is defined here — anything outside it is rejected.
+fn engine_id(value: &str) -> Option<u8> {
+    match value {
+        "google" => Some(0),
+        "duckduckgo" => Some(1),
+        "bing" => Some(2),
+        "startpage" => Some(3),
+        _ => None,
+    }
+}
+fn engine_name(id: u8) -> &'static str {
+    match id {
+        1 => "duckduckgo",
+        2 => "bing",
+        3 => "startpage",
+        _ => "google",
+    }
+}
+
+/// The selected search engine: `google` | `duckduckgo` | `bing` | `startpage`.
+pub fn search_engine() -> &'static str {
+    engine_name(SEARCH_ENGINE.load(Ordering::Relaxed))
+}
 
 /// Open the store and load the persisted settings into the atomics. Must be
 /// called once on the main thread before CEF starts.
@@ -55,6 +85,8 @@ pub fn init() {
         .unwrap_or(default_glow)
         .clamp(GLOW_MIN, GLOW_MAX);
     GLOW_INTENSITY.store(glow, Ordering::Relaxed);
+    let engine = s.get(KEY_SEARCH_ENGINE).and_then(|v| engine_id(&v)).unwrap_or(0);
+    SEARCH_ENGINE.store(engine, Ordering::Relaxed);
 }
 
 pub fn feather_edges() -> bool {
@@ -82,11 +114,12 @@ pub fn glow_intensity() -> f32 {
 /// Current settings as a JSON object string, for the `get_settings` IPC reply.
 pub fn snapshot_json() -> String {
     format!(
-        "{{\"feather_edges\":{},\"animated_background\":{},\"stay_foreground\":{},\"glow_intensity\":{}}}",
+        "{{\"feather_edges\":{},\"animated_background\":{},\"stay_foreground\":{},\"glow_intensity\":{},\"search_engine\":\"{}\"}}",
         feather_edges(),
         animated_background(),
         stay_foreground(),
-        glow_intensity_percent()
+        glow_intensity_percent(),
+        search_engine()
     )
 }
 
@@ -118,5 +151,16 @@ pub fn set_glow_intensity(percent: i64) -> Result<String, String> {
         .set(KEY_GLOW_INTENSITY, &clamped.to_string());
     Ok(format!(
         "{{\"ok\":true,\"key\":\"{KEY_GLOW_INTENSITY}\",\"value\":{clamped}}}"
+    ))
+}
+
+/// Apply and persist the search-engine setting (validated against the allowlist).
+/// Returns the reply JSON on success, or an error the IPC turns into a failure.
+pub fn set_search_engine(value: &str) -> Result<String, String> {
+    let id = engine_id(value).ok_or_else(|| format!("unknown search engine: {value}"))?;
+    SEARCH_ENGINE.store(id, Ordering::Relaxed);
+    store().lock().unwrap().set(KEY_SEARCH_ENGINE, value);
+    Ok(format!(
+        "{{\"ok\":true,\"key\":\"{KEY_SEARCH_ENGINE}\",\"value\":\"{value}\"}}"
     ))
 }

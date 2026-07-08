@@ -121,6 +121,8 @@ impl Store {
             self.set("animated_background", prev.as_deref().unwrap_or("true"));
         }
         self.set_if_absent("stay_foreground", "true");
+        // CD-07: the command-bar search-engine choice, default Google.
+        self.set_if_absent("search_engine", "google");
         // glow_intensity is seeded lazily from the background.glow_default token
         // in settings::init (kept out of the store until the user changes it).
     }

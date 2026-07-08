@@ -23,6 +23,28 @@
     <section class="rows">
       <div class="row">
         <div class="label">
+          <span class="name">Search engine</span>
+          <span class="hint">Used when the command bar text is not a URL</span>
+        </div>
+        <div class="select" id="engine-select">
+          <button class="select-btn" id="engine-btn" type="button"
+                  aria-haspopup="listbox" aria-expanded="false">
+            <span class="select-val" id="engine-val">Google</span>
+            <svg class="select-chev" viewBox="0 0 24 24" width="16" height="16"><path
+              d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <ul class="select-menu" id="engine-menu" role="listbox" hidden>
+            <li role="option" data-value="google">Google</li>
+            <li role="option" data-value="duckduckgo">DuckDuckGo</li>
+            <li role="option" data-value="bing">Bing</li>
+            <li role="option" data-value="startpage">Startpage</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="label">
           <span class="name">Glow intensity</span>
           <span class="hint">Brightness of the animated background</span>
         </div>
