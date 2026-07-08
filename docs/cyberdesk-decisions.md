@@ -2,6 +2,45 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0009 - 2026-07-08 - CD-02: accelerated OSR researched, CPU path kept for now
+
+CD-02 ships CPU off-screen rendering: `RenderHandler::on_paint` delivers BGRA, we
+upload it into a wgpu texture and composite it. This records the research into the
+accelerated (zero-copy GPU) path and why we stay on CPU for now.
+
+**GPU-process finding (good news).** The CD-01 release-only GPU sub-process crash
+(D-0008c) does NOT occur under OSR. Release OSR runs with a healthy GPU process -
+no STATUS_BREAKPOINT, no SwiftShader fallback. Reworking the presentation path
+(OSR) resolved it. So both the CPU path (verified) and a future accelerated path
+are viable on a working GPU process.
+
+**The accelerated path exists in cef-rs.** Set `shared_texture_enabled` (and
+`external_begin_frame_enabled`) in WindowInfo, handle
+`RenderHandler::on_accelerated_paint` (whose `AcceleratedPaintInfo.shared_texture_handle`
+is a D3D11 shared HANDLE), and `cef::osr_texture_import::SharedTextureHandle::import_texture(&wgpu::Device)`
+imports it via the wgpu-hal DX12 escape hatch (`as_hal::<Dx12>`, open the D3D11
+handle as a D3D12 resource, `texture_from_raw`, `create_texture_from_hal`) - exactly
+the dx12 external-resource path.
+
+**Concrete blocker.** cef-rs's importer (behind the `accelerated_osr` feature) is
+built against **wgpu 29**; CyberDesk uses **wgpu 30**. wgpu `Device`/`Texture`
+types are version-specific, so cef's `import_texture(&wgpu29::Device)` cannot
+consume our wgpu-30 `Device` nor yield a texture usable in our wgpu-30 pipeline,
+and enabling the feature would pull in a second, conflicting wgpu.
+
+**Options.** (a) Replicate cef's ~100-line D3D11 importer against wgpu-30's hal
+(open the shared HANDLE as a D3D12 resource via the `windows` crate, wrap with
+`wgpu::hal::api::Dx12` `texture_from_raw` + `create_texture_from_hal`; enable wgpu's
+dx12 hal feature). Keeps wgpu 30. (b) Pin the whole app to wgpu 29 to use cef's
+helper directly - rejected, it regresses our stack.
+
+**Decision.** Stay on the CPU path for CD-02. It is verified working (release,
+healthy GPU process, sharp DPI text, full mouse/keyboard input, scrolling), and the
+readback cost is acceptable at this stage. The accelerated path is well-scoped for a
+focused follow-up (option a) once feathering (CD-03) makes per-pixel throughput
+matter - a working GPU process under OSR means it will pay off. Documented and
+stopped within the CD-02 time-box.
+
 ## D-0008 - 2026-07-08 - CD-01 reality notes: sandbox deferred, isolated cache, GPU fallback
 
 Three findings from the CD-01 build, recorded honestly. (a) OS sandbox deferred: the app runs with no_sandbox because the cef-rs Windows sandbox requires the bootstrap.exe launcher model, which breaks the plain cargo-run acceptance path. This is a time-boxed deviation from the iron law and D-0006, with a hard re-enablement gate before Season 5/6 (before the browser becomes daily-use and before crypto lands). (b) Isolated browser profile: CEF gets its own root_cache_path - the surf zone never shares state with any user-installed browser. This fixed a real incident where the embed picked up the user's Chrome session, and resolved profile-singleton GPU-process collisions. (c) Release-only GPU subprocess crash (STATUS_BREAKPOINT) with automatic SwiftShader software fallback - page renders correctly. Root-cause work deferred to CD-02, which reworks the entire presentation path (OSR).

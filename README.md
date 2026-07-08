@@ -12,15 +12,21 @@ that CEF works inside the Rust host.
 
 ---
 
-## State after CD-01
+## State after CD-02
 
-* **Stage A — Shell:** Borderless fullscreen on the primary monitor, dark
-  background (`#04070A`), a centered, slowly rotating CARVILON ring (open arc +
-  hollow inner ring, `#009FE3`), vsync. `ESC` quits cleanly. Dev mode via
-  `--windowed` (1600×900).
-* **Stage B — CEF:** A chromeless CEF browser view (bare page surface, no
-  browser UI) is embedded, centered, in the shell window and loads a web page.
-  Popups are suppressed.
+* **Shell:** Borderless fullscreen on the primary monitor, dark background
+  (`#04070A`), a slowly rotating CARVILON ring (open arc + hollow inner ring,
+  `#009FE3`) that frames the surf zone, vsync. `ESC` quits cleanly (from
+  anywhere, even with the page focused). Dev mode via `--windowed` (1600×900).
+* **Surf zone (CEF, off-screen rendering):** CEF renders the page off-screen
+  (`on_paint`); CyberDesk uploads each frame into a wgpu texture and composites
+  it inside its own frame — the page sits centered (~60% × 70%) with the shell
+  (background + ring) visible around it and rounded corners on the page. Mouse
+  and keyboard are forwarded into the page (a Google search, clicking, and
+  scrolling all work) and the cursor follows the page. No child window.
+
+The accelerated (zero-copy GPU) OSR path was researched; CyberDesk stays on the
+CPU path for now — see `docs/cyberdesk-decisions.md` (D-0009).
 
 Target platform: **Windows 11 (x64, MSVC)**. Other platforms are deliberately
 out of scope for this ticket.
@@ -101,14 +107,15 @@ cyberdesk/
 ├─ src/
 │  ├─ main.rs        # entry point, CLI, process model
 │  ├─ app.rs         # winit event loop, window, ESC
-│  ├─ renderer.rs    # wgpu renderer (ring), off-screen capture
+│  ├─ renderer.rs    # wgpu renderer: shell + page compositing, capture
 │  ├─ ring.wgsl      # shader for background + CARVILON ring
-│  └─ browser.rs     # CEF embedding (Stage B)
+│  ├─ page.wgsl      # shader compositing the surf-zone page texture
+│  └─ browser.rs     # CEF off-screen rendering + input forwarding
 ├─ scripts/
 │  └─ fetch-cef.ps1  # downloads the pinned CEF version into vendor/cef/
 ├─ docs/                          # living project documents (English)
 │  ├─ cyberdesk-architecture.md
-│  ├─ cyberdesk-decisions.md      # D-0001 … D-0008
+│  ├─ cyberdesk-decisions.md      # D-0001 … D-0009
 │  ├─ cyberdesk-security.md
 │  ├─ cyberdesk-wire-format.md
 │  ├─ cyberdesk-feature-backlog.md
@@ -128,10 +135,10 @@ cyberdesk/
   `./scripts/fetch-cef.ps1 -Force` again.
 * **Black instead of dark background / no ring:** check the graphics driver;
   wgpu needs a working D3D12 or Vulkan backend adapter.
-* **`GPU process exited unexpectedly` on stderr:** known and harmless — CEF
-  falls back to software rendering (SwiftShader) and the page renders correctly.
-  Details and the fix plan are in `docs/cyberdesk-decisions.md` (D-0008). In the
-  release fullscreen build (no console window) the message is invisible anyway.
+* **`GPU process exited unexpectedly` on stderr:** this was a CD-01 child-window
+  issue; under CD-02's off-screen rendering the GPU process is healthy and the
+  message no longer appears (see `docs/cyberdesk-decisions.md`, D-0009). If it
+  does show, CEF falls back to SwiftShader and the page still renders.
 * **CEF profile/cache:** kept isolated under `target/<profile>/cyberdesk-cache/`
   (git-ignored) — the surf zone deliberately shares no state with a separately
   installed Chrome.
