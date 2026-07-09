@@ -256,10 +256,15 @@ impl Shell {
         }
     }
 
+    /// The live slots' width in units, in display order (CD-10).
+    fn units_in_order(&self) -> Vec<u32> {
+        self.order.iter().map(|&id| self.width_units[id]).collect()
+    }
+
     /// The current slot rectangles (device px, one per live column in display
-    /// order) for a given surface size.
+    /// order) for a given surface size, honoring each slot's width units.
     fn slot_rects_wh(&self, w: u32, h: u32) -> Vec<slots::Rect> {
-        slots::slot_rects(w, h, self.order.len(), self.scale, &self.theme.slots)
+        slots::slot_rects_units(w, h, &self.units_in_order(), self.scale, &self.theme.slots)
     }
 
     /// The display position (index into `order`) of the active slot.
@@ -440,6 +445,37 @@ impl Shell {
         }
         self.push_geometry();
         self.notify_all_resized();
+    }
+
+    /// Swap the active slot with its neighbor (Ctrl+Shift+Left/Right). A pure
+    /// order operation — the active slot keeps its id (and its browser/texture),
+    /// only its display position changes; no browser moves and no view resizes
+    /// (widths are unchanged), so the compositor picks up the new positions next
+    /// frame. A hard swap (no slide animation) — see D-0019. No-op at the edge.
+    fn swap_active(&mut self, dir: i32) {
+        let pos = self.active_position();
+        let target = pos as i32 + dir;
+        if target < 0 || target as usize >= self.order.len() {
+            return;
+        }
+        self.order.swap(pos, target as usize);
+    }
+
+    /// Toggle the active slot between 1 and 2 width units (Ctrl+Shift+D). Doubling
+    /// adds one unit and is a no-op if it would overflow the width capacity;
+    /// halving always works. Only the toggled slot's view resizes (its page
+    /// reflows to the new width); the others merely recenter (CD-10).
+    fn toggle_active_width(&mut self) {
+        let id = self.active_slot;
+        if self.width_units[id] == 2 {
+            self.width_units[id] = 1;
+        } else if self.total_units() < self.capacity() as u32 {
+            self.width_units[id] = 2;
+        } else {
+            return; // doubling would overflow — no-op
+        }
+        self.push_geometry();
+        browser::notify_resized(Role::Slot(id));
     }
 
     /// The internal view's rectangle (device px) for the current overlay: the
@@ -1053,19 +1089,23 @@ impl ApplicationHandler for Shell {
                 // is open the page owns the shortcut and updates its star live.
                 if event.state == ElementState::Pressed
                     && self.mods.control_key()
+                    && !self.mods.shift_key()
                     && event.physical_key == PhysicalKey::Code(KeyCode::KeyD)
                     && self.overlay == Overlay::Closed
                 {
                     browser::toggle_current_favorite();
                     return;
                 }
-                // Slot management (CD-09), intercepted host-side before the page
-                // sees the key: Ctrl+T add, Ctrl+W close, Ctrl+Tab / Ctrl+Shift+Tab
-                // cycle, Ctrl+1..4 focus by position.
+                // Slot management, intercepted host-side before the page sees the
+                // key: Ctrl+T add, Ctrl+W close, Ctrl+Tab / Ctrl+Shift+Tab cycle,
+                // Ctrl+1..4 focus by position (CD-09); Ctrl+Shift+Left/Right swap
+                // the active slot with its neighbor, Ctrl+Shift+D toggle its width
+                // (CD-10).
                 if event.state == ElementState::Pressed
                     && self.mods.control_key()
                     && let PhysicalKey::Code(code) = event.physical_key
                 {
+                    let shift = self.mods.shift_key();
                     match code {
                         KeyCode::KeyT => {
                             self.add_slot();
@@ -1076,7 +1116,19 @@ impl ApplicationHandler for Shell {
                             return;
                         }
                         KeyCode::Tab => {
-                            self.cycle_active(!self.mods.shift_key());
+                            self.cycle_active(!shift);
+                            return;
+                        }
+                        KeyCode::ArrowLeft if shift => {
+                            self.swap_active(-1);
+                            return;
+                        }
+                        KeyCode::ArrowRight if shift => {
+                            self.swap_active(1);
+                            return;
+                        }
+                        KeyCode::KeyD if shift => {
+                            self.toggle_active_width();
                             return;
                         }
                         KeyCode::Digit1 => {

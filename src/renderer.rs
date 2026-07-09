@@ -2008,13 +2008,23 @@ pub fn capture(path: &str, width: u32, height: u32, theme: &crate::theme::Theme)
     // Slot layout for the capture: N placeholder columns (CD-09), so the
     // multi-slot money shot — columns, gutters, glowing margins, zone shadow —
     // can be eyeballed headlessly. `CYBERDESK_CAPTURE_SLOTS=N` (default 1), then
-    // clamped to what fits the width.
-    let want = std::env::var("CYBERDESK_CAPTURE_SLOTS")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .unwrap_or(1);
-    let n = want.clamp(1, crate::slots::max_slots(width, 1.0, &theme.slots));
-    let rects = crate::slots::slot_rects(width, height, n, 1.0, &theme.slots);
+    // clamped to what fits the width. `CYBERDESK_CAPTURE_UNITS=2,1,...` overrides
+    // it with an explicit per-slot width-unit sequence (CD-10 double slots).
+    let units: Vec<u32> = if let Ok(spec) = std::env::var("CYBERDESK_CAPTURE_UNITS") {
+        spec.split(',')
+            .filter_map(|s| s.trim().parse::<u32>().ok().map(|u| u.clamp(1, 2)))
+            .collect()
+    } else {
+        let want = std::env::var("CYBERDESK_CAPTURE_SLOTS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(1);
+        let n = want.clamp(1, crate::slots::max_slots(width, 1.0, &theme.slots));
+        vec![1u32; n]
+    };
+    let units = if units.is_empty() { vec![1u32] } else { units };
+    let rects = crate::slots::slot_rects_units(width, height, &units, 1.0, &theme.slots);
+    let n = rects.len();
     let zones: Vec<[f32; 4]> = rects.iter().map(|r| [r.x, r.y, r.w, r.h]).collect();
 
     let mut pulse = PulseGrid::new(&device, format);

@@ -52,26 +52,50 @@ pub fn max_slots(width_px: u32, scale: f32, t: &Slots) -> usize {
     n.clamp(1, cap)
 }
 
-/// The device-pixel rectangles for `n` slots on a `width`×`height` surface: each
-/// `t.width` wide and `height_frac·height` tall (vertically centered), separated
-/// by `t.gutter`, the whole group centered horizontally. `n` is clamped to at
-/// least 1. Sizes are rounded to whole pixels so the columns stay crisp.
+/// The device-pixel rectangles for `n` equal (single-unit) slots — a convenience
+/// over [`slot_rects_units`]. The live code drives per-slot units directly; this
+/// is exercised by the unit tests as the all-single oracle.
+#[allow(dead_code)]
 pub fn slot_rects(width: u32, height: u32, n: usize, scale: f32, t: &Slots) -> Vec<Rect> {
-    let n = n.max(1);
+    let units = vec![1u32; n.max(1)];
+    slot_rects_units(width, height, &units, scale, t)
+}
+
+/// The device-pixel rectangles for slots of the given per-slot width `units`
+/// (1 or 2, CD-10): a `u`-unit slot spans `u·slot_width + (u-1)·gutter` (it
+/// absorbs the internal gutter), slots are separated by `t.gutter`, and the whole
+/// group is centered horizontally, `height_frac·height` tall (vertically
+/// centered). A group of total units `U` occupies exactly the same extent as `U`
+/// single-unit columns. `units` is treated as at least one 1-unit slot. Sizes are
+/// rounded to whole pixels so the columns stay crisp.
+pub fn slot_rects_units(width: u32, height: u32, units: &[u32], scale: f32, t: &Slots) -> Vec<Rect> {
     let unit = (t.width * scale).round();
     let gutter = (t.gutter * scale).round();
     let zh = (height as f32 * t.height_frac).round();
     let zy = ((height as f32 - zh) * 0.5).round();
-    let total = unit * n as f32 + gutter * (n as f32 - 1.0);
+
+    let widths: Vec<f32> = if units.is_empty() {
+        vec![unit]
+    } else {
+        units
+            .iter()
+            .map(|&u| {
+                let u = u.max(1) as f32;
+                u * unit + (u - 1.0) * gutter
+            })
+            .collect()
+    };
+    let n = widths.len();
+    let total: f32 = widths.iter().sum::<f32>() + gutter * (n as f32 - 1.0);
     let x0 = ((width as f32 - total) * 0.5).round();
-    (0..n)
-        .map(|i| Rect {
-            x: x0 + i as f32 * (unit + gutter),
-            y: zy,
-            w: unit,
-            h: zh,
-        })
-        .collect()
+
+    let mut out = Vec::with_capacity(n);
+    let mut x = x0;
+    for &w in &widths {
+        out.push(Rect { x, y: zy, w, h: zh });
+        x += w + gutter;
+    }
+    out
 }
 
 // --- Slot-order management (CD-09 Stage B) ----------------------------------
@@ -212,6 +236,61 @@ mod tests {
         let r = slot_rects(5120, 1440, 3, 1.0, &t);
         let gap = r[1].x - (r[0].x + r[0].w);
         assert_eq!(gap, 24.0);
+    }
+
+    #[test]
+    fn slot_rects_units_all_single_matches_slot_rects() {
+        let t = slots();
+        for n in 1..=4 {
+            let units = vec![1u32; n];
+            assert_eq!(
+                slot_rects_units(5120, 1440, &units, 1.0, &t),
+                slot_rects(5120, 1440, n, 1.0, &t),
+                "units {n} all-single should match slot_rects"
+            );
+        }
+    }
+
+    #[test]
+    fn double_slot_spans_two_columns_plus_gutter() {
+        let t = slots();
+        // A double slot absorbs the internal gutter: 2·1200 + 24 = 2424.
+        let r = slot_rects_units(5120, 1440, &[2, 1], 1.0, &t);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].w, 2424.0);
+        assert_eq!(r[1].w, 1200.0);
+        // Gutter between the double and the single is the normal token gutter.
+        assert_eq!(r[1].x - (r[0].x + r[0].w), 24.0);
+    }
+
+    #[test]
+    fn mixed_units_occupy_the_same_extent_as_equal_columns() {
+        let t = slots();
+        // [2,1] (3 units) centers exactly like three single columns.
+        let mixed = slot_rects_units(5120, 1440, &[2, 1], 1.0, &t);
+        let three = slot_rects(5120, 1440, 3, 1.0, &t);
+        assert_eq!(mixed[0].x, three[0].x, "group left edge aligns");
+        assert_eq!(
+            mixed[1].x + mixed[1].w,
+            three[2].x + three[2].w,
+            "group right edge aligns"
+        );
+        // Two doubles (4 units) span exactly like four columns.
+        let doubles = slot_rects_units(5120, 1440, &[2, 2], 1.0, &t);
+        let four = slot_rects(5120, 1440, 4, 1.0, &t);
+        assert_eq!(doubles[0].x, four[0].x);
+        assert_eq!(doubles[1].x + doubles[1].w, four[3].x + four[3].w);
+        assert_eq!(doubles[0].w, 2424.0);
+        assert_eq!(doubles[1].w, 2424.0);
+    }
+
+    #[test]
+    fn mixed_units_stay_centered_and_symmetric() {
+        let t = slots();
+        let r = slot_rects_units(5120, 1440, &[1, 2], 1.0, &t);
+        let left_margin = r[0].x;
+        let right_margin = 5120.0 - (r[1].x + r[1].w);
+        assert_eq!(left_margin, right_margin);
     }
 
     #[test]
