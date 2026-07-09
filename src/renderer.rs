@@ -11,8 +11,8 @@
 //! start animation / Energy Core in Season 2 (D-0013).
 //!
 //! All wgpu work lives on the main thread. CEF's `on_paint` (on the CEF UI
-//! thread) only hands over raw BGRA bytes; [`upload_page`](SurfaceRenderer::upload_page)
-//! copies them into the persistent page texture here.
+//! thread) only hands over raw BGRA bytes; [`upload_slot`](SurfaceRenderer::upload_slot)
+//! copies them into the owning slot's persistent page texture here.
 //!
 //! The off-screen [`capture`] path renders the full shell background (the Pulse
 //! Grid) to a PNG for headless visual self-tests.
@@ -23,6 +23,7 @@ use bytemuck::{Pod, Zeroable};
 use winit::window::Window;
 
 use crate::pulsegrid;
+use crate::slots::MAX_SLOTS;
 
 /// Non-sRGB render target so CEF's BGRA bytes and our sRGB brand colors pass
 /// through unchanged (matches the cef-rs OSR example).
@@ -85,19 +86,6 @@ struct GearUniforms {
     radius: f32,
     hover: f32,
     _pad: [f32; 2],
-    brand: [f32; 4],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct LoadingUniforms {
-    resolution: [f32; 2],
-    _pad0: [f32; 2], // align the following vec4 to 16 bytes (std140)
-    zone: [f32; 4],
-    time: f32,
-    intensity: f32,
-    thickness: f32,
-    _pad: f32,
     brand: [f32; 4],
 }
 
@@ -176,30 +164,22 @@ fn ring_pipeline(
     (pipeline, uniform_buf, bind_group)
 }
 
-struct PagePass {
+/// Shared page-compositing pipeline (`page.wgsl`) — one pipeline, bind-group
+/// layouts and sampler, reused by every surf slot and the internal overlay
+/// (CD-09). Per-target data (the rect uniform + the CEF texture) lives in
+/// [`PageTarget`].
+struct PagePipeline {
     pipeline: wgpu::RenderPipeline,
-    uniform_buf: wgpu::Buffer,
-    uniform_bind_group: wgpu::BindGroup,
-    tex_bind_group_layout: wgpu::BindGroupLayout,
+    uniform_bgl: wgpu::BindGroupLayout,
+    tex_bgl: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    // Persistent page texture; recreated only when the CEF frame size changes.
-    texture: Option<wgpu::Texture>,
-    tex_bind_group: Option<wgpu::BindGroup>,
-    width: u32,
-    height: u32,
 }
 
-impl PagePass {
+impl PagePipeline {
     fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("page-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("page.wgsl").into()),
-        });
-        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("page-uniforms"),
-            size: std::mem::size_of::<PageUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
         let uniform_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("page-uniform-bgl"),
@@ -214,15 +194,7 @@ impl PagePass {
                 count: None,
             }],
         });
-        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("page-uniform-bg"),
-            layout: &uniform_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buf.as_entire_binding(),
-            }],
-        });
-        let tex_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let tex_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("page-tex-bgl"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -255,7 +227,7 @@ impl PagePass {
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("page-pl"),
-            bind_group_layouts: &[Some(&uniform_bgl), Some(&tex_bind_group_layout)],
+            bind_group_layouts: &[Some(&uniform_bgl), Some(&tex_bgl)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -288,12 +260,42 @@ impl PagePass {
             multiview_mask: None,
             cache: None,
         });
+        Self { pipeline, uniform_bgl, tex_bgl, sampler }
+    }
+}
+
+/// One page-compositing target: a surf slot or the internal overlay. Owns its
+/// rect uniform (each slot draws at a different rectangle in the same pass, so
+/// the uniform cannot be shared) and its persistent CEF texture, recreated only
+/// when the frame size changes.
+struct PageTarget {
+    uniform_buf: wgpu::Buffer,
+    uniform_bind_group: wgpu::BindGroup,
+    texture: Option<wgpu::Texture>,
+    tex_bind_group: Option<wgpu::BindGroup>,
+    width: u32,
+    height: u32,
+}
+
+impl PageTarget {
+    fn new(device: &wgpu::Device, pipe: &PagePipeline) -> Self {
+        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("page-uniforms"),
+            size: std::mem::size_of::<PageUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("page-uniform-bg"),
+            layout: &pipe.uniform_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buf.as_entire_binding(),
+            }],
+        });
         Self {
-            pipeline,
             uniform_buf,
             uniform_bind_group,
-            tex_bind_group_layout,
-            sampler,
             texture: None,
             tex_bind_group: None,
             width: 0,
@@ -301,7 +303,19 @@ impl PagePass {
         }
     }
 
-    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, data: &[u8], w: u32, h: u32) {
+    fn has_texture(&self) -> bool {
+        self.tex_bind_group.is_some()
+    }
+
+    fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipe: &PagePipeline,
+        data: &[u8],
+        w: u32,
+        h: u32,
+    ) {
         if w == 0 || h == 0 || data.len() < (w * h * 4) as usize {
             return;
         }
@@ -323,7 +337,7 @@ impl PagePass {
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("page-tex-bg"),
-                layout: &self.tex_bind_group_layout,
+                layout: &pipe.tex_bgl,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -331,7 +345,7 @@ impl PagePass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        resource: wgpu::BindingResource::Sampler(&pipe.sampler),
                     },
                 ],
             });
@@ -634,8 +648,13 @@ struct SpriteGlobals {
     zone_feather: f32,
     zone_count: u32,
     _pad: [f32; 2],
-    zones: [[f32; 4]; 4], // up to 4 content rects (x, y, w, h) in physical px
+    // Up to 6 content rects (x, y, w, h) in physical px: up to MAX_SLOTS slots
+    // plus the one open overlay (bar / settings card) — CD-09 grew this from 4.
+    zones: [[f32; 4]; 6],
 }
+
+/// Max content rects the zone-shadow uniform carries (see [`SpriteGlobals`]).
+const MAX_ZONES: usize = 6;
 
 /// Micro-lattice uniforms (mirrors `Lattice` in `pulsegrid_lattice.wgsl`). Since
 /// CD-06 it carries three depth weaves — each `layers[i]` is `(cell, dot_radius,
@@ -1036,7 +1055,7 @@ impl PulseGrid {
                 zone_feather: 0.0,
                 zone_count: 0,
                 _pad: [0.0, 0.0],
-                zones: [[0.0; 4]; 4],
+                zones: [[0.0; 4]; MAX_ZONES],
             };
             queue.write_buffer(&self.bake_globals_buf, 0, bytemuck::bytes_of(&bake_globals));
 
@@ -1087,8 +1106,8 @@ impl PulseGrid {
 
         // Live globals for this frame (including the content rects that dim the
         // background beneath them — the zone shadow).
-        let mut zarr = [[0.0f32; 4]; 4];
-        let zc = zones.len().min(4);
+        let mut zarr = [[0.0f32; 4]; MAX_ZONES];
+        let zc = zones.len().min(MAX_ZONES);
         zarr[..zc].copy_from_slice(&zones[..zc]);
         let globals = SpriteGlobals {
             base: [base[0], base[1], base[2], 1.0],
@@ -1229,66 +1248,236 @@ impl Gear {
     }
 }
 
-/// The surf-zone loading line (`loading.wgsl`), a single-uniform OVER overlay.
-struct Loading {
-    pipeline: wgpu::RenderPipeline,
-    uniform_buf: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+// --- Per-slot decorations (CD-09): placeholders + slot lines ----------------
+
+/// One empty-slot placeholder instance (`slot_placeholder.wgsl`).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct PlaceholderInstance {
+    rect: [f32; 4],  // x, y, w, h (device px)
+    fill: [f32; 4],  // fill rgb + corner_radius (a)
+    glyph: [f32; 4], // glyph rgb + digit 1..4 (a)
 }
 
-impl Loading {
-    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+/// One slot-line instance (`slot_lines.wgsl`) — the loading line + active accent.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SlotLineInstance {
+    rect: [f32; 4],   // x, y, w, h (device px)
+    params: [f32; 4], // loading_intensity, active(0/1), accent_th_px, loading_th_px
+}
+
+/// Placeholder globals — just the resolution (for the px→NDC vertex transform).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct PlaceholderGlobals {
+    resolution: [f32; 2],
+    _pad: [f32; 2],
+}
+
+/// Slot-line globals — resolution, time (for the loading sweep) and brand color.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SlotLineGlobals {
+    resolution: [f32; 2],
+    time: f32,
+    _pad: f32,
+    brand: [f32; 4],
+}
+
+const SLOTLINE_ATTRS: [wgpu::VertexAttribute; 2] =
+    wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4];
+const PLACEHOLDER_ATTRS: [wgpu::VertexAttribute; 3] =
+    wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4];
+
+/// A unit-quad, instance-stepped pipeline (premultiplied OVER) for the slot
+/// decorations — one draw covers every slot.
+fn instanced_over_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
+    stride: u64,
+    attrs: &[wgpu::VertexAttribute],
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("slot-instanced-pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: stride,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: attrs,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent::OVER,
+                    alpha: wgpu::BlendComponent::OVER,
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Build a single-uniform globals bind group + layout (binding 0, both stages).
+fn globals_bind_group(
+    device: &wgpu::Device,
+    label: &str,
+    size: u64,
+) -> (wgpu::Buffer, wgpu::BindGroupLayout, wgpu::BindGroup) {
+    let buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout: &bgl,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: buf.as_entire_binding(),
+        }],
+    });
+    (buf, bgl, bg)
+}
+
+/// The lazy-slot placeholder pass (`slot_placeholder.wgsl`) — instanced fills +
+/// index glyphs for slots with no browser yet.
+struct SlotPlaceholder {
+    pipeline: wgpu::RenderPipeline,
+    globals_buf: wgpu::Buffer,
+    globals_bg: wgpu::BindGroup,
+    instance_buf: wgpu::Buffer,
+}
+
+impl SlotPlaceholder {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat, cap: u32) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("loading-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("loading.wgsl").into()),
+            label: Some("slot-placeholder-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("slot_placeholder.wgsl").into()),
         });
-        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("loading-uniforms"),
-            size: std::mem::size_of::<LoadingUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("loading-bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("loading-bg"),
-            layout: &bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buf.as_entire_binding(),
-            }],
-        });
+        let (globals_buf, bgl, globals_bg) = globals_bind_group(
+            device,
+            "slot-placeholder-globals",
+            std::mem::size_of::<PlaceholderGlobals>() as u64,
+        );
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("loading-pl"),
+            label: Some("slot-placeholder-pl"),
             bind_group_layouts: &[Some(&bgl)],
             immediate_size: 0,
         });
-        let pipeline = fullscreen_pipeline(device, &shader, &layout, format, true);
-        Self { pipeline, uniform_buf, bind_group }
+        let pipeline = instanced_over_pipeline(
+            device,
+            &shader,
+            &layout,
+            format,
+            std::mem::size_of::<PlaceholderInstance>() as u64,
+            &PLACEHOLDER_ATTRS,
+        );
+        let instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("slot-placeholder-instances"),
+            size: (cap as usize * std::mem::size_of::<PlaceholderInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self { pipeline, globals_buf, globals_bg, instance_buf }
     }
 }
 
-/// Renders the shell + surf-zone page to a winit window surface.
+/// The per-slot line pass (`slot_lines.wgsl`) — instanced loading lines + the
+/// active accent for every slot.
+struct SlotLines {
+    pipeline: wgpu::RenderPipeline,
+    globals_buf: wgpu::Buffer,
+    globals_bg: wgpu::BindGroup,
+    instance_buf: wgpu::Buffer,
+}
+
+impl SlotLines {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat, cap: u32) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("slot-lines-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("slot_lines.wgsl").into()),
+        });
+        let (globals_buf, bgl, globals_bg) = globals_bind_group(
+            device,
+            "slot-lines-globals",
+            std::mem::size_of::<SlotLineGlobals>() as u64,
+        );
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("slot-lines-pl"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+        let pipeline = instanced_over_pipeline(
+            device,
+            &shader,
+            &layout,
+            format,
+            std::mem::size_of::<SlotLineInstance>() as u64,
+            &SLOTLINE_ATTRS,
+        );
+        let instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("slot-lines-instances"),
+            size: (cap as usize * std::mem::size_of::<SlotLineInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self { pipeline, globals_buf, globals_bg, instance_buf }
+    }
+}
+
+/// One slot to draw this frame (CD-09): its rect (device px), loading intensity,
+/// whether it is the active slot, and its 0-based index (→ its page target and
+/// its placeholder glyph digit `index + 1`).
+pub struct SlotView {
+    pub rect: (f32, f32, f32, f32),
+    pub loading: f32,
+    pub active: bool,
+    pub index: usize,
+}
+
+/// Renders the shell + N surf-slot pages to a winit window surface.
 pub struct SurfaceRenderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    page: PagePass,
-    panel: PagePass,
+    page_pipeline: PagePipeline,
+    slots: Vec<PageTarget>,
+    panel: PageTarget,
+    placeholder: SlotPlaceholder,
+    slotlines: SlotLines,
     gear: Gear,
-    loading: Loading,
     field: DeepField,
     pulse: PulseGrid,
     theme: crate::theme::Theme,
@@ -1329,10 +1518,16 @@ impl SurfaceRenderer {
         config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&device, &config);
 
-        let page = PagePass::new(&device, SURFACE_FORMAT);
-        let panel = PagePass::new(&device, SURFACE_FORMAT);
+        let page_pipeline = PagePipeline::new(&device, SURFACE_FORMAT);
+        // One page target per possible slot (created up front; lazy slots simply
+        // never receive a texture and draw the placeholder instead).
+        let slots = (0..MAX_SLOTS)
+            .map(|_| PageTarget::new(&device, &page_pipeline))
+            .collect();
+        let panel = PageTarget::new(&device, &page_pipeline);
+        let placeholder = SlotPlaceholder::new(&device, SURFACE_FORMAT, MAX_SLOTS as u32);
+        let slotlines = SlotLines::new(&device, SURFACE_FORMAT, MAX_SLOTS as u32);
         let gear = Gear::new(&device, SURFACE_FORMAT);
-        let loading = Loading::new(&device, SURFACE_FORMAT);
         let field = DeepField::new(&device, SURFACE_FORMAT);
         let pulse = PulseGrid::new(&device, SURFACE_FORMAT);
 
@@ -1341,10 +1536,12 @@ impl SurfaceRenderer {
             device,
             queue,
             config,
-            page,
+            page_pipeline,
+            slots,
             panel,
+            placeholder,
+            slotlines,
             gear,
-            loading,
             field,
             pulse,
             theme,
@@ -1363,27 +1560,31 @@ impl SurfaceRenderer {
         }
     }
 
-    /// Upload a freshly painted CEF frame (BGRA) into the page texture.
-    pub fn upload_page(&mut self, data: &[u8], w: u32, h: u32) {
-        self.page.upload(&self.device, &self.queue, data, w, h);
+    /// Upload a freshly painted CEF frame (BGRA) into slot `i`'s texture.
+    pub fn upload_slot(&mut self, i: usize, data: &[u8], w: u32, h: u32) {
+        if let Some(slot) = self.slots.get_mut(i) {
+            slot.upload(&self.device, &self.queue, &self.page_pipeline, data, w, h);
+        }
     }
 
     /// Upload a freshly painted internal-view frame (BGRA) into the panel texture.
     pub fn upload_panel(&mut self, data: &[u8], w: u32, h: u32) {
-        self.panel.upload(&self.device, &self.queue, data, w, h);
+        self.panel
+            .upload(&self.device, &self.queue, &self.page_pipeline, data, w, h);
     }
 
-    /// Render one frame. Rects are in device pixels. `zone` is the surf-zone,
-    /// `panel` the internal settings card, `gear` the settings button
-    /// (center_x, center_y, radius). `feather`/`background_on` are the live
-    /// toggles; `glow_intensity` scales the Pulse Grid brightness; `scale` is
-    /// the DPI factor (Pulse Grid sizes are logical px). `overlay_open` shows the
-    /// panel; `gear_hover` (0..1) drives the gear glow.
+    /// Render one frame. Rects are in device pixels. `slots` are the surf
+    /// columns (each with its rect, loading intensity and active flag); `panel`
+    /// is the internal overlay (settings card / top bar); `gear` is the settings
+    /// button (center_x, center_y, radius). `feather`/`background_on` are the
+    /// live toggles; `glow_intensity` scales the Pulse Grid brightness; `scale`
+    /// is the DPI factor (Pulse Grid sizes are logical px). `overlay_open` shows
+    /// the panel; `gear_hover` (0..1) drives the gear glow.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         time: f32,
-        zone: (f32, f32, f32, f32),
+        slots: &[SlotView],
         panel: (f32, f32, f32, f32),
         gear: (f32, f32, f32),
         feather: bool,
@@ -1394,11 +1595,11 @@ impl SurfaceRenderer {
         is_bar: bool,
         bar_progress: f32,
         gear_hover: f32,
-        loading_intensity: f32,
     ) {
         let (cfg_w, cfg_h) = (self.config.width, self.config.height);
         let (win_w, win_h) = (cfg_w as f32, cfg_h as f32);
         let base = self.theme.colors.background_rgb();
+        let brand = self.theme.colors.brand_rgb();
 
         // Background selection is a template token (D-0012): Pulse Grid (Cyber
         // default) or the Deep Field (Calm). The "Animated background" toggle
@@ -1410,10 +1611,12 @@ impl SurfaceRenderer {
         // Pulse Grid: (re)generate + bake on size/scale/seed change, write the
         // live globals. Must run before the frame encoder (creates GPU
         // resources + queues writes).
-        // Zone rects that dim the background (Stage C): always the surf zone,
-        // plus the internal overlay while it is open. Up to 4 are supported.
-        let mut zones: Vec<[f32; 4]> = Vec::with_capacity(2);
-        zones.push([zone.0, zone.1, zone.2, zone.3]);
+        // Zone rects that dim the background: every slot rect, plus the internal
+        // overlay while it is open. Up to MAX_ZONES (6) are carried.
+        let mut zones: Vec<[f32; 4]> = Vec::with_capacity(slots.len() + 1);
+        for s in slots {
+            zones.push([s.rect.0, s.rect.1, s.rect.2, s.rect.3]);
+        }
         if overlay_open {
             // The bar dims only its currently-visible (clipped) height as it
             // slides; the settings card dims its full rect.
@@ -1447,27 +1650,88 @@ impl SurfaceRenderer {
         } else {
             0.0
         };
-
-        // Page uniforms: zone rect -> NDC (y flipped).
-        let (zx, zy, zw, zh) = zone;
+        let feather_exp = self.theme.page.feather_exp;
         let to_ndc_x = |x: f32| (x / win_w) * 2.0 - 1.0;
         let to_ndc_y = |y: f32| 1.0 - (y / win_h) * 2.0;
-        let feather_exp = self.theme.page.feather_exp;
-        let page = PageUniforms {
-            rect_ndc: [
-                to_ndc_x(zx),
-                to_ndc_y(zy),
-                to_ndc_x(zx + zw),
-                to_ndc_y(zy + zh),
-            ],
-            px_size: [self.page.width.max(1) as f32, self.page.height.max(1) as f32],
-            corner_radius,
-            feather: feather_px,
-            feather_exp,
-            _pad: [0.0; 3],
-        };
-        self.queue
-            .write_buffer(&self.page.uniform_buf, 0, bytemuck::bytes_of(&page));
+
+        // Per-slot page uniforms (for painted slots) and the placeholder / line
+        // instance lists (built once, drawn instanced). A slot without a texture
+        // yet draws the placeholder; every slot gets a line instance (loading +
+        // active accent).
+        let st = &self.theme.slots;
+        let fill_rgb = [
+            base[0] + st.placeholder_fill,
+            base[1] + st.placeholder_fill,
+            base[2] + st.placeholder_fill,
+        ];
+        let glyph_rgb = [
+            brand[0] * st.placeholder_glyph,
+            brand[1] * st.placeholder_glyph,
+            brand[2] * st.placeholder_glyph,
+        ];
+        let accent_th = (st.active_line * scale).max(1.0);
+        let loading_th = (2.5 * scale).max(1.0);
+        let mut placeholders: Vec<PlaceholderInstance> = Vec::with_capacity(slots.len());
+        let mut lines: Vec<SlotLineInstance> = Vec::with_capacity(slots.len());
+        for s in slots {
+            let (x, y, w, h) = s.rect;
+            if let Some(target) = self.slots.get(s.index) {
+                if target.has_texture() {
+                    let u = PageUniforms {
+                        rect_ndc: [to_ndc_x(x), to_ndc_y(y), to_ndc_x(x + w), to_ndc_y(y + h)],
+                        px_size: [target.width.max(1) as f32, target.height.max(1) as f32],
+                        corner_radius,
+                        feather: feather_px,
+                        feather_exp,
+                        _pad: [0.0; 3],
+                    };
+                    self.queue
+                        .write_buffer(&target.uniform_buf, 0, bytemuck::bytes_of(&u));
+                } else {
+                    placeholders.push(PlaceholderInstance {
+                        rect: [x, y, w, h],
+                        fill: [fill_rgb[0], fill_rgb[1], fill_rgb[2], corner_radius],
+                        glyph: [glyph_rgb[0], glyph_rgb[1], glyph_rgb[2], (s.index + 1) as f32],
+                    });
+                }
+            }
+            lines.push(SlotLineInstance {
+                rect: [x, y, w, h],
+                params: [
+                    s.loading.clamp(0.0, 1.0),
+                    if s.active { 1.0 } else { 0.0 },
+                    accent_th,
+                    loading_th,
+                ],
+            });
+        }
+        let placeholder_count = (placeholders.len() as u32).min(MAX_SLOTS as u32);
+        let line_count = (lines.len() as u32).min(MAX_SLOTS as u32);
+        if placeholder_count > 0 {
+            let pg = PlaceholderGlobals { resolution: [win_w, win_h], _pad: [0.0, 0.0] };
+            self.queue
+                .write_buffer(&self.placeholder.globals_buf, 0, bytemuck::bytes_of(&pg));
+            self.queue.write_buffer(
+                &self.placeholder.instance_buf,
+                0,
+                bytemuck::cast_slice(&placeholders[..placeholder_count as usize]),
+            );
+        }
+        if line_count > 0 {
+            let lg = SlotLineGlobals {
+                resolution: [win_w, win_h],
+                time,
+                _pad: 0.0,
+                brand: [brand[0], brand[1], brand[2], 1.0],
+            };
+            self.queue
+                .write_buffer(&self.slotlines.globals_buf, 0, bytemuck::bytes_of(&lg));
+            self.queue.write_buffer(
+                &self.slotlines.instance_buf,
+                0,
+                bytemuck::cast_slice(&lines[..line_count as usize]),
+            );
+        }
 
         // Panel uniforms: the internal overlay (settings card or command bar) —
         // crisp rounded corners, never feathered. Only written/drawn while open.
@@ -1496,7 +1760,6 @@ impl SurfaceRenderer {
 
         // Gear button uniforms (always drawn, brand-colored, hover-lit).
         let (gcx, gcy, gr) = gear;
-        let brand = self.theme.colors.brand_rgb();
         let gear_u = GearUniforms {
             resolution: [win_w, win_h],
             center: [gcx, gcy],
@@ -1507,20 +1770,6 @@ impl SurfaceRenderer {
         };
         self.queue
             .write_buffer(&self.gear.uniform_buf, 0, bytemuck::bytes_of(&gear_u));
-
-        // Loading line: a thin bar along the top edge of the surf zone.
-        let loading_u = LoadingUniforms {
-            resolution: [win_w, win_h],
-            _pad0: [0.0, 0.0],
-            zone: [zone.0, zone.1, zone.2, zone.3],
-            time,
-            intensity: loading_intensity.clamp(0.0, 1.0),
-            thickness: 2.5,
-            _pad: 0.0,
-            brand: [brand[0], brand[1], brand[2], 1.0],
-        };
-        self.queue
-            .write_buffer(&self.loading.uniform_buf, 0, bytemuck::bytes_of(&loading_u));
 
         // Deep Field: repaint the half-res target at ~30 fps (every other frame,
         // or right after a resize).
@@ -1631,19 +1880,34 @@ impl SurfaceRenderer {
                 pass.draw(0..3, 0..1);
             }
 
-            // Surf-zone page, if a frame has arrived.
-            if let Some(tex_bind_group) = self.page.tex_bind_group.as_ref() {
-                pass.set_pipeline(&self.page.pipeline);
-                pass.set_bind_group(0, &self.page.uniform_bind_group, &[]);
-                pass.set_bind_group(1, tex_bind_group, &[]);
-                pass.draw(0..6, 0..1);
+            // Surf-slot pages: each slot that has a painted frame, at its rect.
+            pass.set_pipeline(&self.page_pipeline.pipeline);
+            for s in slots {
+                if let Some(target) = self.slots.get(s.index)
+                    && let Some(tex_bind_group) = target.tex_bind_group.as_ref()
+                {
+                    pass.set_bind_group(0, &target.uniform_bind_group, &[]);
+                    pass.set_bind_group(1, tex_bind_group, &[]);
+                    pass.draw(0..6, 0..1);
+                }
             }
 
-            // Loading line along the top edge of the surf zone, while loading.
-            if loading_intensity > 0.004 {
-                pass.set_pipeline(&self.loading.pipeline);
-                pass.set_bind_group(0, &self.loading.bind_group, &[]);
-                pass.draw(0..3, 0..1);
+            // Lazy-slot placeholders (fill + index glyph), for slots with no
+            // texture yet — one instanced draw.
+            if placeholder_count > 0 {
+                pass.set_pipeline(&self.placeholder.pipeline);
+                pass.set_bind_group(0, &self.placeholder.globals_bg, &[]);
+                pass.set_vertex_buffer(0, self.placeholder.instance_buf.slice(..));
+                pass.draw(0..6, 0..placeholder_count);
+            }
+
+            // Per-slot loading lines (top edge) + active accent (bottom edge) —
+            // one instanced draw over all slots.
+            if line_count > 0 {
+                pass.set_pipeline(&self.slotlines.pipeline);
+                pass.set_bind_group(0, &self.slotlines.globals_bg, &[]);
+                pass.set_vertex_buffer(0, self.slotlines.instance_buf.slice(..));
+                pass.draw(0..6, 0..line_count);
             }
 
             // Internal overlay (settings card or top bar), over the page. The bar
@@ -1667,7 +1931,7 @@ impl SurfaceRenderer {
                     true
                 };
                 if draw {
-                    pass.set_pipeline(&self.panel.pipeline);
+                    pass.set_pipeline(&self.page_pipeline.pipeline);
                     pass.set_bind_group(0, &self.panel.uniform_bind_group, &[]);
                     pass.set_bind_group(1, tex_bind_group, &[]);
                     pass.draw(0..6, 0..1);
@@ -1718,30 +1982,90 @@ pub fn capture(path: &str, width: u32, height: u32, theme: &crate::theme::Theme)
     // Pulse Grid background (skipped when the template selects the Deep Field —
     // that path is surface-bound and not wired into the headless capture).
     let base = theme.colors.background_rgb();
+    let brand = theme.colors.brand_rgb();
     let do_pulse = theme.background.is_pulse_grid();
+
+    // Slot layout for the capture: N placeholder columns (CD-09), so the
+    // multi-slot money shot — columns, gutters, glowing margins, zone shadow —
+    // can be eyeballed headlessly. `CYBERDESK_CAPTURE_SLOTS=N` (default 1), then
+    // clamped to what fits the width.
+    let want = std::env::var("CYBERDESK_CAPTURE_SLOTS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(1);
+    let n = want.clamp(1, crate::slots::max_slots(width, 1.0, &theme.slots));
+    let rects = crate::slots::slot_rects(width, height, n, 1.0, &theme.slots);
+    let zones: Vec<[f32; 4]> = rects.iter().map(|r| [r.x, r.y, r.w, r.h]).collect();
+
     let mut pulse = PulseGrid::new(&device, format);
     if do_pulse {
         let glow = std::env::var("CYBERDESK_CAPTURE_GLOW")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(theme.background.glow_default / 100.0);
-        // A representative surf-zone rect (60% × 70%, centered) so the zone
-        // shadow is visible in the self-test.
-        let zw = (width as f32 * 0.60).round();
-        let zh = (height as f32 * 0.70).round();
-        let surf = [
-            ((width as f32 - zw) * 0.5).round(),
-            ((height as f32 - zh) * 0.5).round(),
-            zw,
-            zh,
-        ];
-        pulse.prepare(&device, &queue, width, height, 1.0, theme, base, glow, &[surf]);
+        // The slot rects double as the zone-shadow rects, so the shadow is
+        // visible under each column in the self-test.
+        pulse.prepare(&device, &queue, width, height, 1.0, theme, base, glow, &zones);
         // Advance the life sim to a representative animated moment (pulses have
         // travelled, at least one node flare is mid-expansion).
         for i in 1..=32 {
             pulse.update_life(&queue, i as f32 * 0.05, theme);
         }
     }
+
+    // Placeholder columns + the active accent on slot 0 (shell-side, no CEF) —
+    // exactly what an all-lazy slot group looks like before any navigation.
+    let st = &theme.slots;
+    let placeholder = SlotPlaceholder::new(&device, format, MAX_SLOTS as u32);
+    let slotlines = SlotLines::new(&device, format, MAX_SLOTS as u32);
+    let corner = theme.page.corner_radius;
+    let fill_rgb = [
+        base[0] + st.placeholder_fill,
+        base[1] + st.placeholder_fill,
+        base[2] + st.placeholder_fill,
+    ];
+    let glyph_rgb = [
+        brand[0] * st.placeholder_glyph,
+        brand[1] * st.placeholder_glyph,
+        brand[2] * st.placeholder_glyph,
+    ];
+    let ph_insts: Vec<PlaceholderInstance> = rects
+        .iter()
+        .enumerate()
+        .map(|(i, r)| PlaceholderInstance {
+            rect: [r.x, r.y, r.w, r.h],
+            fill: [fill_rgb[0], fill_rgb[1], fill_rgb[2], corner],
+            glyph: [glyph_rgb[0], glyph_rgb[1], glyph_rgb[2], (i + 1) as f32],
+        })
+        .collect();
+    let line_insts: Vec<SlotLineInstance> = rects
+        .iter()
+        .enumerate()
+        .map(|(i, r)| SlotLineInstance {
+            rect: [r.x, r.y, r.w, r.h],
+            params: [0.0, if i == 0 { 1.0 } else { 0.0 }, st.active_line.max(1.0), 2.5],
+        })
+        .collect();
+    queue.write_buffer(
+        &placeholder.globals_buf,
+        0,
+        bytemuck::bytes_of(&PlaceholderGlobals {
+            resolution: [width as f32, height as f32],
+            _pad: [0.0, 0.0],
+        }),
+    );
+    queue.write_buffer(&placeholder.instance_buf, 0, bytemuck::cast_slice(&ph_insts));
+    queue.write_buffer(
+        &slotlines.globals_buf,
+        0,
+        bytemuck::bytes_of(&SlotLineGlobals {
+            resolution: [width as f32, height as f32],
+            time: 1.6,
+            _pad: 0.0,
+            brand: [brand[0], brand[1], brand[2], 1.0],
+        }),
+    );
+    queue.write_buffer(&slotlines.instance_buf, 0, bytemuck::cast_slice(&line_insts));
 
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("capture-target"),
@@ -1807,6 +2131,15 @@ pub fn capture(path: &str, width: u32, height: u32, theme: &crate::theme::Theme)
             pulse.composite(&mut pass);
             pulse.draw_life(&mut pass);
         }
+        // Placeholder slot columns + slot lines over the background.
+        pass.set_pipeline(&placeholder.pipeline);
+        pass.set_bind_group(0, &placeholder.globals_bg, &[]);
+        pass.set_vertex_buffer(0, placeholder.instance_buf.slice(..));
+        pass.draw(0..6, 0..n as u32);
+        pass.set_pipeline(&slotlines.pipeline);
+        pass.set_bind_group(0, &slotlines.globals_bg, &[]);
+        pass.set_vertex_buffer(0, slotlines.instance_buf.slice(..));
+        pass.draw(0..6, 0..n as u32);
     }
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {

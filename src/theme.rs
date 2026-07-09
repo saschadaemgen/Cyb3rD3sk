@@ -21,6 +21,7 @@ pub struct Theme {
     pub deep_field: DeepField,
     pub background: Background,
     pub command: Command,
+    pub slots: Slots,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -160,6 +161,21 @@ pub struct Command {
     pub max_results: i32,
     /// Favorites chip row height (CD-08 top bar). Shared with the page CSS.
     pub chip_row: f32,
+}
+
+/// Slot engine (CD-09, D-0017). Fixed-width content columns; these dimensions
+/// are the single source for the pure layout math in [`crate::slots`] and the
+/// host-side view sizing. All sizes are logical px (scaled by the DPI factor).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Slots {
+    pub width: f32,
+    pub gutter: f32,
+    pub min_margin: f32,
+    pub height_frac: f32,
+    pub max_count: u32,
+    pub active_line: f32,
+    pub placeholder_fill: f32,
+    pub placeholder_glyph: f32,
 }
 
 impl Background {

@@ -15,6 +15,7 @@ mod memory;
 mod pulsegrid;
 mod renderer;
 mod settings;
+mod slots;
 mod store;
 mod theme;
 

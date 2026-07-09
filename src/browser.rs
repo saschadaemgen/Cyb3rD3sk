@@ -1,10 +1,12 @@
 //! CEF (Chromium Embedded Framework) integration — the CyberDesk views.
 //!
-//! Two off-screen (OSR) browser views live here, distinguished by a [`Role`]:
+//! The off-screen (OSR) browser views live here, distinguished by a [`Role`]:
 //!
-//!   * [`Role::Surf`] — the surf zone (google.com), full web browsing.
-//!   * [`Role::Internal`] — the settings page, locked to the internal
-//!     `cyberdesk://settings/` scheme (see docs/cyberdesk-decisions.md, D-0010).
+//!   * [`Role::Slot`]`(i)` — one of the up-to-`MAX_SLOTS` surf columns (CD-09),
+//!     full web browsing. Slot 0 loads the home page eagerly; the rest are lazy
+//!     (no browser until their first navigation).
+//!   * [`Role::Internal`] — the settings / command-bar page, locked to the
+//!     internal `cyberdesk://` scheme (see docs/cyberdesk-decisions.md, D-0010).
 //!
 //! Both render into CPU buffers (`RenderHandler::on_paint`); the renderer
 //! composites each as a texture. CEF runs a multi-threaded message loop, so
@@ -36,6 +38,8 @@ use cef::*;
 use winit::event::MouseButton;
 use winit::window::CursorIcon;
 
+use crate::slots::MAX_SLOTS;
+
 /// Page loaded into the surf-zone view.
 const HOME_URL: &str = "https://www.google.com/";
 /// The internal custom scheme and the settings document URL (D-0010).
@@ -51,19 +55,27 @@ pub const EVENTFLAG_LEFT_MOUSE_BUTTON: u32 = 1 << 4;
 pub const EVENTFLAG_MIDDLE_MOUSE_BUTTON: u32 = 1 << 5;
 pub const EVENTFLAG_RIGHT_MOUSE_BUTTON: u32 = 1 << 6;
 
-/// Which OSR view a call targets.
+/// Which OSR view a call targets. `Slot(i)` is one of the up-to-[`MAX_SLOTS`]
+/// surf columns (CD-09); `Internal` is the single shared overlay view (settings
+/// card / command bar). `i` is always `< MAX_SLOTS` (the shell clamps the live
+/// slot count), so slot and internal indices never collide.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Role {
-    Surf,
+    Slot(usize),
     Internal,
 }
 
 impl Role {
     fn idx(self) -> usize {
         match self {
-            Role::Surf => 0,
-            Role::Internal => 1,
+            Role::Slot(i) => i,
+            Role::Internal => MAX_SLOTS,
         }
+    }
+    /// True for any surf slot (the web-facing views), false for the internal
+    /// overlay. Replaces the old `== Role::Surf` checks in the handlers.
+    fn is_slot(self) -> bool {
+        matches!(self, Role::Slot(_))
     }
 }
 
@@ -89,11 +101,25 @@ impl Default for ViewGeom {
     }
 }
 
+/// Per-slot navigation state (CD-09). The former global surf-nav singletons are
+/// now one of these per slot; the LoadHandler / DisplayHandler write the owning
+/// slot's copy, and the top bar reads the *active* slot's (see [`active_slot`]).
+#[derive(Default, Clone)]
+struct SlotNav {
+    url: String,
+    title: String,
+    loading: bool,
+    can_back: bool,
+    can_forward: bool,
+}
+
 struct ViewState {
     frame: Mutex<FrameBuffer>,
     geom: Mutex<ViewGeom>,
     browser: Mutex<Option<Browser>>,
     cursor: Mutex<Option<CursorIcon>>,
+    /// Navigation state (slots only; the internal view leaves it at default).
+    nav: Mutex<SlotNav>,
 }
 impl ViewState {
     fn new() -> Self {
@@ -102,13 +128,16 @@ impl ViewState {
             geom: Mutex::new(ViewGeom::default()),
             browser: Mutex::new(None),
             cursor: Mutex::new(None),
+            nav: Mutex::new(SlotNav::default()),
         }
     }
 }
 
-fn views() -> &'static [ViewState; 2] {
-    static V: OnceLock<[ViewState; 2]> = OnceLock::new();
-    V.get_or_init(|| [ViewState::new(), ViewState::new()])
+/// The per-view state array: `MAX_SLOTS` surf slots at indices `0..MAX_SLOTS`,
+/// then the internal overlay view at `MAX_SLOTS`.
+fn views() -> &'static [ViewState; MAX_SLOTS + 1] {
+    static V: OnceLock<[ViewState; MAX_SLOTS + 1]> = OnceLock::new();
+    V.get_or_init(|| std::array::from_fn(|_| ViewState::new()))
 }
 fn view(role: Role) -> &'static ViewState {
     &views()[role.idx()]
@@ -116,32 +145,79 @@ fn view(role: Role) -> &'static ViewState {
 
 static CONTEXT_READY: AtomicBool = AtomicBool::new(false);
 
+/// The slot the top bar, keyboard input, and the scheme hint act on. The shell
+/// sets it whenever the active column changes (click, Ctrl+1..4, Ctrl+Tab, add /
+/// close). Always `< MAX_SLOTS`.
+static ACTIVE_SLOT: AtomicUsize = AtomicUsize::new(0);
+
+/// A navigation targeted at a lazy slot that has no browser yet: the CEF-UI-side
+/// `navigate` handler records `(slot, url)` here and the shell's main thread
+/// spawns the browser (it owns the parent HWND). Consumed via
+/// [`take_pending_spawn`].
+fn pending_spawn() -> &'static Mutex<Option<(usize, String)>> {
+    static P: OnceLock<Mutex<Option<(usize, String)>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(None))
+}
+
 /// Browser-side message router (settings IPC). Created on the UI thread in
 /// `on_context_initialized`; read from the client/request/life-span handlers.
 static BROWSER_ROUTER: OnceLock<Arc<BrowserSideRouter>> = OnceLock::new();
 
-// --- Surf navigation state (CEF UI thread -> main thread) -------------------
-// The LoadHandler / DisplayHandler callbacks fire on the CEF UI thread; the main
-// thread reads these for the loading line, the window title, and get_nav_state.
-static SURF_LOADING: AtomicBool = AtomicBool::new(false);
-static SURF_CAN_BACK: AtomicBool = AtomicBool::new(false);
-static SURF_CAN_FWD: AtomicBool = AtomicBool::new(false);
+// --- Per-slot navigation state (CEF UI thread -> main thread) ---------------
+// The LoadHandler / DisplayHandler callbacks fire on the CEF UI thread and write
+// the owning slot's SlotNav (in its ViewState); the main thread reads it for the
+// per-slot loading lines and the window title, and the IPC reads the *active*
+// slot's for get_nav_state.
 
-#[derive(Default)]
-struct SurfNav {
-    url: String,
-    title: String,
+/// The active slot the top bar / keyboard / scheme hint target.
+pub fn active_slot() -> usize {
+    ACTIVE_SLOT.load(Ordering::Relaxed).min(MAX_SLOTS - 1)
 }
-fn surf_nav() -> &'static Mutex<SurfNav> {
-    static N: OnceLock<Mutex<SurfNav>> = OnceLock::new();
-    N.get_or_init(|| Mutex::new(SurfNav::default()))
+/// Set the active slot (called by the shell when the active column changes).
+pub fn set_active_slot(i: usize) {
+    ACTIVE_SLOT.store(i.min(MAX_SLOTS - 1), Ordering::Relaxed);
 }
 
-pub fn surf_loading() -> bool {
-    SURF_LOADING.load(Ordering::Relaxed)
+/// Does slot `i` have a live browser instance yet? (Lazy slots have none until
+/// their first navigation.)
+pub fn slot_has_browser(i: usize) -> bool {
+    i < MAX_SLOTS && view(Role::Slot(i)).browser.lock().unwrap().is_some()
 }
-pub fn surf_title() -> String {
-    surf_nav().lock().unwrap().title.clone()
+
+/// Is slot `i` currently loading a page? Drives its loading line.
+pub fn slot_loading(i: usize) -> bool {
+    view(Role::Slot(i)).nav.lock().unwrap().loading
+}
+/// Slot `i`'s current page title (empty if none / unloaded).
+pub fn slot_title(i: usize) -> String {
+    view(Role::Slot(i)).nav.lock().unwrap().title.clone()
+}
+/// Slot `i`'s current page URL (empty if none / unloaded).
+pub fn slot_url(i: usize) -> String {
+    view(Role::Slot(i)).nav.lock().unwrap().url.clone()
+}
+fn slot_can_back(i: usize) -> bool {
+    view(Role::Slot(i)).nav.lock().unwrap().can_back
+}
+fn slot_can_forward(i: usize) -> bool {
+    view(Role::Slot(i)).nav.lock().unwrap().can_forward
+}
+
+/// A navigation targeted at the active slot: load it if its browser exists, or
+/// queue a lazy spawn (the shell's main thread creates the browser). Called by
+/// the `navigate` IPC. `url` is already classified (URL vs search).
+fn navigate_active(url: &str) {
+    let i = active_slot();
+    if slot_has_browser(i) {
+        load_url(Role::Slot(i), url);
+    } else {
+        *pending_spawn().lock().unwrap() = Some((i, url.to_string()));
+    }
+}
+
+/// Take a queued lazy-slot spawn `(slot, url)`, if any (main thread).
+pub fn take_pending_spawn() -> Option<(usize, String)> {
+    pending_spawn().lock().unwrap().take()
 }
 
 // The command bar's `navigate` sets this on the CEF UI thread; the main thread
@@ -162,20 +238,12 @@ pub fn show_internal_settings() {
 pub fn show_internal_command() {
     load_url(Role::Internal, COMMAND_URL);
 }
-pub fn surf_can_back() -> bool {
-    SURF_CAN_BACK.load(Ordering::Relaxed)
-}
-pub fn surf_can_forward() -> bool {
-    SURF_CAN_FWD.load(Ordering::Relaxed)
-}
-pub fn surf_url() -> String {
-    surf_nav().lock().unwrap().url.clone()
-}
 
-/// Toggle the favorite state of the current surf page (Ctrl+D from the surf
-/// view). Returns the new state; internal/blank URLs are ignored (memory.rs).
+/// Toggle the favorite state of the *active* slot's current page (Ctrl+D from a
+/// surf slot). Returns the new state; internal/blank URLs are ignored (memory.rs).
 pub fn toggle_current_favorite() -> bool {
-    crate::memory::toggle_favorite(&surf_url(), &surf_title())
+    let i = active_slot();
+    crate::memory::toggle_favorite(&slot_url(i), &slot_title(i))
 }
 
 // --- Command bar sizing + state (CD-07, CD-08) ------------------------------
@@ -298,20 +366,29 @@ pub fn set_view_geometry(role: Role, phys_w: u32, phys_h: u32, scale: f32) {
     *view(role).geom.lock().unwrap() = ViewGeom { phys_w, phys_h, scale };
 }
 
-/// Create a windowless (OSR) browser for `role`. `parent_hwnd` is used only for
-/// monitor / DPI info — there is no child window.
+/// Create a windowless (OSR) browser for `role` at its default start page (the
+/// home URL for a slot, the settings page for the internal view).
 pub fn create_browser(role: Role, parent_hwnd: isize) {
+    let url = match role {
+        Role::Slot(_) => HOME_URL,
+        Role::Internal => SETTINGS_URL,
+    };
+    create_browser_url(role, parent_hwnd, url);
+}
+
+/// Create a windowless (OSR) browser for `role`, loading `url` immediately. Used
+/// both for the eager slot 0 / internal view and for lazy slots on their first
+/// navigation. `parent_hwnd` is used only for monitor / DPI info — no child
+/// window. The view geometry must be set (see [`set_view_geometry`]) first.
+pub fn create_browser_url(role: Role, parent_hwnd: isize, url: &str) {
     let window_info =
         WindowInfo::default().set_as_windowless(sys::HWND(parent_hwnd as *mut sys::HWND__));
 
     let mut client = CyberClient::new(role);
-    let url = CefString::from(match role {
-        Role::Surf => HOME_URL,
-        Role::Internal => SETTINGS_URL,
-    });
+    let url = CefString::from(url);
     let background_color = match role {
-        // Surf: opaque white backing (the page paints its own background).
-        Role::Surf => 0xFFFF_FFFFu32,
+        // Slot: opaque white backing (the page paints its own background).
+        Role::Slot(_) => 0xFFFF_FFFFu32,
         // Internal: opaque panel-colored backing so the settings card is solid;
         // the wgpu compositor rounds its corners. Color comes from the token set.
         Role::Internal => argb_from_hex(&crate::theme::Theme::load().colors.panel),
@@ -610,16 +687,18 @@ fn classify_input(input: &str) -> String {
     }
 }
 
-/// Current surf navigation state as JSON, for the `get_nav_state` IPC reply.
+/// The *active* slot's navigation state as JSON, for the `get_nav_state` IPC
+/// reply — the top bar always shows and drives the active slot (CD-09).
 fn nav_state_json() -> String {
-    let url = surf_url();
+    let i = active_slot();
+    let url = slot_url(i);
     let scheme = scheme_of(&url);
     serde_json::json!({
         "url": url,
-        "title": surf_title(),
-        "can_back": surf_can_back(),
-        "can_forward": surf_can_forward(),
-        "loading": surf_loading(),
+        "title": slot_title(i),
+        "can_back": slot_can_back(i),
+        "can_forward": slot_can_forward(i),
+        "loading": slot_loading(i),
         "scheme": scheme,
         "favorite": crate::memory::is_favorite(&url),
         // Whether the bar page should focus + select its input on this open
@@ -674,20 +753,21 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
                 .and_then(|x| x.as_str())
                 .ok_or((2, "missing 'input'".to_string()))?;
             let url = classify_input(input);
-            load_url(Role::Surf, &url);
+            // Load the active slot (spawning it if lazy — see navigate_active).
+            navigate_active(&url);
             request_overlay_close();
             Ok(serde_json::json!({ "ok": true, "url": url }).to_string())
         }
         "go_back" => {
-            go_back(Role::Surf);
+            go_back(Role::Slot(active_slot()));
             Ok(serde_json::json!({ "ok": true }).to_string())
         }
         "go_forward" => {
-            go_forward(Role::Surf);
+            go_forward(Role::Slot(active_slot()));
             Ok(serde_json::json!({ "ok": true }).to_string())
         }
         "reload" => {
-            reload(Role::Surf);
+            reload(Role::Slot(active_slot()));
             Ok(serde_json::json!({ "ok": true }).to_string())
         }
         // Command palette (CD-07). Live suggestions from favorites + history;
@@ -816,9 +896,9 @@ wrap_client! {
             Some(CyberDisplayHandler::new(self.role))
         }
         fn load_handler(&self) -> Option<LoadHandler> {
-            // Only the surf view drives the loading line / nav state.
+            // Only surf slots drive their loading line / nav state.
             match self.role {
-                Role::Surf => Some(CyberLoadHandler::new(self.role)),
+                Role::Slot(_) => Some(CyberLoadHandler::new(self.role)),
                 Role::Internal => None,
             }
         }
@@ -829,7 +909,7 @@ wrap_client! {
             // Web isolation + IPC lifecycle only on the internal view.
             match self.role {
                 Role::Internal => Some(InternalRequestHandler::new()),
-                Role::Surf => None,
+                Role::Slot(_) => None,
             }
         }
         fn on_process_message_received(
@@ -941,14 +1021,15 @@ wrap_display_handler! {
             _frame: Option<&mut Frame>,
             url: Option<&CefString>,
         ) {
-            if self.role == Role::Surf {
+            if let Role::Slot(i) = self.role {
                 let new_url = url.map(|u| u.to_string()).unwrap_or_default();
                 // Record a visit only when the address actually changes, so the
                 // repeated address-change events one navigation can emit don't
                 // over-count. The title arrives later (on_title_change), so this
                 // records with an empty title and lets that update fill it in.
+                // All slots record into the one shared history (CD-09).
                 let changed = {
-                    let mut nav = surf_nav().lock().unwrap();
+                    let mut nav = view(Role::Slot(i)).nav.lock().unwrap();
                     let changed = nav.url != new_url;
                     nav.url = new_url.clone();
                     changed
@@ -960,10 +1041,10 @@ wrap_display_handler! {
         }
 
         fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
-            if self.role == Role::Surf {
+            if let Role::Slot(i) = self.role {
                 let new_title = title.map(|t| t.to_string()).unwrap_or_default();
                 let url = {
-                    let mut nav = surf_nav().lock().unwrap();
+                    let mut nav = view(Role::Slot(i)).nav.lock().unwrap();
                     nav.title = new_title.clone();
                     nav.url.clone()
                 };
@@ -986,10 +1067,11 @@ wrap_load_handler! {
             can_go_back: c_int,
             can_go_forward: c_int,
         ) {
-            if self.role == Role::Surf {
-                SURF_LOADING.store(is_loading != 0, Ordering::Relaxed);
-                SURF_CAN_BACK.store(can_go_back != 0, Ordering::Relaxed);
-                SURF_CAN_FWD.store(can_go_forward != 0, Ordering::Relaxed);
+            if let Role::Slot(i) = self.role {
+                let mut nav = view(Role::Slot(i)).nav.lock().unwrap();
+                nav.loading = is_loading != 0;
+                nav.can_back = can_go_back != 0;
+                nav.can_forward = can_go_forward != 0;
             }
         }
     }
@@ -1021,7 +1103,7 @@ wrap_life_span_handler! {
             _extra_info: Option<&mut Option<DictionaryValue>>,
             _no_javascript_access: Option<&mut c_int>,
         ) -> c_int {
-            if self.role == Role::Surf
+            if self.role.is_slot()
                 && user_gesture != 0
                 && let (Some(browser), Some(url)) = (browser, target_url)
                 && let Some(frame) = browser.main_frame()

@@ -12,8 +12,9 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, Fullscreen, Window, WindowId, WindowLevel};
 
 use crate::browser::{self, Role};
-use crate::renderer::SurfaceRenderer;
+use crate::renderer::{SlotView, SurfaceRenderer};
 use crate::settings;
+use crate::slots::{self, MAX_SLOTS};
 use crate::theme::Theme;
 
 /// Per-frame ease factor for the top bar's slide (CD-08). Exponential approach,
@@ -49,16 +50,6 @@ fn hot_zone_contains(cx: f32, cy: f32, zx: f32, zy: f32, zw: f32) -> bool {
 /// visible bar rect, expanded by `margin`. `bottom` is the visible bar bottom.
 fn keep_region_contains(cx: f32, cy: f32, zx: f32, zw: f32, bottom: f32, margin: f32) -> bool {
     cx >= zx - margin && cx <= zx + zw + margin && cy >= 0.0 && cy <= bottom + margin
-}
-
-/// Surf-zone rectangle in device pixels: 60% width, 70% height, centered.
-fn zone_rect(width: u32, height: u32) -> (f32, f32, f32, f32) {
-    let (w, h) = (width as f32, height as f32);
-    let zw = (w * 0.60).round();
-    let zh = (h * 0.70).round();
-    let zx = ((w - zw) * 0.5).round();
-    let zy = ((h - zh) * 0.5).round();
-    (zx, zy, zw, zh)
 }
 
 /// Settings card rectangle in device pixels: a centered panel, clamped so it
@@ -116,7 +107,9 @@ pub fn run(windowed: bool) {
         overlay: Overlay::Closed,
         gear_hover: 0.0,
         gear_hover_target: 0.0,
-        loading_intensity: 0.0,
+        slot_count: 1,
+        active_slot: 0,
+        loading: [0.0; MAX_SLOTS],
         applied_title: String::new(),
         applied_topmost: false,
         isolation_tested: false,
@@ -148,7 +141,12 @@ struct Shell {
     overlay: Overlay,
     gear_hover: f32,
     gear_hover_target: f32,
-    loading_intensity: f32,
+    /// Number of live slots (columns), 1..=MAX_SLOTS.
+    slot_count: usize,
+    /// The active slot: keyboard input, the top bar and the scheme hint act on it.
+    active_slot: usize,
+    /// Per-slot loading-line intensity, eased toward on (loading) / off (done).
+    loading: [f32; MAX_SLOTS],
     applied_title: String,
     applied_topmost: bool,
     isolation_tested: bool,
@@ -214,14 +212,40 @@ fn keycode_to_vk(code: KeyCode) -> i32 {
 }
 
 impl Shell {
-    /// The view input is currently routed to (internal when an overlay is open,
-    /// else the surf view).
+    /// The view keyboard input is currently routed to (internal when an overlay
+    /// is open, else the active surf slot).
     fn active_role(&self) -> Role {
         if self.overlay == Overlay::Closed {
-            Role::Surf
+            Role::Slot(self.active_slot)
         } else {
             Role::Internal
         }
+    }
+
+    /// The current slot rectangles (device px) for a given surface size.
+    fn slot_rects_wh(&self, w: u32, h: u32) -> Vec<slots::Rect> {
+        slots::slot_rects(w, h, self.slot_count, self.scale, &self.theme.slots)
+    }
+
+    /// The active slot's rectangle for a given surface size (falls back to the
+    /// first slot if `active_slot` is somehow out of range).
+    fn active_rect_wh(&self, w: u32, h: u32) -> slots::Rect {
+        let rects = self.slot_rects_wh(w, h);
+        let i = self.active_slot.min(rects.len().saturating_sub(1));
+        rects[i]
+    }
+
+    /// The active slot's rectangle at the current surface size.
+    #[allow(dead_code)] // wired into the mouse router in Stage C
+    fn active_rect(&self) -> slots::Rect {
+        let (w, h) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
+        self.active_rect_wh(w, h)
+    }
+
+    /// How many slots fit the current surface width (1..=MAX_SLOTS).
+    fn capacity(&self) -> usize {
+        let (w, _) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
+        slots::max_slots(w, self.scale, &self.theme.slots)
     }
 
     /// The internal view's rectangle (device px) for the current overlay: the
@@ -233,16 +257,17 @@ impl Shell {
         }
     }
 
-    /// The top bar rectangle (device px): full surf-zone width, anchored to the
-    /// top edge, its height the input row plus the current body (favorites chips
-    /// or the suggestion list). The page renders at this full size; the composite
-    /// clips it to `bar_progress` during the slide.
+    /// The top bar rectangle (device px): the active slot's width, anchored to
+    /// the top edge, its height the input row plus the current body (favorites
+    /// chips or the suggestion list). The bar belongs to the active slot and
+    /// drives it (CD-09). The page renders at this full size; the composite clips
+    /// it to `bar_progress` during the slide.
     fn bar_rect(&self, w: u32, h: u32) -> (f32, f32, f32, f32) {
-        let (zx, _, zw, _) = zone_rect(w, h);
+        let r = self.active_rect_wh(w, h);
         let bh = (self.bar_content_logical() * self.scale)
             .round()
             .min(h as f32);
-        (zx, 0.0, zw, bh)
+        (r.x, 0.0, r.w, bh)
     }
 
     /// Bar content height in logical px (see [`bar_body_logical`]).
@@ -254,12 +279,12 @@ impl Shell {
         )
     }
 
-    /// The reveal hot zone: the free gap band above the surf zone, over the full
-    /// surf-zone width. Entering it (from `Closed`) slides the bar down.
+    /// The reveal hot zone: the free gap band above the active slot, over the
+    /// active slot's width. Entering it (from `Closed`) slides the bar down.
     fn in_bar_hot_zone(&self) -> bool {
         let (w, h) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
-        let (zx, zy, zw, _) = zone_rect(w, h);
-        hot_zone_contains(self.cursor_phys.x as f32, self.cursor_phys.y as f32, zx, zy, zw)
+        let r = self.active_rect_wh(w, h);
+        hot_zone_contains(self.cursor_phys.x as f32, self.cursor_phys.y as f32, r.x, r.y, r.w)
     }
 
     /// The keep-open region: the hot zone unioned with the visible bar rect, plus
@@ -267,28 +292,30 @@ impl Shell {
     /// not typing) arms the hysteresis hide.
     fn in_bar_keep_region(&self) -> bool {
         let (w, h) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
-        let (zx, zy, zw, _) = zone_rect(w, h);
+        let r = self.active_rect_wh(w, h);
         let (_, _, _, bh) = self.bar_rect(w, h);
-        let bottom = (bh * self.bar_progress).max(zy);
+        let bottom = (bh * self.bar_progress).max(r.y);
         keep_region_contains(
             self.cursor_phys.x as f32,
             self.cursor_phys.y as f32,
-            zx,
-            zw,
+            r.x,
+            r.w,
             bottom,
             6.0 * self.scale,
         )
     }
 
-    /// Top-left origin (device px) of the active view's rectangle.
+    /// Top-left origin (device px) of the active view's rectangle (the active
+    /// slot when no overlay is open, else the internal overlay).
     fn active_origin(&self) -> (f32, f32) {
         let (w, h) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
-        let (x, y, _, _) = if self.overlay == Overlay::Closed {
-            zone_rect(w, h)
+        if self.overlay == Overlay::Closed {
+            let r = self.active_rect_wh(w, h);
+            (r.x, r.y)
         } else {
-            self.internal_rect(w, h)
-        };
-        (x, y)
+            let (x, y, _, _) = self.internal_rect(w, h);
+            (x, y)
+        }
     }
 
     /// Reveal the bar (hover-to-top or Ctrl+L). `autofocus` selects the input on
@@ -355,7 +382,7 @@ impl Shell {
             if self.overlay == Overlay::Bar {
                 self.overlay = Overlay::Closed;
                 browser::set_focus(Role::Internal, false);
-                browser::set_focus(Role::Surf, true);
+                browser::set_focus(Role::Slot(self.active_slot), true);
             }
         } else if self.bar_target > 0.5 && self.bar_progress > 0.99 {
             self.bar_progress = 1.0;
@@ -404,17 +431,17 @@ impl Shell {
         match next {
             Overlay::Settings => {
                 browser::show_internal_settings();
-                browser::set_focus(Role::Surf, false);
+                browser::set_focus(Role::Slot(self.active_slot), false);
                 browser::set_focus(Role::Internal, true);
             }
             Overlay::Bar => {
                 browser::show_internal_command();
-                browser::set_focus(Role::Surf, false);
+                browser::set_focus(Role::Slot(self.active_slot), false);
                 browser::set_focus(Role::Internal, true);
             }
             Overlay::Closed => {
                 browser::set_focus(Role::Internal, false);
-                browser::set_focus(Role::Surf, true);
+                browser::set_focus(Role::Slot(self.active_slot), true);
             }
         }
     }
@@ -435,10 +462,34 @@ impl Shell {
     fn push_geometry(&mut self) {
         if let Some(r) = self.renderer.as_ref() {
             let (w, h) = r.size();
-            let (_, _, zw, zh) = zone_rect(w, h);
-            browser::set_view_geometry(Role::Surf, zw as u32, zh as u32, self.scale);
+            for (i, rc) in self.slot_rects_wh(w, h).iter().enumerate() {
+                browser::set_view_geometry(Role::Slot(i), rc.w as u32, rc.h as u32, self.scale);
+            }
             let (_, _, iw, ih) = self.internal_rect(w, h);
             browser::set_view_geometry(Role::Internal, iw as u32, ih as u32, self.scale);
+        }
+    }
+
+    /// Notify CEF that every live slot view (and the internal view) was resized.
+    fn notify_all_resized(&self) {
+        for i in 0..self.slot_count {
+            browser::notify_resized(Role::Slot(i));
+        }
+        browser::notify_resized(Role::Internal);
+    }
+
+    /// Re-clamp the live slot count to what the current width allows (called on
+    /// resize / DPI change). Stage B closes the excess slots' browsers here; in
+    /// Stage A there is only ever one slot, so this just keeps `active_slot` in
+    /// range.
+    fn reflow_slots(&mut self) {
+        let cap = self.capacity().max(1);
+        if self.slot_count > cap {
+            self.slot_count = cap;
+        }
+        if self.active_slot >= self.slot_count {
+            self.active_slot = self.slot_count - 1;
+            browser::set_active_slot(self.active_slot);
         }
     }
 
@@ -512,16 +563,16 @@ impl ApplicationHandler for Shell {
                 if let Some(r) = self.renderer.as_mut() {
                     r.resize(size.width, size.height);
                 }
+                self.reflow_slots();
                 self.push_geometry();
-                browser::notify_resized(Role::Surf);
-                browser::notify_resized(Role::Internal);
+                self.notify_all_resized();
             }
 
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.scale = scale_factor as f32;
+                self.reflow_slots();
                 self.push_geometry();
-                browser::notify_resized(Role::Surf);
-                browser::notify_resized(Role::Internal);
+                self.notify_all_resized();
             }
 
             WindowEvent::ModifiersChanged(mods) => {
@@ -552,15 +603,15 @@ impl ApplicationHandler for Shell {
                     self.toggle_settings();
                     return;
                 }
-                // Mouse buttons 4/5 are Back/Forward on the surf view.
-                if down && self.active_role() == Role::Surf {
+                // Mouse buttons 4/5 are Back/Forward on the active slot.
+                if down && self.overlay == Overlay::Closed {
                     match button {
                         MouseButton::Back => {
-                            browser::go_back(Role::Surf);
+                            browser::go_back(Role::Slot(self.active_slot));
                             return;
                         }
                         MouseButton::Forward => {
-                            browser::go_forward(Role::Surf);
+                            browser::go_forward(Role::Slot(self.active_slot));
                             return;
                         }
                         _ => {}
@@ -625,32 +676,34 @@ impl ApplicationHandler for Shell {
                     }
                     return;
                 }
-                // Surf navigation shortcuts (only while the surf view is active).
+                // Surf navigation shortcuts (only while no overlay is open) act on
+                // the active slot.
                 if event.state == ElementState::Pressed
-                    && self.active_role() == Role::Surf
+                    && self.overlay == Overlay::Closed
                     && let PhysicalKey::Code(code) = event.physical_key
                 {
+                    let active = Role::Slot(self.active_slot);
                     let (ctrl, alt, shift) =
                         (self.mods.control_key(), self.mods.alt_key(), self.mods.shift_key());
                     match code {
                         KeyCode::F5 => {
-                            browser::reload(Role::Surf);
+                            browser::reload(active);
                             return;
                         }
                         KeyCode::KeyR if ctrl => {
                             if shift {
-                                browser::reload_ignore_cache(Role::Surf);
+                                browser::reload_ignore_cache(active);
                             } else {
-                                browser::reload(Role::Surf);
+                                browser::reload(active);
                             }
                             return;
                         }
                         KeyCode::ArrowLeft if alt => {
-                            browser::go_back(Role::Surf);
+                            browser::go_back(active);
                             return;
                         }
                         KeyCode::ArrowRight if alt => {
-                            browser::go_forward(Role::Surf);
+                            browser::go_forward(active);
                             return;
                         }
                         _ => {}
@@ -672,7 +725,7 @@ impl ApplicationHandler for Shell {
 
             WindowEvent::RedrawRequested => {
                 let time = self.start.elapsed().as_secs_f32();
-                let (scale, hover, load) = (self.scale, self.gear_hover, self.loading_intensity);
+                let (scale, hover) = (self.scale, self.gear_hover);
                 let is_bar = self.overlay == Overlay::Bar;
                 // The overlay is composited while settings is open, or while the
                 // bar has any of itself showing (during the slide up/down).
@@ -682,27 +735,36 @@ impl ApplicationHandler for Shell {
                     Overlay::Closed => false,
                 };
                 let bar_progress = self.bar_progress;
-                let internal = self.renderer.as_ref().map(|r| {
-                    let (w, h) = r.size();
-                    self.internal_rect(w, h)
-                });
-                if let (Some(r), Some(internal)) = (self.renderer.as_mut(), internal) {
-                    let (w, h) = r.size();
-                    r.render(
-                        time,
-                        zone_rect(w, h),
-                        internal,
-                        gear_geom(w, scale),
-                        settings::feather_edges(),
-                        settings::animated_background(),
-                        settings::glow_intensity(),
-                        scale,
-                        open,
-                        is_bar,
-                        bar_progress,
-                        hover,
-                        load,
-                    );
+                let size = self.renderer.as_ref().map(|r| r.size());
+                if let Some((w, h)) = size {
+                    let internal = self.internal_rect(w, h);
+                    let slot_views: Vec<SlotView> = self
+                        .slot_rects_wh(w, h)
+                        .iter()
+                        .enumerate()
+                        .map(|(i, rc)| SlotView {
+                            rect: (rc.x, rc.y, rc.w, rc.h),
+                            loading: self.loading.get(i).copied().unwrap_or(0.0),
+                            active: i == self.active_slot,
+                            index: i,
+                        })
+                        .collect();
+                    if let Some(r) = self.renderer.as_mut() {
+                        r.render(
+                            time,
+                            &slot_views,
+                            internal,
+                            gear_geom(w, scale),
+                            settings::feather_edges(),
+                            settings::animated_background(),
+                            settings::glow_intensity(),
+                            scale,
+                            open,
+                            is_bar,
+                            bar_progress,
+                            hover,
+                        );
+                    }
                 }
             }
 
@@ -711,16 +773,29 @@ impl ApplicationHandler for Shell {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // Create both OSR views once the CEF context is initialised.
+        // Create the eager slot 0 + the internal overlay view once the CEF
+        // context is initialised. Slots 1..N are lazy (spawned on first navigate).
         if !self.views_started
             && browser::context_ready()
             && let Some(window) = self.window.clone()
         {
             self.push_geometry();
             let hwnd = window_hwnd(&window);
-            browser::create_browser(Role::Surf, hwnd);
+            browser::set_active_slot(0);
+            browser::create_browser(Role::Slot(0), hwnd);
             browser::create_browser(Role::Internal, hwnd);
             self.views_started = true;
+        }
+
+        // Spawn a lazy slot's browser on its first navigation (queued by the
+        // `navigate` IPC; done here because the main thread owns the HWND).
+        if self.views_started
+            && let Some((slot, url)) = browser::take_pending_spawn()
+            && let Some(window) = self.window.clone()
+        {
+            self.push_geometry();
+            let hwnd = window_hwnd(&window);
+            browser::create_browser_url(Role::Slot(slot), hwnd, &url);
         }
 
         // Drive the top bar's reveal/hide state machine and slide easing.
@@ -753,13 +828,16 @@ impl ApplicationHandler for Shell {
         // Ease the gear hover glow toward its target.
         self.gear_hover += (self.gear_hover_target - self.gear_hover) * 0.25;
 
-        // Ease the loading line toward on (loading) / off (done).
-        let load_target = if browser::surf_loading() { 1.0 } else { 0.0 };
-        self.loading_intensity += (load_target - self.loading_intensity) * 0.15;
+        // Ease each slot's loading line toward on (loading) / off (done).
+        for i in 0..self.slot_count {
+            let target = if browser::slot_loading(i) { 1.0 } else { 0.0 };
+            self.loading[i] += (target - self.loading[i]) * 0.15;
+        }
 
-        // In windowed dev mode, reflect the page title in the OS window title.
+        // In windowed dev mode, reflect the active slot's page title in the OS
+        // window title.
         if self.windowed {
-            let title = browser::surf_title();
+            let title = browser::slot_title(self.active_slot);
             if title != self.applied_title
                 && let Some(window) = self.window.as_ref()
             {
@@ -782,9 +860,11 @@ impl ApplicationHandler for Shell {
             self.applied_cursor = icon;
         }
 
-        // Upload freshly painted frames into their textures.
+        // Upload freshly painted frames into their textures (per slot + overlay).
         if let Some(r) = self.renderer.as_mut() {
-            browser::with_dirty_frame(Role::Surf, |data, w, h| r.upload_page(data, w, h));
+            for i in 0..self.slot_count {
+                browser::with_dirty_frame(Role::Slot(i), |data, w, h| r.upload_slot(i, data, w, h));
+            }
             browser::with_dirty_frame(Role::Internal, |data, w, h| r.upload_panel(data, w, h));
         }
 

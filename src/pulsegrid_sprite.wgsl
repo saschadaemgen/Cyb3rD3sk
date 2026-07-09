@@ -21,7 +21,7 @@ struct Globals {
     zone_feather   : f32,         // soft shadow edge width (px)
     zone_count     : u32,         // active content rects (0 for the bake)
     _pad           : vec2<f32>,
-    zones          : array<vec4<f32>, 4>,  // content rects (x, y, w, h) in px
+    zones          : array<vec4<f32>, 6>,  // content rects (x, y, w, h) in px
 };
 
 @group(0) @binding(0) var<uniform> G : Globals;
