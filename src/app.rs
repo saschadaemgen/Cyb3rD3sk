@@ -421,6 +421,36 @@ impl Shell {
         self.reveal_bar(true);
     }
 
+    /// Open `url` in a new slot beside the source slot — a user-gesture popup or
+    /// a Ctrl-/middle-click on a link (D-0018). The new slot is one unit, spawns
+    /// immediately with the URL, and becomes active. If the grid has no room, fall
+    /// back to the CD-04 behavior: navigate the source slot in place.
+    fn open_in_new_slot(&mut self, source_id: usize, url: String) {
+        let has_room = self.order.len() < MAX_SLOTS && self.total_units() < self.capacity() as u32;
+        let Some(free) = slots::free_id(&self.order).filter(|_| has_room) else {
+            browser::load_url(Role::Slot(source_id), &url);
+            return;
+        };
+        if self.overlay == Overlay::Closed {
+            browser::set_focus(Role::Slot(self.active_slot), false);
+        }
+        // Insert right of the source slot (the same tested helper add_slot uses,
+        // with the source id instead of the active id).
+        let pos = slots::insert_position(&self.order, source_id);
+        self.order.insert(pos, free);
+        self.width_units[free] = 1;
+        self.armed[free] = None;
+        self.loading[free] = 0.0;
+        self.active_slot = free;
+        browser::set_active_slot(free);
+        if let Some(window) = self.window.clone() {
+            self.push_geometry();
+            let hwnd = window_hwnd(&window);
+            browser::create_browser_url(Role::Slot(free), hwnd, &url);
+        }
+        self.notify_all_resized();
+    }
+
     /// Close the active slot (Ctrl+W). The last slot cannot be closed. The
     /// browser shuts down cleanly, the group recenters, and the nearest neighbor
     /// becomes active.
@@ -923,7 +953,16 @@ impl ApplicationHandler for Shell {
         }
         let mut attributes = Window::default_attributes().with_title("CARVILON CyberDesk");
         attributes = if self.windowed {
-            attributes.with_inner_size(LogicalSize::new(1600.0, 900.0))
+            // `CYBERDESK_WINDOW_SIZE=WxH` overrides the dev window size (default
+            // 1600x900) — e.g. to exercise multi-slot layouts on a non-ultrawide.
+            let (dw, dh) = std::env::var("CYBERDESK_WINDOW_SIZE")
+                .ok()
+                .and_then(|s| {
+                    let (w, h) = s.split_once('x')?;
+                    Some((w.trim().parse::<f64>().ok()?, h.trim().parse::<f64>().ok()?))
+                })
+                .unwrap_or((1600.0, 900.0));
+            attributes.with_inner_size(LogicalSize::new(dw, dh))
         } else {
             attributes
                 .with_fullscreen(Some(Fullscreen::Borderless(None)))
@@ -1281,6 +1320,13 @@ impl ApplicationHandler for Shell {
             self.push_geometry();
             let hwnd = window_hwnd(&window);
             browser::create_browser_url(Role::Slot(slot), hwnd, &url);
+        }
+
+        // Open queued user-gesture popups / modified-clicks in new slots (D-0018).
+        if self.views_started {
+            for (source, url) in browser::take_pending_new_slots() {
+                self.open_in_new_slot(source, url);
+            }
         }
 
         // Drive the top bar's reveal/hide state machine and slide easing.

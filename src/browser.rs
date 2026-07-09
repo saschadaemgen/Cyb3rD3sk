@@ -72,11 +72,6 @@ impl Role {
             Role::Internal => MAX_SLOTS,
         }
     }
-    /// True for any surf slot (the web-facing views), false for the internal
-    /// overlay. Replaces the old `== Role::Surf` checks in the handlers.
-    fn is_slot(self) -> bool {
-        matches!(self, Role::Slot(_))
-    }
 }
 
 // --- Per-view shared state (main thread <-> CEF UI thread) ------------------
@@ -218,6 +213,21 @@ fn navigate_active(url: &str) {
 /// Take a queued lazy-slot spawn `(slot, url)`, if any (main thread).
 pub fn take_pending_spawn() -> Option<(usize, String)> {
     pending_spawn().lock().unwrap().take()
+}
+
+/// User-gesture popups (a real click on `target=_blank`, or a Ctrl-/middle-click
+/// on a link — Chromium routes these through `on_before_popup` as tab
+/// dispositions with a gesture) queued by the CEF UI thread for the main thread
+/// to open in a new slot beside the source slot (D-0018). Holds
+/// `(source_slot_id, target_url)`.
+fn pending_new_slot() -> &'static Mutex<Vec<(usize, String)>> {
+    static P: OnceLock<Mutex<Vec<(usize, String)>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Drain the queued new-slot open requests (main thread).
+pub fn take_pending_new_slots() -> Vec<(usize, String)> {
+    std::mem::take(&mut pending_new_slot().lock().unwrap())
 }
 
 // The command bar's `navigate` sets this on the CEF UI thread; the main thread
@@ -1101,13 +1111,15 @@ wrap_life_span_handler! {
     }
 
     impl LifeSpanHandler {
-        // Popup policy (D-0011): a genuine user gesture (a click on a
-        // target=_blank link) navigates THIS view to the target and suppresses
-        // the popup window; popups without a gesture (ad/script `window.open`)
-        // are suppressed outright. Either way, no separate window is ever opened.
+        // Popup policy (D-0011 → D-0018): a genuine user-gesture popup (a click on
+        // a `target=_blank` link, or a Ctrl-/middle-click on a link — Chromium
+        // routes these here as tab dispositions with a gesture) is queued to open
+        // in a NEW slot beside the source (the main thread decides capacity and
+        // falls back to navigate-in-place when the grid is full). Popups without a
+        // gesture (ad/script `window.open`) are dropped. No window ever opens.
         fn on_before_popup(
             &self,
-            browser: Option<&mut Browser>,
+            _browser: Option<&mut Browser>,
             _frame: Option<&mut Frame>,
             _popup_id: c_int,
             target_url: Option<&CefString>,
@@ -1121,12 +1133,11 @@ wrap_life_span_handler! {
             _extra_info: Option<&mut Option<DictionaryValue>>,
             _no_javascript_access: Option<&mut c_int>,
         ) -> c_int {
-            if self.role.is_slot()
+            if let Role::Slot(i) = self.role
                 && user_gesture != 0
-                && let (Some(browser), Some(url)) = (browser, target_url)
-                && let Some(frame) = browser.main_frame()
+                && let Some(url) = target_url
             {
-                frame.load_url(Some(url));
+                pending_new_slot().lock().unwrap().push((i, url.to_string()));
             }
             1
         }
