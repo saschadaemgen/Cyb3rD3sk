@@ -18,14 +18,13 @@ use crate::settings;
 use crate::slots::{self, MAX_SLOTS};
 use crate::theme::Theme;
 
-/// Per-frame ease factor for the top bar's slide (CD-08). Exponential approach,
-/// matching the gear/loading eases already in this loop; ~180 ms ease-out at the
-/// loop's ~60 fps.
-const BAR_EASE: f32 = 0.22;
-
-/// Grace period after the cursor leaves the bar's keep region before it hides
-/// (hysteresis — no flicker on grazing touches, CD-08).
+/// Grace period after the cursor leaves the engaged band region before it
+/// disengages (hysteresis — no flicker on grazing touches, CD-08 → CD-12).
 const BAR_HIDE_HYSTERESIS: Duration = Duration::from_millis(250);
+
+/// After the band disengages, keep it composited this long so the page's
+/// per-ensemble fade-out (CSS ~220 ms) completes before compositing stops (CD-12).
+const BAND_FADE_LINGER: Duration = Duration::from_millis(300);
 
 /// Debounce for session-workspace saves (CD-10): a meaningful change arms a save
 /// this far in the future, coalescing bursts off the render hot path.
@@ -44,32 +43,6 @@ fn ease_rect(cur: slots::Rect, target: slots::Rect, k: f32) -> slots::Rect {
         w: cur.w + (target.w - cur.w) * k,
         h: cur.h + (target.h - cur.h) * k,
     }
-}
-
-/// Bar content height in logical px, from the shared theme tokens (so the page
-/// and the host-side sizing agree): the input row, plus the favorites chip row
-/// (an untouched/empty input) or the suggestion list (while typing).
-fn bar_body_logical(cmd: &crate::theme::Command, rows: usize, input_empty: bool) -> f32 {
-    let body = if input_empty {
-        if rows > 0 { cmd.chip_row } else { 0.0 }
-    } else if rows > 0 {
-        rows as f32 * cmd.row_height + 2.0 * cmd.list_pad
-    } else {
-        0.0
-    };
-    cmd.input_height + body
-}
-
-/// Cursor hit-test for the bar's reveal hot zone: the free gap band above the
-/// surf zone, over the full surf-zone width.
-fn hot_zone_contains(cx: f32, cy: f32, zx: f32, zy: f32, zw: f32) -> bool {
-    cx >= zx && cx <= zx + zw && cy >= 0.0 && cy < zy
-}
-
-/// Cursor hit-test for the bar's keep-open region: the hot zone unioned with the
-/// visible bar rect, expanded by `margin`. `bottom` is the visible bar bottom.
-fn keep_region_contains(cx: f32, cy: f32, zx: f32, zw: f32, bottom: f32, margin: f32) -> bool {
-    cx >= zx - margin && cx <= zx + zw + margin && cy >= 0.0 && cy <= bottom + margin
 }
 
 /// Settings card rectangle in device pixels: a centered panel, clamped so it
@@ -99,7 +72,7 @@ fn gear_geom(width: u32, scale: f32) -> (f32, f32, f32) {
 enum Overlay {
     Closed,
     Settings,
-    Bar,
+    Command,
 }
 
 pub fn run(windowed: bool) {
@@ -145,10 +118,10 @@ pub fn run(windowed: bool) {
         applied_topmost: false,
         isolation_tested: false,
         applied_internal: (0, 0),
-        bar_progress: 0.0,
-        bar_target: 0.0,
+        engaged_slot: None,
         bar_hide_at: None,
-        bar_engaged: false,
+        band_off_at: None,
+        frame_sig: String::new(),
     };
     event_loop.run_app(&mut app).expect("event loop error");
 
@@ -215,21 +188,21 @@ struct Shell {
     applied_title: String,
     applied_topmost: bool,
     isolation_tested: bool,
-    /// Internal-view size (device px) currently applied, so the bar's resize in
-    /// `about_to_wait` fires only when its body (chips / suggestions) changes.
+    /// Internal-view size (device px) currently applied, so the resize in
+    /// `about_to_wait` fires only when it changes.
     applied_internal: (u32, u32),
-    /// Top bar slide progress (0 = hidden above the top edge, 1 = fully down) and
-    /// its target; the composite clips the bar to `progress * height` (CD-08).
-    bar_progress: f32,
-    bar_target: f32,
-    /// Armed when the cursor leaves the bar's keep region; the bar hides when it
-    /// fires (hysteresis). Cleared if the cursor returns first.
+    /// The slot whose floating ensemble is currently engaged (revealed + driven),
+    /// or `None` (CD-12). Follows the band hover / Ctrl+L; pushed to the page.
+    engaged_slot: Option<usize>,
+    /// Armed when the cursor leaves the engaged band's interactive region; the
+    /// band disengages when it fires (hysteresis, reused from CD-08).
     bar_hide_at: Option<Instant>,
-    /// Whether the cursor has entered the bar since it was revealed. A keyboard
-    /// (Ctrl+L) reveal only becomes subject to the mouse-out hysteresis once the
-    /// user has actually moved into the bar — otherwise it hides before they can
-    /// type; a hover reveal engages on its first frame.
-    bar_engaged: bool,
+    /// After disengaging, keep the band composited until this instant so the
+    /// page's fade-out completes, then finalise to `Closed` (CD-12).
+    band_off_at: Option<Instant>,
+    /// The last frame state pushed to the page, so a push fires only on change
+    /// (target rects + engaged slot) — not per frame (the CD-11 IPC cadence).
+    frame_sig: String,
 }
 
 fn window_hwnd(window: &Window) -> isize {
@@ -324,14 +297,6 @@ impl Shell {
     /// The animated slot rects in display order.
     fn disp_slots(&self) -> Vec<slots::Rect> {
         self.order.iter().map(|&id| self.disp_rect(id)).collect()
-    }
-
-    /// The active slot's **target** (settled) rectangle — the top bar reads this
-    /// so its width and CEF view stay stable during a reflow (only the composited
-    /// slots animate); the bar appears at the active column's final position.
-    fn active_target_rect(&self, w: u32, h: u32) -> slots::Rect {
-        let rects = self.slot_rects_wh(w, h);
-        rects[self.active_position().min(rects.len().saturating_sub(1))]
     }
 
     /// The slot id + animated rect whose rectangle contains the cursor, if any
@@ -433,13 +398,14 @@ impl Shell {
                     None
                 }
             }
-            Overlay::Bar => {
-                // Over the visible (slid-down) bar strip -> the internal view;
-                // elsewhere the slot under the cursor.
-                let (bx, by, bw, bh) = self.bar_rect(w, h);
-                let visible_bottom = by + bh * self.bar_progress;
-                if cx >= bx && cx <= bx + bw && cy >= by && cy <= visible_bottom {
-                    Some((Role::Internal, (bx, by)))
+            Overlay::Command => {
+                // Over the engaged ensemble's band column, or the launcher strip ->
+                // the transparent band (internal view, origin at the window origin);
+                // elsewhere the slot under the cursor (so another column's gap can
+                // engage it, and slots stay usable). CD-12.
+                let over_ensemble = self.engaged_band_rect().map(|r| self.point_in(r)).unwrap_or(false);
+                if over_ensemble || self.point_in(self.launcher_rect()) {
+                    Some((Role::Internal, (0.0, 0.0)))
                 } else {
                     self.slot_at_cursor().map(|(id, r)| (Role::Slot(id), (r.x, r.y)))
                 }
@@ -523,7 +489,7 @@ impl Shell {
         self.notify_all_resized();
         // Reveal the bar focused + empty (the lazy slot's URL is empty), ready to
         // type the first address (which spawns the browser via `navigate`).
-        self.reveal_bar(true);
+        self.reveal_active_capsule();
     }
 
     /// Open `url` in a new slot beside the source slot — a user-gesture popup or
@@ -615,130 +581,203 @@ impl Shell {
     }
 
     /// The internal view's rectangle (device px) for the current overlay: the
-    /// full top bar for `Bar`, the centered card for `Settings`.
+    /// full-width transparent command band for `Command` (CD-12), the centered
+    /// card for `Settings`.
     fn internal_rect(&self, w: u32, h: u32) -> (f32, f32, f32, f32) {
         match self.overlay {
-            Overlay::Bar => self.bar_rect(w, h),
+            Overlay::Command => (0.0, 0.0, w as f32, self.band_height()),
             _ => panel_rect(w, h),
         }
     }
 
-    /// The top bar rectangle (device px): the active slot's width, anchored to
-    /// the top edge, its height the input row plus the current body (favorites
-    /// chips or the suggestion list). The bar belongs to the active slot and
-    /// drives it (CD-09). The page renders at this full size; the composite clips
-    /// it to `bar_progress` during the slide.
-    fn bar_rect(&self, w: u32, h: u32) -> (f32, f32, f32, f32) {
-        let r = self.active_target_rect(w, h);
-        let bh = (self.bar_content_logical() * self.scale)
-            .round()
-            .min(h as f32);
-        (r.x, 0.0, r.w, bh)
+    /// The command band height in device px (a fixed token band; the ensembles
+    /// float within it).
+    fn band_height(&self) -> f32 {
+        (self.theme.command.band_height * self.scale).round()
     }
 
-    /// Bar content height in logical px (see [`bar_body_logical`]).
-    fn bar_content_logical(&self) -> f32 {
-        bar_body_logical(
-            &self.theme.command,
-            browser::command_rows(),
-            browser::bar_input_empty(),
-        )
-    }
-
-    /// The reveal hot zone: the free gap band above the active slot, over the
-    /// active slot's width. Entering it (from `Closed`) slides the bar down.
-    fn in_bar_hot_zone(&self) -> bool {
+    /// The slot whose floating-ensemble band segment the cursor is over — the top
+    /// gap above a slot, within its x-range. Drives which ensemble engages.
+    fn band_hot_slot(&self) -> Option<usize> {
         let (w, h) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
-        let r = self.active_target_rect(w, h);
-        hot_zone_contains(self.cursor_phys.x as f32, self.cursor_phys.y as f32, r.x, r.y, r.w)
-    }
-
-    /// The keep-open region: the hot zone unioned with the visible bar rect, plus
-    /// a small margin so a graze along the edge does not flicker. Leaving it (and
-    /// not typing) arms the hysteresis hide.
-    fn in_bar_keep_region(&self) -> bool {
-        let (w, h) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
-        let r = self.active_target_rect(w, h);
-        let (_, _, _, bh) = self.bar_rect(w, h);
-        let bottom = (bh * self.bar_progress).max(r.y);
-        keep_region_contains(
-            self.cursor_phys.x as f32,
-            self.cursor_phys.y as f32,
-            r.x,
-            r.w,
-            bottom,
-            6.0 * self.scale,
-        )
-    }
-
-    /// Reveal the bar (hover-to-top or Ctrl+L). `autofocus` selects the input on
-    /// open (Ctrl+L) versus leaving it unfocused (hover). A fresh reveal starts
-    /// the slide from fully hidden.
-    fn reveal_bar(&mut self, autofocus: bool) {
-        browser::set_bar_autofocus(autofocus);
-        if self.overlay != Overlay::Bar {
-            self.bar_progress = 0.0;
+        let rects = self.slot_rects_wh(w, h);
+        let (cx, cy) = (self.cursor_phys.x as f32, self.cursor_phys.y as f32);
+        let top = rects.first().map(|r| r.y).unwrap_or(0.0);
+        if cy < 0.0 || cy >= top {
+            return None;
         }
-        self.bar_target = 1.0;
-        self.bar_hide_at = None;
-        // The mouse-out hysteresis waits until the cursor enters the bar; a hover
-        // reveal engages on the next frame (cursor is already in the hot zone).
-        self.bar_engaged = false;
-        self.set_overlay(Overlay::Bar);
+        self.order
+            .iter()
+            .enumerate()
+            .find(|&(p, _)| cx >= rects[p].x && cx <= rects[p].x + rects[p].w)
+            .map(|(_, &id)| id)
     }
 
-    /// Start hiding the bar (slide up); it finalises to `Closed` in `update_bar`.
-    fn hide_bar(&mut self) {
-        self.bar_target = 0.0;
-        self.bar_hide_at = None;
+    /// The engaged ensemble's interaction rect (device px): the band column above
+    /// the engaged slot, where its capsule / orbs / suggestions live.
+    fn engaged_band_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        let (w, h) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
+        let s = self.engaged_slot?;
+        let rects = self.slot_rects_wh(w, h);
+        let p = self.order.iter().position(|&id| id == s)?;
+        let r = rects[p];
+        Some((r.x, 0.0, r.w, self.band_height()))
     }
 
-    /// Drive the bar state machine once per frame: hover reveal, hysteresis hide
-    /// (with the typing exception), the slide easing, and the hide finalisation.
-    fn update_bar(&mut self) {
+    /// The shared favorites launcher's interaction rect (device px): a centered
+    /// top strip covering the tile row.
+    fn launcher_rect(&self) -> (f32, f32, f32, f32) {
+        let (w, _) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
+        let c = &self.theme.command;
+        let tiles = c.max_results.max(1) as f32;
+        let lw = (tiles * (c.tile_size + c.tile_gap) * self.scale).min(w as f32 * 0.7);
+        let lh = (c.launcher_top + c.tile_size + 8.0) * self.scale;
+        ((w as f32 - lw) * 0.5, 0.0, lw, lh)
+    }
+
+    fn point_in(&self, r: (f32, f32, f32, f32)) -> bool {
+        let (cx, cy) = (self.cursor_phys.x as f32, self.cursor_phys.y as f32);
+        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+    }
+
+    /// Engage slot `s`'s floating ensemble: reveal it and bind the band to it.
+    /// `autofocus` focuses its capsule (Ctrl+L). Opens the band on first engage.
+    fn engage(&mut self, s: usize, autofocus: bool) {
+        let first = self.overlay != Overlay::Command;
+        self.engaged_slot = Some(s);
+        self.bar_hide_at = None;
+        self.band_off_at = None;
+        if first {
+            self.overlay = Overlay::Command;
+            if let Some(r) = self.renderer.as_ref() {
+                let (w, h) = r.size();
+                let (_, _, iw, ih) = self.internal_rect(w, h);
+                browser::set_view_geometry(Role::Internal, iw as u32, ih as u32, self.scale);
+                browser::notify_resized(Role::Internal);
+                self.applied_internal = (iw as u32, ih as u32);
+            }
+            browser::show_internal_command();
+            browser::set_focus(Role::Slot(self.active_slot), false);
+            browser::set_focus(Role::Internal, true);
+        }
+        self.push_frame(autofocus);
+    }
+
+    /// Disengage the band (cursor left / committed navigation / ESC): hide every
+    /// ensemble and start the compositing linger so the fade-out completes.
+    fn disengage(&mut self) {
+        if self.engaged_slot.is_none() && self.overlay != Overlay::Command {
+            return;
+        }
+        self.engaged_slot = None;
+        self.bar_hide_at = None;
+        self.band_off_at = Some(Instant::now() + BAND_FADE_LINGER);
+        self.push_frame(false);
+    }
+
+    /// Build and push the frame state to the page when it changes (engaged slot or
+    /// target slot rects). Band-local DIP coordinates (band origin = window
+    /// origin). Pushed on change only — the page glides via CSS (CD-11 cadence).
+    fn push_frame(&mut self, autofocus: bool) {
+        use std::fmt::Write;
+        let (w, h) = match self.renderer.as_ref().map(|r| r.size()) {
+            Some(s) => s,
+            None => return,
+        };
+        let rects = self.slot_rects_wh(w, h);
+        let scale = self.scale as f64;
+        // Cheap change signature FIRST (computed every frame): the engaged slot +
+        // each slot's band-DIP x/w. It EXCLUDES autofocus (a transient) so a
+        // per-frame push(false) can't overwrite a pending Ctrl+L focus intent
+        // before the page (which pulls get_frame on load) consumes it.
+        let mut sig = format!("{:?}", self.engaged_slot);
+        for (p, &id) in self.order.iter().enumerate() {
+            let _ = write!(
+                sig,
+                ";{}:{},{}",
+                id,
+                (rects[p].x as f64 / scale).round(),
+                (rects[p].w as f64 / scale).round()
+            );
+        }
+        if !autofocus && sig == self.frame_sig {
+            return; // nothing changed — no IPC (the CD-11 on-change cadence)
+        }
+        self.frame_sig = sig;
+        // Build + push only on a real change.
+        let slots: Vec<serde_json::Value> = self
+            .order
+            .iter()
+            .enumerate()
+            .map(|(p, &id)| {
+                serde_json::json!({
+                    "id": id,
+                    "x": (rects[p].x as f64 / scale).round(),
+                    "w": (rects[p].w as f64 / scale).round(),
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "slots": slots,
+            "engaged": self.engaged_slot,
+            "autofocus": autofocus,
+        })
+        .to_string();
+        browser::set_frame_state(&payload);
+    }
+
+    /// Ctrl+L: reveal + focus the keyboard-active slot's own capsule.
+    fn reveal_active_capsule(&mut self) {
+        self.engage(self.active_slot, true);
+    }
+
+    /// Drive the floating command band once per frame: engage on band hover,
+    /// hysteresis disengage (typing exception), and the compositing linger.
+    fn update_band(&mut self) {
         match self.overlay {
             Overlay::Closed => {
-                if self.in_bar_hot_zone() {
-                    self.reveal_bar(false);
+                if let Some(s) = self.band_hot_slot() {
+                    self.engage(s, false);
                 }
             }
-            Overlay::Bar => {
-                let in_keep = self.in_bar_keep_region();
-                if in_keep {
-                    self.bar_engaged = true;
-                }
-                // A cursor over the bar, or a focused/typing input, keeps it open;
-                // the hysteresis only applies once the cursor has engaged the bar
-                // (so a Ctrl+L reveal is not hidden before the user can type).
-                let keep = in_keep || browser::bar_typing();
-                if keep {
+            Overlay::Command => {
+                let hot = self.band_hot_slot();
+                let over_ensemble = self.engaged_band_rect().map(|r| self.point_in(r)).unwrap_or(false);
+                let over_launcher = self.point_in(self.launcher_rect());
+                if let Some(s) = hot {
+                    if Some(s) != self.engaged_slot {
+                        self.engage(s, false);
+                    }
                     self.bar_hide_at = None;
-                } else if self.bar_target > 0.5 && self.bar_engaged {
+                    self.band_off_at = None;
+                } else if over_ensemble || over_launcher || browser::bar_typing() {
+                    self.bar_hide_at = None;
+                    self.band_off_at = None;
+                } else if self.engaged_slot.is_some() {
                     let now = Instant::now();
                     match self.bar_hide_at {
                         None => self.bar_hide_at = Some(now + BAR_HIDE_HYSTERESIS),
-                        Some(deadline) if now >= deadline => {
-                            self.bar_hide_at = None;
-                            self.hide_bar();
-                        }
+                        Some(deadline) if now >= deadline => self.disengage(),
                         _ => {}
                     }
                 }
+                // Re-push if the target layout shifted (reflow) while engaged.
+                self.push_frame(false);
             }
             Overlay::Settings => {}
         }
 
-        // Ease the slide toward its target and finalise a completed hide.
-        self.bar_progress += (self.bar_target - self.bar_progress) * BAR_EASE;
-        if self.bar_target < 0.5 && self.bar_progress < 0.01 {
-            self.bar_progress = 0.0;
-            if self.overlay == Overlay::Bar {
-                self.overlay = Overlay::Closed;
-                browser::set_focus(Role::Internal, false);
-                browser::set_focus(Role::Slot(self.active_slot), true);
-            }
-        } else if self.bar_target > 0.5 && self.bar_progress > 0.99 {
-            self.bar_progress = 1.0;
+        // Compositing linger: after disengaging, keep the band composited until
+        // the page's fade-out finishes, then finalise to Closed.
+        if self.overlay == Overlay::Command
+            && self.engaged_slot.is_none()
+            && let Some(deadline) = self.band_off_at
+            && Instant::now() >= deadline
+        {
+            self.band_off_at = None;
+            self.overlay = Overlay::Closed;
+            browser::set_focus(Role::Internal, false);
+            browser::set_focus(Role::Slot(self.active_slot), true);
         }
     }
 
@@ -758,22 +797,20 @@ impl Shell {
         (dx * dx + dy * dy).sqrt() <= r * 1.7
     }
 
-    /// Switch the overlay state machine: resize/navigate the internal view and
-    /// move keyboard focus accordingly. Closed <-> Settings <-> Command.
-    fn set_overlay(&mut self, next: Overlay) {
-        // Switching to Settings or Closed drops any bar slide state.
-        if next != Overlay::Bar {
-            self.bar_target = 0.0;
-            self.bar_progress = 0.0;
-            self.bar_hide_at = None;
+    /// Open the settings card (from any state) or close it back to `Closed`. The
+    /// command band (CD-12) is driven by engage/disengage, not this path.
+    fn toggle_settings(&mut self) {
+        if self.overlay == Overlay::Settings {
+            self.overlay = Overlay::Closed;
+            browser::set_focus(Role::Internal, false);
+            browser::set_focus(Role::Slot(self.active_slot), true);
+            return;
         }
-        self.overlay = next;
-        // Pre-size the bar to its opening body (favorites chips) so it appears at
-        // the right height instead of resizing a frame later.
-        if next == Overlay::Bar {
-            browser::prime_command_rows();
-        }
-        // Match the internal OSR view's size to the new overlay before it paints.
+        // From the band or closed → the settings card. Drop any band state.
+        self.engaged_slot = None;
+        self.bar_hide_at = None;
+        self.band_off_at = None;
+        self.overlay = Overlay::Settings;
         if let Some(r) = self.renderer.as_ref() {
             let (w, h) = r.size();
             let (_, _, iw, ih) = self.internal_rect(w, h);
@@ -781,31 +818,18 @@ impl Shell {
             browser::notify_resized(Role::Internal);
             self.applied_internal = (iw as u32, ih as u32);
         }
-        match next {
-            Overlay::Settings => {
-                browser::show_internal_settings();
-                browser::set_focus(Role::Slot(self.active_slot), false);
-                browser::set_focus(Role::Internal, true);
-            }
-            Overlay::Bar => {
-                browser::show_internal_command();
-                browser::set_focus(Role::Slot(self.active_slot), false);
-                browser::set_focus(Role::Internal, true);
-            }
-            Overlay::Closed => {
-                browser::set_focus(Role::Internal, false);
-                browser::set_focus(Role::Slot(self.active_slot), true);
-            }
-        }
+        browser::show_internal_settings();
+        browser::set_focus(Role::Slot(self.active_slot), false);
+        browser::set_focus(Role::Internal, true);
     }
 
-    fn toggle_settings(&mut self) {
-        let next = if self.overlay == Overlay::Settings {
-            Overlay::Closed
-        } else {
-            Overlay::Settings
-        };
-        self.set_overlay(next);
+    /// Close the settings card back to `Closed` (ESC).
+    fn close_settings(&mut self) {
+        if self.overlay == Overlay::Settings {
+            self.overlay = Overlay::Closed;
+            browser::set_focus(Role::Internal, false);
+            browser::set_focus(Role::Slot(self.active_slot), true);
+        }
     }
 
     fn mouse_mods(&self) -> u32 {
@@ -1196,8 +1220,8 @@ impl ApplicationHandler for Shell {
                         && let Role::Slot(id) = role
                     {
                         self.set_active(id);
-                        if self.overlay == Overlay::Bar {
-                            self.hide_bar();
+                        if self.overlay == Overlay::Command {
+                            self.disengage();
                         }
                     }
                     let (x, y) = self.view_coords(origin);
@@ -1227,7 +1251,7 @@ impl ApplicationHandler for Shell {
                     && self.mods.control_key()
                     && event.physical_key == PhysicalKey::Code(KeyCode::KeyL)
                 {
-                    self.reveal_bar(true);
+                    self.reveal_active_capsule();
                     return;
                 }
                 // Ctrl+D toggles the current surf page's favorite. Handled host-
@@ -1300,8 +1324,8 @@ impl ApplicationHandler for Shell {
                 // open -> close settings; else quit the shell.
                 if vk == 0x1B && event.state == ElementState::Pressed {
                     match self.overlay {
-                        Overlay::Bar => self.hide_bar(),
-                        Overlay::Settings => self.set_overlay(Overlay::Closed),
+                        Overlay::Command => self.disengage(),
+                        Overlay::Settings => self.close_settings(),
                         Overlay::Closed => event_loop.exit(),
                     }
                     return;
@@ -1356,15 +1380,11 @@ impl ApplicationHandler for Shell {
             WindowEvent::RedrawRequested => {
                 let time = self.start.elapsed().as_secs_f32();
                 let (scale, hover) = (self.scale, self.gear_hover);
-                let is_bar = self.overlay == Overlay::Bar;
-                // The overlay is composited while settings is open, or while the
-                // bar has any of itself showing (during the slide up/down).
-                let open = match self.overlay {
-                    Overlay::Settings => true,
-                    Overlay::Bar => self.bar_progress > 0.001,
-                    Overlay::Closed => false,
-                };
-                let bar_progress = self.bar_progress;
+                // `is_bar` now means the transparent CD-12 command band (vs the
+                // opaque settings card); `open` composites the internal view.
+                let is_bar = self.overlay == Overlay::Command;
+                let open = self.overlay != Overlay::Closed;
+                let bar_progress = 1.0;
                 let size = self.renderer.as_ref().map(|r| r.size());
                 if let Some((w, h)) = size {
                     let internal = self.internal_rect(w, h);
@@ -1444,17 +1464,16 @@ impl ApplicationHandler for Shell {
         }
 
         // Drive the top bar's reveal/hide state machine and slide easing.
-        self.update_bar();
+        self.update_band();
 
         // A committed navigation from the bar slides it away.
         if browser::take_overlay_close() {
-            self.hide_bar();
+            self.disengage();
         }
 
-        // Resize the bar's internal view when its body (favorites chips or the
-        // suggestion list) changes height, so the composite and the page stay in
-        // lockstep as it grows and shrinks.
-        if self.overlay == Overlay::Bar
+        // Keep the command band's internal view sized to the full-width band as
+        // the window changes (CD-12: the band spans the top, fixed height).
+        if self.overlay == Overlay::Command
             && let Some(r) = self.renderer.as_ref()
         {
             let (w, h) = r.size();
@@ -1545,58 +1564,3 @@ impl ApplicationHandler for Shell {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::theme::Command;
-
-    fn cmd() -> Command {
-        // The token values the "cyber" theme ships (theme.toml [command]).
-        Command {
-            input_height: 76.0,
-            row_height: 46.0,
-            list_pad: 8.0,
-            max_results: 6,
-            chip_row: 54.0,
-        }
-    }
-
-    #[test]
-    fn bar_height_untouched_input_is_input_plus_one_chip_row() {
-        let c = cmd();
-        // Favorites present -> a single chip row regardless of how many chips.
-        assert_eq!(bar_body_logical(&c, 3, true), 76.0 + 54.0);
-        assert_eq!(bar_body_logical(&c, 1, true), 76.0 + 54.0);
-        // No favorites -> input row only, no chip band.
-        assert_eq!(bar_body_logical(&c, 0, true), 76.0);
-    }
-
-    #[test]
-    fn bar_height_typing_is_input_plus_suggestion_rows() {
-        let c = cmd();
-        // N suggestion rows plus the list's top/bottom padding.
-        assert_eq!(bar_body_logical(&c, 3, false), 76.0 + 3.0 * 46.0 + 2.0 * 8.0);
-        // Empty result set while typing -> input row only.
-        assert_eq!(bar_body_logical(&c, 0, false), 76.0);
-    }
-
-    #[test]
-    fn hot_zone_is_the_gap_over_the_surf_width() {
-        // Surf zone at a 1600x900 window: zx=320, zy=135, zw=960.
-        let (zx, zy, zw) = (320.0, 135.0, 960.0);
-        assert!(hot_zone_contains(800.0, 10.0, zx, zy, zw)); // top-centre gap
-        assert!(hot_zone_contains(zx, 0.0, zx, zy, zw)); // left edge, very top
-        assert!(!hot_zone_contains(800.0, 200.0, zx, zy, zw)); // below the gap
-        assert!(!hot_zone_contains(100.0, 10.0, zx, zy, zw)); // left of the surf width
-        assert!(!hot_zone_contains(1550.0, 10.0, zx, zy, zw)); // right of it (gear side)
-    }
-
-    #[test]
-    fn keep_region_covers_bar_plus_margin_not_below() {
-        let (zx, zw, bottom, m) = (320.0, 960.0, 260.0, 6.0);
-        assert!(keep_region_contains(800.0, 100.0, zx, zw, bottom, m)); // inside the bar
-        assert!(keep_region_contains(800.0, bottom + 5.0, zx, zw, bottom, m)); // within margin
-        assert!(!keep_region_contains(800.0, bottom + 20.0, zx, zw, bottom, m)); // well below
-        assert!(!keep_region_contains(zx - 20.0, 100.0, zx, zw, bottom, m)); // left of the bar
-    }
-}

@@ -1638,12 +1638,14 @@ impl SurfaceRenderer {
         for s in sides {
             zones.push([s.0, s.1, s.2, s.3]);
         }
-        if overlay_open {
-            // The bar dims only its currently-visible (clipped) height as it
-            // slides; the settings card dims its full rect.
-            let ph = if is_bar { (panel.3 * bar_progress).max(1.0) } else { panel.3 };
-            zones.push([panel.0, panel.1, panel.2, ph]);
+        // The settings card dims its full rect (opaque). The CD-12 command band
+        // is transparent — only its floating pills paint — so it casts NO zone
+        // shadow (dimming the whole band would darken the Pulse Grid across the
+        // top even where nothing shows).
+        if overlay_open && !is_bar {
+            zones.push([panel.0, panel.1, panel.2, panel.3]);
         }
+        let _ = bar_progress;
 
         let pulse_bake = if do_pulse {
             let bake = self.pulse.prepare(
@@ -1947,36 +1949,17 @@ impl SurfaceRenderer {
                 pass.draw(0..6, 0..line_count);
             }
 
-            // Internal overlay (settings card or top bar), over the page. The bar
-            // slides in by scissor-clipping its rect to `bar_progress` of its
-            // height (top-anchored), so the page renders at full size and the
-            // composite reveals it from the top edge; settings draws unclipped.
+            // Internal overlay, over the pages. The CD-12 command band is a full
+            // transparent top strip (corner_radius 0) — only its pills paint, so
+            // it composites directly with no scissor slide (the page fades each
+            // ensemble in CSS). The settings card draws its rounded opaque rect.
             if overlay_open
                 && let Some(tex_bind_group) = self.panel.tex_bind_group.as_ref()
             {
-                let draw = if is_bar {
-                    let sx = panel.0.max(0.0) as u32;
-                    let sw = (panel.2.round().max(0.0) as u32).min(cfg_w.saturating_sub(sx));
-                    let sh = ((panel.3 * bar_progress).round().max(0.0) as u32).min(cfg_h);
-                    if sw > 0 && sh > 0 {
-                        pass.set_scissor_rect(sx, 0, sw, sh);
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    true
-                };
-                if draw {
-                    pass.set_pipeline(&self.page_pipeline.pipeline);
-                    pass.set_bind_group(0, &self.panel.uniform_bind_group, &[]);
-                    pass.set_bind_group(1, tex_bind_group, &[]);
-                    pass.draw(0..6, 0..1);
-                }
-                if is_bar {
-                    // Restore the full-framebuffer scissor for the gear draw.
-                    pass.set_scissor_rect(0, 0, cfg_w, cfg_h);
-                }
+                pass.set_pipeline(&self.page_pipeline.pipeline);
+                pass.set_bind_group(0, &self.panel.uniform_bind_group, &[]);
+                pass.set_bind_group(1, tex_bind_group, &[]);
+                pass.draw(0..6, 0..1);
             }
 
             // Gear button, on top of everything.

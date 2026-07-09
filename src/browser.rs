@@ -198,11 +198,11 @@ fn slot_can_forward(i: usize) -> bool {
     view(Role::Slot(i)).nav.lock().unwrap().can_forward
 }
 
-/// A navigation targeted at the active slot: load it if its browser exists, or
-/// queue a lazy spawn (the shell's main thread creates the browser). Called by
-/// the `navigate` IPC. `url` is already classified (URL vs search).
-fn navigate_active(url: &str) {
-    let i = active_slot();
+/// A navigation targeted at slot `i`: load it if its browser exists, or queue a
+/// lazy spawn (the shell's main thread creates the browser). Called by the
+/// `navigate` IPC (CD-12: the command carries its slot id). `url` is already
+/// classified (URL vs search).
+pub fn navigate_slot(i: usize, url: &str) {
     if slot_has_browser(i) {
         load_url(Role::Slot(i), url);
     } else {
@@ -256,21 +256,9 @@ pub fn toggle_current_favorite() -> bool {
     crate::memory::toggle_favorite(&slot_url(i), &slot_title(i))
 }
 
-// --- Command bar sizing + state (CD-07, CD-08) ------------------------------
-// The bar view is sized host-side to `input row + body`, where the body is
-// either the favorites chip row (untouched input) or `N suggestion rows`
-// (typing). The IPC handler stores the live count and whether the current query
-// is the empty/untouched one, so the main thread can compute the exact bar
-// height from the shared theme tokens (see app::Shell and `command_rows`).
-static COMMAND_ROWS: AtomicUsize = AtomicUsize::new(0);
-/// True when the bar's current body is the untouched/empty input — favorites are
-/// shown as chips (one row), not the multi-row suggestion list.
-static BAR_INPUT_EMPTY: AtomicBool = AtomicBool::new(true);
-/// Set by the host before a reveal: whether the bar page should focus + select
-/// its input on open (Ctrl+L yes; hover-to-top no). Read back in `get_nav_state`.
-static BAR_AUTOFOCUS: AtomicBool = AtomicBool::new(false);
-/// Reported by the bar page: the user is actively typing a query (focused input
-/// holding real text). While true, a mouse-out must NOT hide the bar (CD-08).
+// --- Command band typing state (CD-07, CD-08 → CD-12) -----------------------
+/// Reported by the engaged ensemble: the user is actively typing (focused input
+/// holding real text). While true, a mouse-out must NOT disengage the band.
 static BAR_TYPING: AtomicBool = AtomicBool::new(false);
 
 /// Max suggestions the palette shows (theme token `command.max_results`, read
@@ -280,41 +268,10 @@ fn command_max_results() -> usize {
     *M.get_or_init(|| crate::theme::Theme::load().command.max_results.max(0) as usize)
 }
 
-/// Suggestion / chip count the bar's body is currently showing (0 = input row
-/// only). In the untouched-input state this is the favorite count (all rendered
-/// as one chip row); while typing it is the suggestion-row count.
-pub fn command_rows() -> usize {
-    COMMAND_ROWS.load(Ordering::Relaxed)
-}
-
-/// Is the bar body the untouched/empty input (favorites chips) rather than a
-/// typed suggestion list? Drives the host-side height computation.
-pub fn bar_input_empty() -> bool {
-    BAR_INPUT_EMPTY.load(Ordering::Relaxed)
-}
-
-/// Whether the bar page should focus its input on open (set before a reveal).
-pub fn set_bar_autofocus(on: bool) {
-    BAR_AUTOFOCUS.store(on, Ordering::Relaxed);
-}
-
-/// Is the user actively typing in the bar's input (reported by the page)? The
-/// hysteresis hide skips a mouse-out while this holds.
+/// Is the user actively typing in the engaged ensemble's capsule (reported by the
+/// page)? The hysteresis disengage skips a mouse-out while this holds.
 pub fn bar_typing() -> bool {
     BAR_TYPING.load(Ordering::Relaxed)
-}
-
-/// Pre-compute the bar's opening body so it opens at the right height instead of
-/// resizing a frame later. The bar opens on the untouched input (favorites
-/// chips), so prime with the empty-input favorite count.
-pub fn prime_command_rows() {
-    let n = crate::memory::query_suggestions("", command_max_results()).len();
-    COMMAND_ROWS.store(n, Ordering::Relaxed);
-    BAR_INPUT_EMPTY.store(true, Ordering::Relaxed);
-    // Clear any stale typing state from a previous open (the fresh page reports
-    // its own on focus/blur/input); otherwise a hover reveal could inherit a
-    // leftover `true` and never hide on mouse-out.
-    BAR_TYPING.store(false, Ordering::Relaxed);
 }
 
 // --- Process / lifecycle ----------------------------------------------------
@@ -399,9 +356,11 @@ pub fn create_browser_url(role: Role, parent_hwnd: isize, url: &str) {
     let background_color = match role {
         // Slot: opaque white backing (the page paints its own background).
         Role::Slot(_) => 0xFFFF_FFFFu32,
-        // Internal: opaque panel-colored backing so the settings card is solid;
-        // the wgpu compositor rounds its corners. Color comes from the token set.
-        Role::Internal => argb_from_hex(&crate::theme::Theme::load().colors.panel),
+        // Internal: TRANSPARENT backing (CD-12, D-0021) — the command band paints
+        // only its floating elements over the Pulse Grid; the settings page draws
+        // its own opaque panel background in CSS. OSR delivers premultiplied BGRA
+        // with alpha, which the compositor blends OVER.
+        Role::Internal => 0x0000_0000u32,
     };
     let browser_settings = BrowserSettings {
         windowless_frame_rate: 60,
@@ -438,13 +397,27 @@ pub fn close_slot(i: usize) {
     *view(Role::Slot(i)).frame.lock().unwrap() = FrameBuffer::default();
 }
 
-/// Opaque ARGB (0xFFRRGGBB) from a `#RRGGBB` token, for a CEF backing color.
-fn argb_from_hex(hex: &str) -> u32 {
-    let c = crate::theme::hex3(hex);
-    let r = (c[0] * 255.0).round() as u32;
-    let g = (c[1] * 255.0).round() as u32;
-    let b = (c[2] * 255.0).round() as u32;
-    0xFF00_0000 | (r << 16) | (g << 8) | b
+/// The current command-band frame state JSON (CD-12), so the page can pull it on
+/// load (`get_frame`) in addition to the host's on-change push.
+fn frame_state() -> &'static Mutex<String> {
+    static F: OnceLock<Mutex<String>> = OnceLock::new();
+    F.get_or_init(|| Mutex::new("{}".to_string()))
+}
+
+/// Store the frame state and push it to the command band page: calls
+/// `window.cdFrame(json)` on the internal view (`json` = {slots, engaged,
+/// autofocus}, embedded as a JS string literal). Pushed on change (not per frame)
+/// — the page glides its ensembles via CSS transitions (CD-11 cadence).
+pub fn set_frame_state(json: &str) {
+    *frame_state().lock().unwrap() = json.to_string();
+    let browser = view(Role::Internal).browser.lock().unwrap().clone();
+    if let Some(browser) = browser
+        && let Some(frame) = browser.main_frame()
+    {
+        let escaped = json.replace('\\', "\\\\").replace('\'', "\\'");
+        let code = format!("window.cdFrame&&window.cdFrame('{escaped}')");
+        frame.execute_java_script(Some(&CefString::from(code.as_str())), None, 0);
+    }
 }
 
 /// Navigate a view (used by the isolation self-test). The internal view's
@@ -715,10 +688,10 @@ fn classify_input(input: &str) -> String {
     }
 }
 
-/// The *active* slot's navigation state as JSON, for the `get_nav_state` IPC
-/// reply — the top bar always shows and drives the active slot (CD-09).
-fn nav_state_json() -> String {
-    let i = active_slot();
+/// Slot `i`'s navigation state as JSON, for the `get_nav_state` IPC reply. Since
+/// CD-12 each floating ensemble reads and drives its own column, so the command
+/// carries the slot id (falling back to the active slot).
+fn nav_state_json(i: usize) -> String {
     let url = slot_url(i);
     let scheme = scheme_of(&url);
     serde_json::json!({
@@ -729,11 +702,17 @@ fn nav_state_json() -> String {
         "loading": slot_loading(i),
         "scheme": scheme,
         "favorite": crate::memory::is_favorite(&url),
-        // Whether the bar page should focus + select its input on this open
-        // (Ctrl+L reveal yes; hover-to-top reveal no — CD-08).
-        "autofocus": BAR_AUTOFOCUS.load(Ordering::Relaxed),
     })
     .to_string()
+}
+
+/// The slot a command targets (CD-12): its `slot` field, clamped, else the
+/// keyboard-active slot.
+fn target_slot(v: &serde_json::Value) -> usize {
+    v.get("slot")
+        .and_then(|s| s.as_u64())
+        .map(|n| (n as usize).min(MAX_SLOTS - 1))
+        .unwrap_or_else(active_slot)
 }
 
 /// Handle one internal-view query string (see docs/cyberdesk-wire-format.md).
@@ -773,40 +752,40 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
                 crate::settings::set(key, b).map_err(|e| (3, e))
             }
         }
-        // Command bar / navigation (CD-04).
-        "get_nav_state" => Ok(nav_state_json()),
+        // Command band frame state pull (CD-12): the page loads it on start, then
+        // the host pushes updates via set_frame_state.
+        "get_frame" => Ok(frame_state().lock().unwrap().clone()),
+        // Command / navigation (CD-04; CD-12 carries the ensemble's slot id).
+        "get_nav_state" => Ok(nav_state_json(target_slot(&v))),
         "navigate" => {
+            let slot = target_slot(&v);
             let input = v
                 .get("input")
                 .and_then(|x| x.as_str())
                 .ok_or((2, "missing 'input'".to_string()))?;
             let url = classify_input(input);
-            // Load the active slot (spawning it if lazy — see navigate_active).
-            navigate_active(&url);
+            // Load that slot (spawning it if lazy — see navigate_slot).
+            navigate_slot(slot, &url);
             request_overlay_close();
             Ok(serde_json::json!({ "ok": true, "url": url }).to_string())
         }
         "go_back" => {
-            go_back(Role::Slot(active_slot()));
+            go_back(Role::Slot(target_slot(&v)));
             Ok(serde_json::json!({ "ok": true }).to_string())
         }
         "go_forward" => {
-            go_forward(Role::Slot(active_slot()));
+            go_forward(Role::Slot(target_slot(&v)));
             Ok(serde_json::json!({ "ok": true }).to_string())
         }
         "reload" => {
-            reload(Role::Slot(active_slot()));
+            reload(Role::Slot(target_slot(&v)));
             Ok(serde_json::json!({ "ok": true }).to_string())
         }
-        // Command palette (CD-07). Live suggestions from favorites + history;
-        // the reply also drives the palette's height (COMMAND_ROWS).
+        // Command palette (CD-07): live suggestions from favorites + history.
+        // Empty input returns the top favorites (the shared launcher tiles).
         "query_suggestions" => {
             let input = v.get("input").and_then(|x| x.as_str()).unwrap_or("");
             let suggestions = crate::memory::query_suggestions(input, command_max_results());
-            COMMAND_ROWS.store(suggestions.len(), Ordering::Relaxed);
-            // Empty input -> the bar body is the favorites chip row (one row);
-            // non-empty -> the multi-row suggestion list. Drives bar sizing.
-            BAR_INPUT_EMPTY.store(input.trim().is_empty(), Ordering::Relaxed);
             let arr: Vec<serde_json::Value> = suggestions
                 .iter()
                 .map(|s| serde_json::json!({ "url": s.url, "title": s.title, "favorite": s.favorite }))

@@ -161,6 +161,14 @@ pub struct Command {
     pub max_results: i32,
     /// Favorites chip row height (CD-08 top bar). Shared with the page CSS.
     pub chip_row: f32,
+    /// Floating command sets (CD-12, D-0021) — shared host<->page geometry.
+    pub band_height: f32,
+    pub launcher_top: f32,
+    pub ensemble_top: f32,
+    pub capsule_height: f32,
+    pub orb_size: f32,
+    pub tile_size: f32,
+    pub tile_gap: f32,
 }
 
 /// Slot engine (CD-09, D-0017). Fixed-width content columns; these dimensions
@@ -219,6 +227,13 @@ impl Theme {
              \x20 --cmd-row-height: {cmd_row}px;\n\
              \x20 --cmd-list-pad: {cmd_pad}px;\n\
              \x20 --cmd-chip-row: {cmd_chip}px;\n\
+             \x20 --cmd-band-height: {cmd_band}px;\n\
+             \x20 --cmd-launcher-top: {cmd_ltop}px;\n\
+             \x20 --cmd-ensemble-top: {cmd_etop}px;\n\
+             \x20 --cmd-capsule-height: {cmd_caph}px;\n\
+             \x20 --cmd-orb-size: {cmd_orb}px;\n\
+             \x20 --cmd-tile-size: {cmd_tile}px;\n\
+             \x20 --cmd-tile-gap: {cmd_tgap}px;\n\
              }}\n",
             bg = self.colors.background,
             brand = self.colors.brand,
@@ -233,6 +248,13 @@ impl Theme {
             cmd_row = self.command.row_height,
             cmd_pad = self.command.list_pad,
             cmd_chip = self.command.chip_row,
+            cmd_band = self.command.band_height,
+            cmd_ltop = self.command.launcher_top,
+            cmd_etop = self.command.ensemble_top,
+            cmd_caph = self.command.capsule_height,
+            cmd_orb = self.command.orb_size,
+            cmd_tile = self.command.tile_size,
+            cmd_tgap = self.command.tile_gap,
         )
     }
 }
