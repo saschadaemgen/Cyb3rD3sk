@@ -13,7 +13,7 @@ struct Globals {
     zone_feather   : f32,
     zone_count     : u32,
     _pad           : vec2<f32>,
-    zones          : array<vec4<f32>, 6>,
+    zones          : array<vec4<f32>, 8>,
 };
 
 @group(0) @binding(0) var<uniform> G : Globals;

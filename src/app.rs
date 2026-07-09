@@ -31,6 +31,21 @@ const BAR_HIDE_HYSTERESIS: Duration = Duration::from_millis(250);
 /// this far in the future, coalescing bursts off the render hot path.
 const SESSION_DEBOUNCE: Duration = Duration::from_millis(500);
 
+/// Per-frame ease factor for the CD-11 frame reflow (side zones retreating to
+/// rails + the slot recenter). Exponential approach, ~220 ms ease-out at ~60 fps
+/// — the same host-side interpolation pattern as the top-bar slide.
+const FRAME_EASE: f32 = 0.22;
+
+/// Exponentially ease a rect toward a target by factor `k` (per frame).
+fn ease_rect(cur: slots::Rect, target: slots::Rect, k: f32) -> slots::Rect {
+    slots::Rect {
+        x: cur.x + (target.x - cur.x) * k,
+        y: cur.y + (target.y - cur.y) * k,
+        w: cur.w + (target.w - cur.w) * k,
+        h: cur.h + (target.h - cur.h) * k,
+    }
+}
+
 /// Bar content height in logical px, from the shared theme tokens (so the page
 /// and the host-side sizing agree): the input row, plus the favorites chip row
 /// (an untouched/empty input) or the suggestion list (while typing).
@@ -121,6 +136,11 @@ pub fn run(windowed: bool) {
         overflow: Vec::new(),
         session_dirty: None,
         session_saved_sig: String::new(),
+        disp_rects: [None; MAX_SLOTS],
+        disp_left: slots::Rect::default(),
+        disp_right: slots::Rect::default(),
+        disp_side_width: 0.0,
+        frame_inited: false,
         applied_title: String::new(),
         applied_topmost: false,
         isolation_tested: false,
@@ -181,6 +201,17 @@ struct Shell {
     session_dirty: Option<Instant>,
     /// Signature of the last-saved session, so a save fires only on real change.
     session_saved_sig: String,
+    /// Animated frame (CD-11): the on-screen (interpolated) rect per slot id, and
+    /// the eased side zones. Rendering AND input read these — one per-frame
+    /// geometry, so the reflow animation can never desync. `disp_rect[id]` is
+    /// `None` until a slot's first frame (it then grows from a collapsed sliver).
+    disp_rects: [Option<slots::Rect>; MAX_SLOTS],
+    disp_left: slots::Rect,
+    disp_right: slots::Rect,
+    disp_side_width: f32,
+    /// False until the first frame snaps the animated frame to the target (so the
+    /// startup layout does not animate in from zero).
+    frame_inited: bool,
     applied_title: String,
     applied_topmost: bool,
     isolation_tested: bool,
@@ -275,44 +306,116 @@ impl Shell {
             .unwrap_or(0)
     }
 
-    /// The active slot's rectangle for a given surface size.
-    fn active_rect_wh(&self, w: u32, h: u32) -> slots::Rect {
+    /// The animated on-screen rect for slot id `id` (CD-11). Rendering, mouse
+    /// hit-testing and the bar all read this, so they never disagree during a
+    /// reflow. Falls back to the settled target rect before the first frame.
+    fn disp_rect(&self, id: usize) -> slots::Rect {
+        self.disp_rects[id].unwrap_or_else(|| {
+            let (w, h) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
+            let rects = self.slot_rects_wh(w, h);
+            self.order
+                .iter()
+                .position(|&i| i == id)
+                .and_then(|p| rects.get(p).copied())
+                .unwrap_or_default()
+        })
+    }
+
+    /// The animated slot rects in display order.
+    fn disp_slots(&self) -> Vec<slots::Rect> {
+        self.order.iter().map(|&id| self.disp_rect(id)).collect()
+    }
+
+    /// The active slot's **target** (settled) rectangle — the top bar reads this
+    /// so its width and CEF view stay stable during a reflow (only the composited
+    /// slots animate); the bar appears at the active column's final position.
+    fn active_target_rect(&self, w: u32, h: u32) -> slots::Rect {
         let rects = self.slot_rects_wh(w, h);
         rects[self.active_position().min(rects.len().saturating_sub(1))]
     }
 
-    /// The slot id + rect whose rectangle contains the cursor, if any (Stage C
-    /// mouse routing). Slots never overlap, so the first hit is the one.
+    /// The slot id + animated rect whose rectangle contains the cursor, if any
+    /// (mouse routing). Slots never overlap, so the first hit is the one.
     fn slot_at_cursor(&self) -> Option<(usize, slots::Rect)> {
-        let (w, h) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
-        let rects = self.slot_rects_wh(w, h);
         let (cx, cy) = (self.cursor_phys.x as f32, self.cursor_phys.y as f32);
-        self.order
-            .iter()
-            .enumerate()
-            .find(|&(p, _)| rects[p].contains(cx, cy))
-            .map(|(p, &id)| (id, rects[p]))
+        self.order.iter().find_map(|&id| {
+            let r = self.disp_rect(id);
+            r.contains(cx, cy).then_some((id, r))
+        })
     }
 
-    /// Top-left origin (device px) of a role's rectangle (a slot's rect, or the
-    /// internal overlay's).
+    /// Top-left origin (device px) of a role's rectangle (a slot's animated rect,
+    /// or the internal overlay's).
     fn origin_of_role(&self, role: Role) -> (f32, f32) {
-        let (w, h) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
         match role {
             Role::Internal => {
+                let (w, h) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
                 let (x, y, _, _) = self.internal_rect(w, h);
                 (x, y)
             }
-            Role::Slot(id) => self
-                .order
-                .iter()
-                .position(|&i| i == id)
-                .map(|p| {
-                    let r = self.slot_rects_wh(w, h)[p];
-                    (r.x, r.y)
-                })
-                .unwrap_or((0.0, 0.0)),
+            Role::Slot(id) => {
+                let r = self.disp_rect(id);
+                (r.x, r.y)
+            }
         }
+    }
+
+    /// Advance the animated frame one step toward the target [`slots::frame_layout`]
+    /// for the current slots (CD-11). Called once per frame; the eased result is
+    /// what both rendering and input read.
+    fn update_frame(&mut self) {
+        let Some((w, h)) = self.renderer.as_ref().map(|r| r.size()) else {
+            return;
+        };
+        let units = self.units_in_order();
+        let target = slots::frame_layout(w, h, &units, self.scale, &self.theme.slots);
+        let g = self.theme.slots.gutter * self.scale;
+
+        if !self.frame_inited {
+            for (p, &id) in self.order.iter().enumerate() {
+                self.disp_rects[id] = Some(target.slots[p]);
+            }
+            self.disp_left = target.left;
+            self.disp_right = target.right;
+            self.disp_side_width = target.side_width;
+            self.frame_inited = true;
+            return;
+        }
+
+        // Ease each live slot toward its target rect; a slot with no animated rect
+        // yet (freshly added) grows from a collapsed sliver at its target center.
+        for (p, &id) in self.order.iter().enumerate() {
+            let tr = target.slots[p];
+            let cur = self.disp_rects[id].unwrap_or(slots::Rect {
+                x: tr.x + tr.w * 0.5,
+                y: tr.y,
+                w: 0.0,
+                h: tr.h,
+            });
+            self.disp_rects[id] = Some(ease_rect(cur, tr, FRAME_EASE));
+        }
+
+        // Ease the side width; derive the side rects from it and the animated
+        // group bounds so the zones glide with the columns.
+        self.disp_side_width += (target.side_width - self.disp_side_width) * FRAME_EASE;
+        let first = self.order[0];
+        let last = *self.order.last().expect("order is non-empty");
+        let gl = self.disp_rects[first].map(|r| r.x).unwrap_or(target.left.x);
+        let gr = self.disp_rects[last]
+            .map(|r| r.x + r.w)
+            .unwrap_or(target.right.x);
+        self.disp_left = slots::Rect {
+            x: gl - g - self.disp_side_width,
+            y: target.left.y,
+            w: self.disp_side_width,
+            h: target.left.h,
+        };
+        self.disp_right = slots::Rect {
+            x: gr + g,
+            y: target.right.y,
+            w: self.disp_side_width,
+            h: target.right.h,
+        };
     }
 
     /// The view the mouse currently routes to and its origin: the internal
@@ -345,10 +448,12 @@ impl Shell {
         }
     }
 
-    /// How many slots fit the current surface width (1..=MAX_SLOTS).
+    /// The total slot-unit budget the frame can hold at the current width — the
+    /// rail-state center budget (CD-11), so slots are capped against the maximum
+    /// the frame will ever fit.
     fn capacity(&self) -> usize {
         let (w, _) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
-        slots::max_slots(w, self.scale, &self.theme.slots)
+        slots::frame_capacity(w, self.scale, &self.theme.slots)
     }
 
     /// Make slot id `id` the active slot: move CEF keyboard focus (only while no
@@ -467,6 +572,7 @@ impl Shell {
         self.loading[id] = 0.0;
         self.armed[id] = None;
         self.width_units[id] = 1;
+        self.disp_rects[id] = None;
         let new_pos = slots::neighbor_position(pos, self.order.len());
         self.active_slot = self.order[new_pos];
         browser::set_active_slot(self.active_slot);
@@ -523,7 +629,7 @@ impl Shell {
     /// drives it (CD-09). The page renders at this full size; the composite clips
     /// it to `bar_progress` during the slide.
     fn bar_rect(&self, w: u32, h: u32) -> (f32, f32, f32, f32) {
-        let r = self.active_rect_wh(w, h);
+        let r = self.active_target_rect(w, h);
         let bh = (self.bar_content_logical() * self.scale)
             .round()
             .min(h as f32);
@@ -543,7 +649,7 @@ impl Shell {
     /// active slot's width. Entering it (from `Closed`) slides the bar down.
     fn in_bar_hot_zone(&self) -> bool {
         let (w, h) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
-        let r = self.active_rect_wh(w, h);
+        let r = self.active_target_rect(w, h);
         hot_zone_contains(self.cursor_phys.x as f32, self.cursor_phys.y as f32, r.x, r.y, r.w)
     }
 
@@ -552,7 +658,7 @@ impl Shell {
     /// not typing) arms the hysteresis hide.
     fn in_bar_keep_region(&self) -> bool {
         let (w, h) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
-        let r = self.active_rect_wh(w, h);
+        let r = self.active_target_rect(w, h);
         let (_, _, _, bh) = self.bar_rect(w, h);
         let bottom = (bh * self.bar_progress).max(r.y);
         keep_region_contains(
@@ -755,6 +861,7 @@ impl Shell {
             self.loading[id] = 0.0;
             self.armed[id] = None;
             self.width_units[id] = 1;
+            self.disp_rects[id] = None;
         }
         // A lone double-width slot narrower than the window shrinks to one unit
         // (it cannot be closed, and cannot fit at two).
@@ -1261,23 +1368,30 @@ impl ApplicationHandler for Shell {
                 let size = self.renderer.as_ref().map(|r| r.size());
                 if let Some((w, h)) = size {
                     let internal = self.internal_rect(w, h);
-                    let rects = self.slot_rects_wh(w, h);
+                    // Rects come from the ANIMATED frame (CD-11) — the same
+                    // geometry input routing reads, so the reflow can never desync.
+                    let disp = self.disp_slots();
                     let slot_views: Vec<SlotView> = self
                         .order
                         .iter()
                         .enumerate()
                         .map(|(p, &id)| SlotView {
-                            rect: (rects[p].x, rects[p].y, rects[p].w, rects[p].h),
+                            rect: (disp[p].x, disp[p].y, disp[p].w, disp[p].h),
                             loading: self.loading[id],
                             active: id == self.active_slot,
                             index: id,
                             pending: self.slot_pending_color(id),
                         })
                         .collect();
+                    let sides = [
+                        (self.disp_left.x, self.disp_left.y, self.disp_left.w, self.disp_left.h),
+                        (self.disp_right.x, self.disp_right.y, self.disp_right.w, self.disp_right.h),
+                    ];
                     if let Some(r) = self.renderer.as_mut() {
                         r.render(
                             time,
                             &slot_views,
+                            &sides,
                             internal,
                             gear_geom(w, scale),
                             settings::feather_edges(),
@@ -1358,6 +1472,9 @@ impl ApplicationHandler for Shell {
 
         // Ease the gear hover glow toward its target.
         self.gear_hover += (self.gear_hover_target - self.gear_hover) * 0.25;
+
+        // Advance the CD-11 frame reflow (side zones + slot recenter) one step.
+        self.update_frame();
 
         // Ease each live slot's loading line toward on (loading) / off (done).
         for &id in &self.order {

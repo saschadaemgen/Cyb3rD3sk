@@ -72,11 +72,31 @@ fn fs_main(in : VOut) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // 7-segment index glyph, centered, sized to the slot height.
+    let p = in.local;      // center origin, +y down
+    let dg = in.glyph.a;   // glyph selector: 0 = side zone, 1..4 = slot index digit
+    var col = in.fill.rgb;
+
+    if (dg < 0.5) {
+        // Side zone (CD-11): a thin inset rounded-rect outline plus a small
+        // centered diamond (rotated-square outline) core glyph — the slot family,
+        // differing glyph. No text; the shell has no font.
+        let m = min(in.half.x, in.half.y);
+        let inset = m * 0.05;
+        let ot = max(m * 0.010, 1.0);   // outline half-thickness
+        let od = abs(rounded_box_sdf(p, in.half - vec2<f32>(inset), radius)) - ot;
+        let ocov = 1.0 - smoothstep(-0.9, 0.9, od);
+        let ds = m * 0.13;              // diamond half-size
+        let dt = max(ds * 0.16, 1.0);   // diamond outline half-thickness
+        let dd = abs(abs(p.x) + abs(p.y) - ds) - dt;
+        let dcov = 1.0 - smoothstep(-0.9, 0.9, dd);
+        col = col + in.glyph.rgb * max(ocov, dcov);
+        return vec4<f32>(col * fillmask, fillmask);
+    }
+
+    // 7-segment index glyph (slots), centered, sized to the slot height.
     let gh = min(in.half.y, in.half.x) * 0.34;   // glyph half-height
     let gw = gh * 0.56;                           // glyph half-width
     let th = gh * 0.12;                           // segment half-thickness
-    let p = in.local;                             // center origin, +y down
 
     // Segment centers/half-extents (a top, g mid, d bottom; f/e left, b/c right).
     let hx = vec2<f32>(gw - th, th);
@@ -89,7 +109,6 @@ fn fs_main(in : VOut) -> @location(0) vec4<f32> {
     let E = seg_cov(p, vec2<f32>(-(gw - th), gh * 0.5), vy);
     let C = seg_cov(p, vec2<f32>(gw - th, gh * 0.5), vy);
 
-    let dg = in.glyph.a;
     let is1 = abs(dg - 1.0) < 0.5;
     let is2 = abs(dg - 2.0) < 0.5;
     let is3 = abs(dg - 3.0) < 0.5;
@@ -104,8 +123,8 @@ fn fs_main(in : VOut) -> @location(0) vec4<f32> {
     if (is4) { cov = max(cov, F); }
     if (is2 || is3 || is4) { cov = max(cov, Gm); }
 
-    // Fill (opaque) plus the faint glyph added over it; premultiplied OVER.
-    var col = in.fill.rgb + in.glyph.rgb * cov;
+    // Fill plus the faint glyph added over it; premultiplied OVER.
+    col = col + in.glyph.rgb * cov;
 
     // Pending-URL dot (CD-10): a small scheme-colored disk above the digit, so a
     // restored-but-unspawned column reads as "a page is waiting here".

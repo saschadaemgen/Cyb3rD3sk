@@ -648,13 +648,14 @@ struct SpriteGlobals {
     zone_feather: f32,
     zone_count: u32,
     _pad: [f32; 2],
-    // Up to 6 content rects (x, y, w, h) in physical px: up to MAX_SLOTS slots
-    // plus the one open overlay (bar / settings card) — CD-09 grew this from 4.
-    zones: [[f32; 4]; 6],
+    // Up to 8 content rects (x, y, w, h) in physical px: up to MAX_SLOTS slots +
+    // 2 side zones + the one open overlay (bar / settings card) = 7 max — CD-11
+    // grew this from 6 (CD-09 grew it from 4).
+    zones: [[f32; 4]; 8],
 }
 
 /// Max content rects the zone-shadow uniform carries (see [`SpriteGlobals`]).
-const MAX_ZONES: usize = 6;
+const MAX_ZONES: usize = 8;
 
 /// Micro-lattice uniforms (mirrors `Lattice` in `pulsegrid_lattice.wgsl`). Since
 /// CD-06 it carries three depth weaves — each `layers[i]` is `(cell, dot_radius,
@@ -1529,7 +1530,8 @@ impl SurfaceRenderer {
             .map(|_| PageTarget::new(&device, &page_pipeline))
             .collect();
         let panel = PageTarget::new(&device, &page_pipeline);
-        let placeholder = SlotPlaceholder::new(&device, SURFACE_FORMAT, MAX_SLOTS as u32);
+        // Placeholder instances: up to MAX_SLOTS empty slots + 2 side zones.
+        let placeholder = SlotPlaceholder::new(&device, SURFACE_FORMAT, MAX_SLOTS as u32 + 2);
         let slotlines = SlotLines::new(&device, SURFACE_FORMAT, MAX_SLOTS as u32);
         let gear = Gear::new(&device, SURFACE_FORMAT);
         let field = DeepField::new(&device, SURFACE_FORMAT);
@@ -1600,6 +1602,7 @@ impl SurfaceRenderer {
         &mut self,
         time: f32,
         slots: &[SlotView],
+        sides: &[(f32, f32, f32, f32)],
         panel: (f32, f32, f32, f32),
         gear: (f32, f32, f32),
         feather: bool,
@@ -1626,11 +1629,14 @@ impl SurfaceRenderer {
         // Pulse Grid: (re)generate + bake on size/scale/seed change, write the
         // live globals. Must run before the frame encoder (creates GPU
         // resources + queues writes).
-        // Zone rects that dim the background: every slot rect, plus the internal
-        // overlay while it is open. Up to MAX_ZONES (6) are carried.
-        let mut zones: Vec<[f32; 4]> = Vec::with_capacity(slots.len() + 1);
+        // Zone rects that dim the background: every slot rect, both side zones,
+        // plus the internal overlay while it is open. Up to MAX_ZONES (8) carried.
+        let mut zones: Vec<[f32; 4]> = Vec::with_capacity(slots.len() + sides.len() + 1);
         for s in slots {
             zones.push([s.rect.0, s.rect.1, s.rect.2, s.rect.3]);
+        }
+        for s in sides {
+            zones.push([s.0, s.1, s.2, s.3]);
         }
         if overlay_open {
             // The bar dims only its currently-visible (clipped) height as it
@@ -1686,8 +1692,19 @@ impl SurfaceRenderer {
         ];
         let accent_th = (st.active_line * scale).max(1.0);
         let loading_th = (2.5 * scale).max(1.0);
-        let mut placeholders: Vec<PlaceholderInstance> = Vec::with_capacity(slots.len());
+        let mut placeholders: Vec<PlaceholderInstance> = Vec::with_capacity(slots.len() + sides.len());
         let mut lines: Vec<SlotLineInstance> = Vec::with_capacity(slots.len());
+        // Side zones (CD-11): the placeholder family with the diamond glyph
+        // (digit 0) — subtle fill, thin outline, a small centered core glyph. No
+        // page, no loading/active lines; content arrives in later seasons.
+        for s in sides {
+            placeholders.push(PlaceholderInstance {
+                rect: [s.0, s.1, s.2, s.3],
+                fill: [fill_rgb[0], fill_rgb[1], fill_rgb[2], corner_radius],
+                glyph: [glyph_rgb[0], glyph_rgb[1], glyph_rgb[2], 0.0],
+                dot: [0.0, 0.0, 0.0, 0.0],
+            });
+        }
         for s in slots {
             let (x, y, w, h) = s.rect;
             if let Some(target) = self.slots.get(s.index) {
@@ -1725,7 +1742,7 @@ impl SurfaceRenderer {
                 ],
             });
         }
-        let placeholder_count = (placeholders.len() as u32).min(MAX_SLOTS as u32);
+        let placeholder_count = (placeholders.len() as u32).min(MAX_SLOTS as u32 + 2);
         let line_count = (lines.len() as u32).min(MAX_SLOTS as u32);
         if placeholder_count > 0 {
             let pg = PlaceholderGlobals { resolution: [win_w, win_h], _pad: [0.0, 0.0] };
@@ -2005,11 +2022,12 @@ pub fn capture(path: &str, width: u32, height: u32, theme: &crate::theme::Theme)
     let brand = theme.colors.brand_rgb();
     let do_pulse = theme.background.is_pulse_grid();
 
-    // Slot layout for the capture: N placeholder columns (CD-09), so the
-    // multi-slot money shot — columns, gutters, glowing margins, zone shadow —
-    // can be eyeballed headlessly. `CYBERDESK_CAPTURE_SLOTS=N` (default 1), then
-    // clamped to what fits the width. `CYBERDESK_CAPTURE_UNITS=2,1,...` overrides
-    // it with an explicit per-slot width-unit sequence (CD-10 double slots).
+    // Frame layout for the capture (CD-11): N placeholder columns flanked by the
+    // side zones, so the frame — side zones, columns, gutters, glowing margins,
+    // zone shadow, and the retreat-to-rails at four slots — can be eyeballed
+    // headlessly. `CYBERDESK_CAPTURE_SLOTS=N` (default 1), clamped to the frame
+    // capacity; `CYBERDESK_CAPTURE_UNITS=2,1,...` overrides it with an explicit
+    // per-slot width-unit sequence (CD-10 double slots).
     let units: Vec<u32> = if let Ok(spec) = std::env::var("CYBERDESK_CAPTURE_UNITS") {
         spec.split(',')
             .filter_map(|s| s.trim().parse::<u32>().ok().map(|u| u.clamp(1, 2)))
@@ -2019,13 +2037,18 @@ pub fn capture(path: &str, width: u32, height: u32, theme: &crate::theme::Theme)
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .unwrap_or(1);
-        let n = want.clamp(1, crate::slots::max_slots(width, 1.0, &theme.slots));
+        let n = want.clamp(1, crate::slots::frame_capacity(width, 1.0, &theme.slots));
         vec![1u32; n]
     };
     let units = if units.is_empty() { vec![1u32] } else { units };
-    let rects = crate::slots::slot_rects_units(width, height, &units, 1.0, &theme.slots);
+    let frame = crate::slots::frame_layout(width, height, &units, 1.0, &theme.slots);
+    let rects = frame.slots.clone();
     let n = rects.len();
-    let zones: Vec<[f32; 4]> = rects.iter().map(|r| [r.x, r.y, r.w, r.h]).collect();
+    // Zone shadow under the slots AND both side zones.
+    let mut zones: Vec<[f32; 4]> = rects.iter().map(|r| [r.x, r.y, r.w, r.h]).collect();
+    for s in [frame.left, frame.right] {
+        zones.push([s.x, s.y, s.w, s.h]);
+    }
 
     let mut pulse = PulseGrid::new(&device, format);
     if do_pulse {
@@ -2043,10 +2066,10 @@ pub fn capture(path: &str, width: u32, height: u32, theme: &crate::theme::Theme)
         }
     }
 
-    // Placeholder columns + the active accent on slot 0 (shell-side, no CEF) —
-    // exactly what an all-lazy slot group looks like before any navigation.
+    // Placeholder columns + side zones + the active accent on slot 0 (shell-side,
+    // no CEF) — exactly what a fresh all-lazy frame looks like before navigation.
     let st = &theme.slots;
-    let placeholder = SlotPlaceholder::new(&device, format, MAX_SLOTS as u32);
+    let placeholder = SlotPlaceholder::new(&device, format, MAX_SLOTS as u32 + 2);
     let slotlines = SlotLines::new(&device, format, MAX_SLOTS as u32);
     let corner = theme.page.corner_radius;
     let fill_rgb = [
@@ -2066,20 +2089,26 @@ pub fn capture(path: &str, width: u32, height: u32, theme: &crate::theme::Theme)
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(0);
     let accent = crate::theme::hex3(&theme.colors.accent);
-    let ph_insts: Vec<PlaceholderInstance> = rects
+    // The two side zones (diamond glyph, digit 0) then the slot columns.
+    let mut ph_insts: Vec<PlaceholderInstance> = [frame.left, frame.right]
         .iter()
-        .enumerate()
-        .map(|(i, r)| PlaceholderInstance {
+        .map(|r| PlaceholderInstance {
             rect: [r.x, r.y, r.w, r.h],
             fill: [fill_rgb[0], fill_rgb[1], fill_rgb[2], corner],
-            glyph: [glyph_rgb[0], glyph_rgb[1], glyph_rgb[2], (i + 1) as f32],
-            dot: if i < pending {
-                [accent[0], accent[1], accent[2], 1.0]
-            } else {
-                [0.0, 0.0, 0.0, 0.0]
-            },
+            glyph: [glyph_rgb[0], glyph_rgb[1], glyph_rgb[2], 0.0],
+            dot: [0.0, 0.0, 0.0, 0.0],
         })
         .collect();
+    ph_insts.extend(rects.iter().enumerate().map(|(i, r)| PlaceholderInstance {
+        rect: [r.x, r.y, r.w, r.h],
+        fill: [fill_rgb[0], fill_rgb[1], fill_rgb[2], corner],
+        glyph: [glyph_rgb[0], glyph_rgb[1], glyph_rgb[2], (i + 1) as f32],
+        dot: if i < pending {
+            [accent[0], accent[1], accent[2], 1.0]
+        } else {
+            [0.0, 0.0, 0.0, 0.0]
+        },
+    }));
     let line_insts: Vec<SlotLineInstance> = rects
         .iter()
         .enumerate()
@@ -2173,11 +2202,11 @@ pub fn capture(path: &str, width: u32, height: u32, theme: &crate::theme::Theme)
             pulse.composite(&mut pass);
             pulse.draw_life(&mut pass);
         }
-        // Placeholder slot columns + slot lines over the background.
+        // Placeholder columns + side zones, then slot lines, over the background.
         pass.set_pipeline(&placeholder.pipeline);
         pass.set_bind_group(0, &placeholder.globals_bg, &[]);
         pass.set_vertex_buffer(0, placeholder.instance_buf.slice(..));
-        pass.draw(0..6, 0..n as u32);
+        pass.draw(0..6, 0..ph_insts.len() as u32);
         pass.set_pipeline(&slotlines.pipeline);
         pass.set_bind_group(0, &slotlines.globals_bg, &[]);
         pass.set_vertex_buffer(0, slotlines.instance_buf.slice(..));

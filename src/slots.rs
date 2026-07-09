@@ -20,7 +20,7 @@ use crate::theme::Slots;
 pub const MAX_SLOTS: usize = 4;
 
 /// A slot rectangle in device pixels.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
@@ -116,15 +116,16 @@ pub fn slot_rects_units(width: u32, height: u32, units: &[u32], scale: f32, t: &
 
 /// Whether the side zones are shown at full width or retreated to thin rails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by the renderer + shell in Stage B
 pub enum SideState {
     Full,
     Rail,
 }
 
-/// The full frame geometry for a given window size and slot-unit sequence.
+/// The full frame geometry for a given window size and slot-unit sequence. The
+/// shell drives the reflow off `side_width` + the rects; `side_state` is read by
+/// the tests and reserved for the CD-12 control surface (hence the allow).
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // consumed by the renderer + shell in Stage B
+#[allow(dead_code)]
 pub struct FrameLayout {
     pub side_state: SideState,
     pub side_width: f32,
@@ -136,7 +137,6 @@ pub struct FrameLayout {
 /// The largest total slot-unit budget the frame can hold at `width` — measured
 /// against the **rail** center budget (the roomiest side state), so the shell
 /// caps slots against the maximum the frame will ever fit. At least 1.
-#[allow(dead_code)] // consumed by the shell in Stage B
 pub fn frame_capacity(width: u32, scale: f32, t: &Slots) -> usize {
     let budget = width as f32 - 2.0 * t.side_rail_width * scale - 2.0 * t.gutter * scale;
     units_fitting(budget, scale, t).clamp(1, MAX_SLOTS * 2)
@@ -149,7 +149,6 @@ pub fn frame_capacity(width: u32, scale: f32, t: &Slots) -> usize {
 /// one gutter away, at the slot height. One call → all rects, so the animated
 /// reflow (Stage B) drives a single interpolated `side_width` and both rendering
 /// and input read the same per-frame geometry (desync-safe by construction).
-#[allow(dead_code)] // consumed by the renderer + shell in Stage B
 pub fn frame_layout(
     width: u32,
     height: u32,
