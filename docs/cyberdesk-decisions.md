@@ -2,6 +2,59 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0023 - 2026-07-09 - CD-13: update-awareness — the one pinned outbound endpoint + its HTTPS client
+
+CyberDesk gains an info area (top-right, CD-13) that shows product + component
+update availability. This is a milestone: **the host's FIRST intentional outbound
+network connection.** Two coupled decisions are recorded here; the info-area UX
+and its notification-rail seeding are D-0024.
+
+**The NetGuard exception (D-0004 survives via exactly ONE documented hole).** The
+deny-by-default doctrine (no module opens its own connections outside the future
+central NetGuard) stands, with a single carve-out: **one allowlisted URL, HTTPS,
+the pinned CARVILON update manifest** (`updates.feed_url` token, default
+`https://carvilon.com/updates/cyberdesk.json`). The client queries nobody else —
+not Google, not CEF's servers, not a CDN. This is spot-checkable in code:
+`updates::fetch` has exactly one call site (`run_check` with `feed_url()`), and
+`feed_url()` returns the config token (or the `CYBERDESK_UPDATE_FEED` test
+override). A 404 / unreachable / malformed feed is **silent** — the glyph stays
+idle, the last-known cached manifest (if any) is kept, startup is never blocked,
+never an error in the user's face. When NetGuard is built (Season 5), this URL
+becomes its first allowlist entry rather than a code-level exception.
+
+**The HTTPS client dependency (reasoned exception to the lean-dependency
+doctrine).** The host needs a minimal TLS client for that one fetch. Chosen:
+**`ureq` 2.12 with rustls** (`default-features = false, features = ["tls"]`) —
+blocking (fits a background worker thread), rustls-based (no OpenSSL / system TLS),
+small stable API. Note: `download-cef` already pulls `ureq 3` as a **build**
+dependency (CEF fetch at build time); our runtime `ureq 2` ships in the binary and
+does not duplicate anything shipped. The fetch runs on a named background thread
+with hard `timeout_connect` (5 s) + `timeout_read` (8 s) caps, so the shell UI
+never waits on it. A local `file:` / path in `CYBERDESK_UPDATE_FEED` is read from
+disk (end-to-end testing before the manifest is live); the production path is
+HTTPS-only.
+
+**Version self-awareness (crate-source-first).** CyberDesk's version is
+`CARGO_PKG_VERSION`. The running CEF/Chromium version comes from the pinned
+crate's **compile-time constants** — `cef::sys::CEF_VERSION_MAJOR/MINOR/PATCH`
+(→ `149.0.6`) and `CHROME_VERSION_MAJOR/MINOR/BUILD/PATCH` (→ `149.0.7827.201`).
+The old `cef_version_info(entry)` runtime call does not exist in this binding
+(verified in the crate); `cef_api_version()` returns the configured API version,
+not the product version, so the constants are the correct source.
+
+**Schema + storage.** The manifest schema (v1) is `{schema, cyberdesk:{latest,
+notes_url}, components:{<id>:{recommended, reason, notes_url}}}` — documented with
+a sample in `docs/updates/cyberdesk.sample.json` and the wire-format. Parsing is
+tolerant: a higher `schema` with extra fields is read best-effort (serde ignores
+unknowns); a truly malformed feed fails to parse and is treated as no-data. Version
+comparison is tolerant of both our semver and CEF's `major.minor.patch+chromium-…`
+(only the head before `+` matters), unit-tested against good / malformed /
+future-schema fixtures with NO network. SQLite **schema v4** adds `update_meta`
+(cached manifest JSON + last-check unix time, so the glyph reflects last-known
+offline) and `update_dismissed` (per item id → the version dismissed at; an item
+re-appears only when the manifest advances past it). The worker checks on startup
+and every `check_interval_hours` (6), nudged immediately by "Check now".
+
 ## D-0022 - 2026-07-09 - Revised frame law: three slots, permanent Multifunctional zone
 
 Sascha's ruling after living with the CD-11 frame (D-0020): **four columns are too

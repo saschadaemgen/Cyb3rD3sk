@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "cyberdesk": {
+    "latest": "0.9.0",
+    "notes_url": "https://carvilon.com/updates/notes/0.9.0.html"
+  },
+  "components": {
+    "cef": {
+      "recommended": "150.0.1+chromium-150.0.7900.100",
+      "reason": "security",
+      "notes_url": "https://carvilon.com/updates/notes/cef-150.html"
+    }
+  }
+}

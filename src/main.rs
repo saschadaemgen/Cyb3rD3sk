@@ -19,6 +19,7 @@ mod settings;
 mod slots;
 mod store;
 mod theme;
+mod updates;
 
 use std::process::ExitCode;
 
@@ -84,6 +85,12 @@ fn main() -> ExitCode {
         println!("wrote {path}");
         return ExitCode::SUCCESS;
     }
+
+    // Start the background update-awareness worker (CD-13, D-0023): the host's one
+    // pinned outbound check, on startup + every interval. Browser process only
+    // (sub-processes returned above); never on the --capture path. It never blocks
+    // — a bad feed is silent.
+    updates::init();
 
     app::run(windowed);
     ExitCode::SUCCESS

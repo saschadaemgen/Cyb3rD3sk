@@ -26,6 +26,10 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
+# Update-awareness HTTPS client (CD-13, D-0023) — the host's ONE intentional
+# outbound connection, a single pinned manifest. rustls-based (no OpenSSL); the
+# reasoned exception to the lean-dependency doctrine is recorded in D-0023.
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 [profile.release]
 opt-level = 3

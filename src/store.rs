@@ -15,7 +15,7 @@ use std::sync::{Mutex, OnceLock};
 
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// History is capped at this many rows; the oldest are pruned on each insert
 /// (D-0014). Local only — no sync, no export.
@@ -140,6 +140,25 @@ impl Store {
                      );",
                 )
                 .expect("failed to migrate to schema v3 (session_slots)");
+        }
+        if version < 4 {
+            // CD-13 (D-0023): update awareness. `update_meta` caches the last-known
+            // manifest JSON + the last check time (so the glyph reflects last-known
+            // offline); `update_dismissed` holds, per info item id, the target
+            // version it was dismissed at — the item re-appears only if the manifest
+            // later advances past it.
+            self.conn
+                .execute_batch(
+                    "CREATE TABLE IF NOT EXISTS update_meta (
+                         key   TEXT PRIMARY KEY,
+                         value TEXT NOT NULL
+                     );
+                     CREATE TABLE IF NOT EXISTS update_dismissed (
+                         id      TEXT PRIMARY KEY,
+                         version TEXT NOT NULL
+                     );",
+                )
+                .expect("failed to migrate to schema v4 (update awareness)");
         }
         self.conn
             .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -344,6 +363,71 @@ impl Store {
                 active: r.get::<_, i64>(2)? != 0,
             })
         }) {
+            out.extend(rows.filter_map(Result::ok));
+        }
+        out
+    }
+
+    // --- Update awareness (D-0023) ------------------------------------------
+
+    fn update_meta_set(&self, key: &str, value: &str) {
+        self.conn
+            .execute(
+                "INSERT INTO update_meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            .ok();
+    }
+
+    fn update_meta_get(&self, key: &str) -> Option<String> {
+        self.conn
+            .query_row("SELECT value FROM update_meta WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .ok()
+    }
+
+    /// The last-known manifest JSON (cached so the info glyph reflects last-known
+    /// state offline / before the first successful check).
+    pub fn cached_manifest(&self) -> Option<String> {
+        self.update_meta_get("manifest")
+    }
+
+    pub fn set_cached_manifest(&self, json: &str) {
+        self.update_meta_set("manifest", json);
+    }
+
+    /// Unix seconds of the last update check attempt (success or failure), or None.
+    pub fn last_update_check(&self) -> Option<i64> {
+        self.update_meta_get("last_check")
+            .and_then(|s| s.trim().parse::<i64>().ok())
+    }
+
+    pub fn set_last_update_check(&self, secs: i64) {
+        self.update_meta_set("last_check", &secs.to_string());
+    }
+
+    /// Record that info item `id` was dismissed at `version` (the target version at
+    /// dismissal time); re-inserting updates it. The item stays hidden until the
+    /// manifest advances past `version`.
+    pub fn dismiss_update(&self, id: &str, version: &str) {
+        self.conn
+            .execute(
+                "INSERT INTO update_dismissed (id, version) VALUES (?1, ?2)
+                 ON CONFLICT(id) DO UPDATE SET version = excluded.version",
+                (id, version),
+            )
+            .ok();
+    }
+
+    /// Every dismissed item id → the version it was dismissed at.
+    pub fn dismissed_updates(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = self.conn.prepare("SELECT id, version FROM update_dismissed")
+            && let Ok(rows) =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        {
             out.extend(rows.filter_map(Result::ok));
         }
         out

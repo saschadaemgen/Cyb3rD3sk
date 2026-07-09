@@ -188,3 +188,14 @@ placeholder_glyph = 0.18   # placeholder core-glyph brightness (0..1 of brand)
 side_zone_width  = 320.0   # LEFT (Spine) zone width, Full state (D-0022) — flexes to the rail below
 side_rail_width  = 48.0    # LEFT (Spine) zone width, Rail state — the retreated thin strip
 mf_zone_width    = 320.0   # RIGHT Multifunctional zone width (D-0022) — PERMANENT, never rails
+
+# Update awareness (CD-13, D-0023). `feed_url` is the host's ONE allowlisted
+# outbound endpoint — the pinned CARVILON update manifest (public product config,
+# not a secret; NetGuard exception D-0023). No other host traffic exists. The
+# `CYBERDESK_UPDATE_FEED` env var overrides it for testing (documented like the
+# capture knobs). The rest are the info glyph's token-driven appearance.
+[updates]
+feed_url             = "https://carvilon.com/updates/cyberdesk.json"
+check_interval_hours = 6      # background re-check cadence (also runs once on startup)
+glyph_radius         = 15.0   # info glyph radius (logical px, DPI-scaled), near the gear
+pulse_period         = 2.4    # seconds per pulse cycle when updates are available

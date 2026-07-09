@@ -22,6 +22,7 @@ pub struct Theme {
     pub background: Background,
     pub command: Command,
     pub slots: Slots,
+    pub updates: Updates,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -199,6 +200,20 @@ pub struct Slots {
     /// The **right** Multifunctional (MF) zone width (D-0022). This zone is
     /// permanent — it never rails and is present at every resolution.
     pub mf_zone_width: f32,
+}
+
+/// Update awareness (CD-13, D-0023). The `feed_url` is the host's ONE allowlisted
+/// outbound endpoint (the pinned CARVILON manifest); the rest are the info glyph's
+/// token-driven appearance. `feed_url` is public product configuration, not a
+/// secret. The `CYBERDESK_UPDATE_FEED` env var overrides `feed_url` for testing.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Updates {
+    pub feed_url: String,
+    pub check_interval_hours: u32,
+    /// Info glyph radius (logical px, DPI-scaled) — a small status light near the gear.
+    pub glyph_radius: f32,
+    /// Seconds per pulse cycle when updates are available (modest amplitude).
+    pub pulse_period: f32,
 }
 
 impl Background {
