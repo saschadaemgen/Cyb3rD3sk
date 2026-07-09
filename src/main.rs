@@ -18,6 +18,7 @@ mod settings;
 mod slots;
 mod store;
 mod theme;
+mod tor;
 mod updates;
 
 use std::process::ExitCode;

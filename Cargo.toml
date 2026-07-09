@@ -30,6 +30,15 @@ toml = "0.9"
 # outbound connection, a single pinned manifest. rustls-based (no OpenSSL); the
 # reasoned exception to the lean-dependency doctrine is recorded in D-0023.
 ureq = { version = "2", default-features = false, features = ["tls"] }
+# Embedded Tor engine (CD-15, D-0026) — pure-Rust Tor via arti-client, rustls
+# (no OpenSSL), on a background tokio runtime. Heavy but justified by the
+# per-window Tor feature; the reasoned dependency exception is recorded in D-0026.
+arti-client = { version = "0.44", default-features = false, features = ["tokio", "rustls"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "io-util", "sync", "time"] }
+# Bridges arti's futures-based DataStream to tokio's AsyncRead/Write for the SOCKS relay.
+tokio-util = { version = "0.7", default-features = false, features = ["compat"] }
+# Names arti's PreferredRuntime (already in the tree via arti-client) for the client type.
+tor-rtcompat = { version = "0.44", default-features = false, features = ["tokio", "rustls"] }
 
 [profile.release]
 opt-level = 3

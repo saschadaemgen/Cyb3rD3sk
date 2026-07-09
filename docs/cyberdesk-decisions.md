@@ -2,6 +2,65 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0026 - 2026-07-09 - CD-15: the embedded Tor engine (arti) + per-slot local SOCKS relay
+
+Sascha's ruling: build Tor in, per window, securely. Stage A is the engine; the
+per-window CEF proxy wiring, the full leak checklist, and the honest-scope UI are
+D-0027 (Stages B/C).
+
+**Engine = embedded `arti-client` (v0.44), not a subprocess.** arti is the Tor
+Project's pure-Rust Tor. Two integrations were weighed: embed `arti-client` +
+a local SOCKS bridge, or spawn the `arti` binary as a SOCKS subprocess. **Embedded
+was chosen** — it matches the single-binary doctrine and Sascha's proven SimpleGoX
+approach (his explicit direction on this ticket). The residual cost of embedding is
+noted below.
+
+**Dependency justification (a large, reasoned exception to the lean-dependency
+doctrine).** `arti-client` pulls tokio + a large tor-* tree (~200 crates). This is
+heavy, but the per-window Tor feature justifies it, and it stays pure-Rust +
+**rustls** (`default-features = false, features = ["tokio", "rustls"]`, no OpenSSL).
+Runtime: arti runs on a dedicated background tokio multi-thread runtime on its own
+thread; `tokio-util` (compat) bridges arti's futures-based `DataStream` to tokio for
+the relay; `tor-rtcompat` names arti's `PreferredRuntime`. The shell's winit/wgpu/CEF
+main thread never touches async. It builds clean on Windows MSVC (verified).
+
+**Bootstrap is off the shell thread; status is a lock-free atomic.** `tor::init()`
+spawns the engine thread once (idempotent via a CAS on the status), which binds the
+SOCKS listeners, then `TorClient::create_bootstrapped`. Status
+(`IDLE`/`BOOTSTRAPPING`/`READY`/`FAILED`) is an `AtomicU8` the UI reads. Startup and
+the UI **never block or freeze** on Tor — verified by a boot with the engine started
+offline (bootstrap runs/retries on its thread; the shell renders and stays
+responsive; no freeze, no crash in the window observed).
+
+**Per-slot SOCKS + circuit isolation.** Rather than one SOCKS port with per-cred
+isolation (CEF can't easily carry SOCKS creds in its proxy pref), each slot id gets
+its **own loopback port** (`127.0.0.1:9250+id`) served by its **own
+`isolated_client()`** — arti puts each on its own circuit family, so two Tor windows
+are unlinkable (acceptance #4). A slot's Tor request context (D-0027) proxies through
+its port.
+
+**Remote DNS (host side of the leak checklist).** The hand-rolled SOCKS5 CONNECT
+relay hands a hostname (SOCKS `ATYP=domain`) to arti **unresolved** — DNS resolves
+remotely through Tor, never a local resolver. An explicit IP (`ATYP=1/4`) came
+straight from the client (not a local resolution), so it is connected via
+`TorAddr::dangerously_from` — the one intentional, audited place IPs enter. The
+WebRTC / QUIC / proxy-bypass half of the checklist lives on the CEF context (D-0027).
+**Empirical verification (check.torproject.org, DNS-leak, WebRTC) is Sascha's live
+run** — this environment has no network, so the routing/leak behaviour cannot be
+tested here; that is stated plainly and is a hard gate before the feature ships.
+
+**NetGuard (D-0004) gains a second sanctioned outbound path.** Alongside the single
+pinned update-manifest URL (D-0023), Tor exit traffic is now permitted — but unlike
+that one URL, this is *user-driven browsing through the Tor context*, which is the
+whole point. Documented as the second exception; when NetGuard is built it governs
+both.
+
+**Residual risk (accepted, embedded-specific).** Embedded arti may
+`process::exit(1)` on an obsolete consensus, which would take the shell down; the
+subprocess path would isolate that. Embedded was chosen anyway (doctrine + SimpleGoX);
+the risk is documented and accepted. SBOM/CRA: `arti-client`, `tokio`, `tokio-util`,
+`tor-rtcompat` (and their tree) are new dependencies to list.
+
 ## D-0025 - 2026-07-09 - CD-14: own start page (Google banished), no saved websites, big-monitor focus
 
 Three Sascha rulings.
