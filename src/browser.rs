@@ -2,9 +2,9 @@
 //!
 //! The off-screen (OSR) browser views live here, distinguished by a [`Role`]:
 //!
-//!   * [`Role::Slot`]`(i)` — one of the up-to-`MAX_SLOTS` surf columns (CD-09),
-//!     full web browsing. Slot 0 loads the home page eagerly; the rest are lazy
-//!     (no browser until their first navigation).
+//!   * [`Role::Slot`]`(i)` — one of the surf columns (CD-09), full web browsing.
+//!     A new/empty slot loads the own start page (CD-14, `cyberdesk://start/`);
+//!     no Google, no restored websites.
 //!   * [`Role::Internal`] — the settings / command-bar page, locked to the
 //!     internal `cyberdesk://` scheme (see docs/cyberdesk-decisions.md, D-0010).
 //!
@@ -40,13 +40,13 @@ use winit::window::CursorIcon;
 
 use crate::slots::MAX_SLOTS;
 
-/// Page loaded into the surf-zone view.
-const HOME_URL: &str = "https://www.google.com/";
-/// The internal custom scheme and the settings document URL (D-0010).
+/// The internal custom scheme and its document URLs (D-0010). The **start page**
+/// (CD-14, D-0025) is the default content of every empty slot — Google is gone.
 const SCHEME: &str = "cyberdesk";
 const SETTINGS_URL: &str = "cyberdesk://settings/";
 const COMMAND_URL: &str = "cyberdesk://command/";
 const INFO_URL: &str = "cyberdesk://info/";
+const START_URL: &str = "cyberdesk://start/";
 
 // cef_event_flags_t bits (modifiers for mouse/key events).
 const EVENTFLAG_SHIFT_DOWN: u32 = 1 << 1;
@@ -350,11 +350,12 @@ pub fn set_view_geometry(role: Role, phys_w: u32, phys_h: u32, scale: f32) {
     *view(role).geom.lock().unwrap() = ViewGeom { phys_w, phys_h, scale };
 }
 
-/// Create a windowless (OSR) browser for `role` at its default start page (the
-/// home URL for a slot, the settings page for the internal view).
+/// Create a windowless (OSR) browser for `role` at its default page: the own
+/// **start page** for a slot (CD-14, no Google), the settings page for the
+/// internal view.
 pub fn create_browser(role: Role, parent_hwnd: isize) {
     let url = match role {
-        Role::Slot(_) => HOME_URL,
+        Role::Slot(_) => START_URL,
         Role::Internal => SETTINGS_URL,
     };
     create_browser_url(role, parent_hwnd, url);
@@ -643,6 +644,21 @@ fn command_document() -> String {
             .replace("/*__TOKENS__*/", &theme.to_css_vars())
             .replace("/*__CSS__*/", include_str!("command.css"))
             .replace("/*__JS__*/", include_str!("command.js"))
+    })
+    .clone()
+}
+
+/// The own start page HTML, built once (same self-contained inlining discipline
+/// as the settings / command / info pages). It is the default content of every
+/// empty slot (CD-14); zero network — no fonts, images, or remote resources.
+fn start_document() -> String {
+    static DOC: OnceLock<String> = OnceLock::new();
+    DOC.get_or_init(|| {
+        let theme = crate::theme::Theme::load();
+        include_str!("start.html")
+            .replace("/*__TOKENS__*/", &theme.to_css_vars())
+            .replace("/*__CSS__*/", include_str!("start.css"))
+            .replace("/*__JS__*/", include_str!("start.js"))
     })
     .clone()
 }
@@ -982,8 +998,13 @@ wrap_client! {
             source_process: ProcessId,
             message: Option<&mut ProcessMessage>,
         ) -> c_int {
-            if self.role == Role::Internal
-                && let Some(router) = BROWSER_ROUTER.get()
+            // Route the message-router query for every view, not just the internal
+            // one: the CD-14 start page lives in a SLOT and needs IPC (navigate,
+            // query_suggestions). This is safe — `window.cefQuery` is exposed ONLY
+            // on `cyberdesk://` frames (the render-side on_context_created gate), so
+            // a slot showing a web page has no query bridge; only our own start
+            // page (the sole cyberdesk:// content a slot ever shows) can send here.
+            if let Some(router) = BROWSER_ROUTER.get()
                 && router.on_process_message_received(
                     browser.map(|b| b.clone()),
                     frame.map(|f| f.clone()),
@@ -1260,6 +1281,8 @@ wrap_scheme_handler_factory! {
                 command_document()
             } else if url.contains("//info") {
                 info_document()
+            } else if url.contains("//start") {
+                start_document()
             } else {
                 settings_document()
             };

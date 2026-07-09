@@ -490,9 +490,10 @@ impl Shell {
         self.set_active(self.order[next]);
     }
 
-    /// Add a slot right of the active one (Ctrl+T). No-op at capacity / MAX_SLOTS.
-    /// The new slot is lazy (placeholder, no browser); it becomes active and the
-    /// top bar reveals focused + empty so the user can type its first address.
+    /// Add a slot right of the active one (Ctrl+T). No-op at capacity / slot_max.
+    /// The new slot spawns at the own start page (CD-14) and becomes active — its
+    /// own search box is the landing surface (so the CD-12 Ctrl+T capsule
+    /// auto-reveal is retired here; Ctrl+L still reveals the floating capsule).
     fn add_slot(&mut self) {
         // A new slot is one unit; it must fit both the count and the unit budget.
         if self.order.len() >= self.slot_max() || self.total_units() + 1 > self.capacity() as u32 {
@@ -501,8 +502,8 @@ impl Shell {
         let Some(free) = slots::free_id(&self.order) else {
             return;
         };
-        // Drop keyboard focus from the outgoing active slot's browser before the
-        // new (lazy, browser-less) slot takes over; the bar then holds focus.
+        // Drop keyboard focus from the outgoing active slot before the new one
+        // spawns (its start page then takes focus via on_after_created).
         if self.overlay == Overlay::Closed {
             browser::set_focus(Role::Slot(self.active_slot), false);
         }
@@ -513,12 +514,15 @@ impl Shell {
         self.armed[free] = None;
         self.active_slot = free;
         browser::set_active_slot(free);
-        // Recentre the group and re-size every view for the new column count.
+        // Recentre the group and re-size every view, then spawn the new slot at the
+        // own start page (Energy Core + search + favorites). The lazy-slot
+        // placeholder covers the brief spawn until the start page paints.
         self.push_geometry();
+        if let Some(window) = self.window.clone() {
+            let hwnd = window_hwnd(&window);
+            browser::create_browser(Role::Slot(free), hwnd);
+        }
         self.notify_all_resized();
-        // Reveal the bar focused + empty (the lazy slot's URL is empty), ready to
-        // type the first address (which spawns the browser via `navigate`).
-        self.reveal_active_capsule();
     }
 
     /// Open `url` in a new slot beside the source slot — a user-gesture popup or
