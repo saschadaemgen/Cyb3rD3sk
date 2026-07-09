@@ -39,6 +39,16 @@ feathered compositing, and an isolated in-shell settings surface.
   a scan sweep) is preserved as a token-selectable "Calm" variant
   (`background.kind = "deep_field"`). See `docs/cyberdesk-decisions.md` (D-0012,
   D-0013).
+* **Update awareness — the info area (CD-13, D-0023/D-0024):** a small status light
+  top-right, beside the gear. Idle it is a faint ring; when an update is available
+  it fills with the brand color, a subtle pulse, and a count. Click it for a
+  **floating panel** listing what is out of date — CyberDesk itself and its CEF core
+  — with release-notes links (open in a column) and a Dismiss (it re-appears only if
+  a newer version ships). The panel is honest and calm when you are current. This is
+  the host's **one and only** outbound connection: a single pinned CARVILON update
+  manifest over HTTPS (the NetGuard exception, D-0023) — it queries nobody else, a
+  missing feed is silent, and it **informs only** (no downloads, no installs; that
+  is the signed-pipeline future). It is the seed of the later notification rail.
 * **Floating command elements — the bar dies (CD-12, D-0021):** the single top bar
   is retired. **Every column carries its own floating command set** — back/forward/
   reload orbs and an address capsule — that reveals above *that* column and drives
@@ -224,7 +234,8 @@ width-unit sequence (CD-10 double slots), and `CYBERDESK_CAPTURE_PENDING=N` mark
 the first N columns as restored-pending (the scheme-colored placeholder dot).
 `CYBERDESK_CAPTURE_CLOSE=1` overlays a per-column **close orb** (ring + cross) and
 `CYBERDESK_CAPTURE_DRAG=1` a **favorite-drag** sample (gutter drop zones + ghost) so
-the CD-12 overlays can be eyeballed headlessly.
+the CD-12 overlays can be eyeballed headlessly. `CYBERDESK_CAPTURE_INFO=idle|active`
+draws the CD-13 **info glyph** (idle ring / filled disc + pulse + count).
 
 ---
 
@@ -262,7 +273,8 @@ its own floating command set (CD-12).
 | Mouse button 4 / 5 | History back / forward (column under the cursor) |
 | `F5` / `Ctrl+R` | Reload (active column) |
 | `Ctrl+Shift+R` | Hard reload, ignore cache (active column) |
-| `ESC` | Cancel a favorite drag, else hide the command set, else close the settings card, else quit |
+| Click the **info glyph** (top-right, beside the gear) | Open / close the update-awareness panel; it fills + pulses when an update is available |
+| `ESC` | Cancel a favorite drag, else hide the command set / info panel, else close the settings card, else quit |
 
 An amber glyph in the address capsule marks a page served over plain `http://`
 (e.g. `neverssl.com`, which stays http by design); `https` and internal pages
@@ -292,9 +304,11 @@ cyberdesk/
 │  ├─ settings.rs    # live settings state (search engine, glow, toggles) over the shared store
 │  ├─ memory.rs      # history + favorites domain layer (frecency suggestions) over the store
 │  ├─ session.rs     # slot-workspace persistence (save/restore, plan_restore) over the store
+│  ├─ updates.rs     # update awareness (CD-13): pinned-manifest fetch/parse/compare, info items, background worker
 │  ├─ pulsegrid.rs   # Pulse Grid background: seeded generator + life simulation
 │  ├─ settings.html/.css/.js   # embedded internal settings page assets
 │  ├─ command.html/.css/.js    # embedded floating command-set page assets (CD-12)
+│  ├─ info.html/.css/.js        # embedded update-awareness info panel assets (CD-13)
 │  ├─ ring.wgsl      # CARVILON ring — dormant since CD-06 (Season-2 motif)
 │  ├─ pulsegrid_*.wgsl  # Pulse Grid: lattice (3 depth weaves) · sprite (SDF prims/pulses) · composite
 │  ├─ deepfield.wgsl # Deep Field ("Calm" variant) background  ·  blit.wgsl (upscale)
@@ -302,6 +316,7 @@ cyberdesk/
 │  ├─ slot_placeholder.wgsl  # lazy-slot placeholder (fill + 7-segment index glyph)
 │  ├─ slot_lines.wgsl        # per-slot loading line (top) + active accent (bottom)
 │  ├─ drag.wgsl      # topmost command overlay: favorite-drag ghost/zones + close orbs (CD-12)
+│  ├─ info_glyph.wgsl # update-awareness info glyph (idle ring / active disc + pulse + count, CD-13)
 │  └─ gear.wgsl      # settings gear button
 ├─ scripts/
 │  └─ fetch-cef.ps1  # downloads the pinned CEF version into vendor/cef/

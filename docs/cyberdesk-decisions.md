@@ -2,6 +2,39 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0024 - 2026-07-09 - CD-13: the info area is the generic notification-rail seed; V1 informs, never installs
+
+The info area (top-right glyph + floating panel, CD-13) is built on a **generic
+info-item model** — `{id, severity, title, body, action?}` — not a bespoke
+"updates" widget. This is deliberate: it is the **seed of the future notification
+rail** (Season 7, where the Priority Engine's events — doorbell, call, alarm,
+security alert — ride the same model and the same surface). V1 produces only the
+two update items (CyberDesk + CEF), but nothing about the shape, the panel, the
+dismissal model, or the glyph is update-specific. When events arrive they slot in
+as more info items with their own severities; the rail does not need re-architecting.
+
+**Rendered per the floating law (D-0021).** No strip: the info glyph is its own
+shell-drawn element beside the gear (idle = a faint ring; updates available = a
+filled brand disc with a modest pulse and a count badge — a status light, not an
+alarm), and the panel is a floating top-right card on the shared internal OSR
+view. It joins the mutually-exclusive overlay set (info / settings / command band);
+the existing ESC chain and `take_overlay_close` extend to it naturally. Its home
+is the permanent Multifunctional zone's conceptual neighborhood (top-right), the
+same corner D-0022 made permanent.
+
+**V1 informs; it does not install.** The panel shows availability and links to
+release notes (which open in a slot); it never downloads, never installs, never
+auto-bumps CEF. Self-update is a deliberate future capability that arrives with
+the **signed ML-DSA pipeline** (Season 6+ / commercial): this surface is exactly
+where its **Install** action will live (a third item action alongside "Release
+notes" / "Dismiss"), but until the signature-verified pipeline exists, offering to
+install would be a security foot-gun. A CEF bump likewise stays a deliberate
+build / test / release act — the item informs, the human decides.
+
+Dismissal is versioned (D-0023): dismissing calms the glyph and persists across a
+restart, and an item re-appears only when the manifest advances past the dismissed
+version — so "I'll deal with 0.9.0 later" is honored, but 0.10.0 re-raises it.
+
 ## D-0023 - 2026-07-09 - CD-13: update-awareness — the one pinned outbound endpoint + its HTTPS client
 
 CyberDesk gains an info area (top-right, CD-13) that shows product + component

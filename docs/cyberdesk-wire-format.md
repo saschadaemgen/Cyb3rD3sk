@@ -244,6 +244,79 @@ The per-slot **close orb** (a shell-drawn ring + cross revealed on top-outer-cor
 hover, a click closes that column) is **no IPC** — it is drawn by the renderer and
 hit-tested host-side, like the gear button.
 
+## Update-awareness IPC (CD-13, live)
+
+The info panel (`cyberdesk://info/`) uses the same message-router bridge
+(`window.cefQuery`, process messages, internal view only) as settings / command.
+Three allowlisted commands; notes links reuse `navigate` (which loads the active
+slot and closes the panel). Same error-code space (1 malformed, 2 missing/typed,
+4 unknown `cmd`). The info glyph itself is **no IPC** (shell-drawn, hit-tested
+host-side like the gear). All data comes from the one pinned manifest (D-0023);
+this channel opens no network of its own.
+
+### `get_info_items` (view -> host)
+
+- Request: `{"cmd":"get_info_items"}`
+- Success: the info snapshot —
+  `{"have_feed":<bool>,"checked_ago":<str|null>,"items":[…],"cyberdesk":{…},"cef":{…}}`
+  - `items` — the NEW (non-dismissed) update items, each
+    `{"id":<str>,"severity":"info"|"recommended"|"security","title":<str>,"body":<str>,"action":{"label":<str>,"url":<str>}|null}`.
+    Empty when up to date, all dismissed, or there is no feed data.
+  - `checked_ago` — an honest relative "3 minutes"/"1 hour"/… of the last check
+    attempt (success or failure), or `null` if never checked.
+  - `cyberdesk` — `{"version":<str>,"latest":<str|null>,"up_to_date":<bool>}`
+    (`version` = this build's `CARGO_PKG_VERSION`).
+  - `cef` — `{"version":<str>,"chromium":<str>,"recommended":<str|null>,"up_to_date":<bool>}`
+    (from the pinned crate's compile-time version constants).
+- Failure: code 1 (malformed request JSON).
+
+### `dismiss_item` (view -> host)
+
+- Request: `{"cmd":"dismiss_item","id":"<str>"}`
+- Effect: records the item's current target version as dismissed (persisted). The
+  glyph calms; the item stays hidden until the manifest advances past that version
+  (D-0023). No-op for an unknown / absent item.
+- Success: `{"ok":true}`
+- Failure: code 1 (malformed request), 2 (missing `id`).
+
+### `check_updates` (view -> host)
+
+- Request: `{"cmd":"check_updates"}`
+- Effect: nudges the background worker to fetch the pinned manifest **now** (the
+  "Check now" button). Returns immediately; the fetch is async on the worker
+  thread (the page re-reads `get_info_items` shortly after to show the result).
+- Success: `{"ok":true}`
+- Failure: code 1 (malformed request JSON).
+
+## Update manifest schema (CD-13, D-0023)
+
+A small static JSON published by Sascha at the `updates.feed_url` token (default
+`https://carvilon.com/updates/cyberdesk.json`). The host fetches exactly this one
+URL over HTTPS (`CYBERDESK_UPDATE_FEED` overrides it for testing). Sample:
+`docs/updates/cyberdesk.sample.json`; publishing steps: `docs/updates/README.md`.
+
+```json
+{
+  "schema": 1,
+  "cyberdesk": { "latest": "0.9.0", "notes_url": "https://carvilon.com/updates/notes/0.9.0.html" },
+  "components": {
+    "cef": { "recommended": "150.0.1+chromium-150.0.7900.100", "reason": "security", "notes_url": "https://carvilon.com/updates/notes/cef-150.html" }
+  }
+}
+```
+
+- `schema` (int) — the manifest schema version (**1**). A higher number is read
+  best-effort: unknown fields are ignored, so adding fields is backward-compatible.
+- `cyberdesk.latest` (str) — the newest published CyberDesk version (semver).
+  `cyberdesk.notes_url` (str, optional) — release notes URL.
+- `components` (map, optional) — keyed by component id. V1 reads **`cef`**:
+  `recommended` (str, CEF `major.minor.patch+chromium-…`), `reason` (str, optional
+  — `security` maps to the security severity), `notes_url` (str, optional).
+- Version comparison is tolerant of both semver and the CEF `+chromium-…` form
+  (only the head before `+` matters). A 404 / unreachable / malformed feed is
+  silent — the last-known cached manifest is kept, the glyph stays quiet, startup
+  is never blocked.
+
 ## NetGuard policy (sketch)
 
 - Per zone: allowed destinations (host, port, protocol), optional pinning fingerprint, limits (rate, volume).
