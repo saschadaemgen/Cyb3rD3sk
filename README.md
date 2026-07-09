@@ -39,6 +39,17 @@ feathered compositing, and an isolated in-shell settings surface.
   a scan sweep) is preserved as a token-selectable "Calm" variant
   (`background.kind = "deep_field"`). See `docs/cyberdesk-decisions.md` (D-0012,
   D-0013).
+* **Own start page, no Google, no saved websites (CD-14, D-0025):** every empty/new
+  slot opens to an **own start page** served from the binary at `cyberdesk://start/`
+  (same isolation as settings, **zero network**) — Google is gone. It is a black
+  canvas with a faint micro-lattice, the glowing **Energy Core** (the reserved CD-06
+  motif — a bright hollow core inside concentric rotating brand-cyan arcs, motion
+  respecting `prefers-reduced-motion`), a search/address capsule (same host-side
+  URL-vs-search classifier + chosen engine), and round favorite tiles that open in
+  the slot. And **websites are not saved**: a restart always comes back to a single
+  start-page slot — never restored open URLs (the privacy reversal of CD-10's
+  session persistence; the `session_slots` table is dropped, purging any prior data).
+  History and favorites are untouched.
 * **Update awareness — the info area (CD-13, D-0023/D-0024):** a small status light
   top-right, beside the gear. Idle it is a faint ring; when an update is available
   it fills with the brand color, a subtle pulse, and a count. Click it for a
@@ -78,24 +89,22 @@ feathered compositing, and an isolated in-shell settings surface.
 * **Slot engine — fixed-width content columns (CD-09, D-0017; cap revised D-0022):**
   the surf zone is up to **three fixed-width columns** ("slots", 1200 logical px each)
   side by side, gutter-spaced and centered between the zones. `Ctrl+T` adds a column
-  (lazily: it shows a placeholder with its index glyph until its first navigation, no
-  white flash), `Ctrl+W` closes the active one, `Ctrl+1..3` / `Ctrl+Tab` switch. One
+  that opens to the start page (a placeholder with its index glyph covers the brief
+  spawn until it paints), `Ctrl+W` closes the active one, `Ctrl+1..3` / `Ctrl+Tab` switch. One
   column is **active** at a time (a thin brand accent underlines it): the keyboard and
   its floating command set drive it; the mouse drives whichever column it is over (a
   click makes that column active). The Pulse Grid glows in the gutters and margins,
   dimmed under each column by the zone shadow. On the ultrawide, three different sites
   sit pixel-aligned side by side.
-* **A permanent, fluid workspace (CD-10, D-0018/D-0019):** the slot workspace
-  **survives restarts** — the columns (order, widths, which was active) are saved
-  to SQLite on every change (debounced) and restored on launch; the active column
-  reloads immediately, the rest stay lazy with their URL pre-armed (a small
-  scheme-colored dot on the placeholder marks a page waiting) and load on first
-  touch. Columns can be **reordered** (`Ctrl+Shift+←/→` swap with a neighbor) and
-  **widened** to double width (`Ctrl+Shift+D` — a two-column-wide slot for a
-  web-app, the group staying centered and pixel-aligned; no-op if it won't fit).
-  A **real click on a `target=_blank` link, or a `Ctrl`/middle-click on any link,
-  opens the target in a new column beside the source** (which becomes active), or
-  in place when the grid is already full; ad/script popups stay suppressed.
+* **A fluid workspace (CD-10, D-0018/D-0019; websites no longer restored, D-0025):**
+  columns can be **reordered** (`Ctrl+Shift+←/→` swap with a neighbor) and **widened**
+  to double width (`Ctrl+Shift+D` — a two-column-wide slot for a web-app, the group
+  staying centered and pixel-aligned; no-op if it won't fit). A **real click on a
+  `target=_blank` link, or a `Ctrl`/middle-click on any link, opens the target in a
+  new column beside the source** (which becomes active), or in place when the grid is
+  already full; ad/script popups stay suppressed. The workspace no longer **persists
+  open websites** across restarts (CD-14, D-0025): every launch starts fresh at a
+  single start-page slot — the earlier session-URL restore is reversed for privacy.
 * **Surf columns (CEF, off-screen rendering):** each column's CEF browser renders
   off-screen (`on_paint`); CyberDesk uploads each frame into that slot's wgpu
   texture and composites it at the slot's rectangle (70 % tall, centered). Column
@@ -139,8 +148,8 @@ feathered compositing, and an isolated in-shell settings surface.
   comes from an embedded theme (`src/theme.toml`), resolved both into wgpu shader
   uniforms and into the settings/command pages' CSS custom properties. App state
   lives in a schema-versioned SQLite store under `%LOCALAPPDATA%\CyberDesk\` —
-  settings, local history and favorites (D-0014), and the slot session (D-0019),
-  all local, no sync.
+  settings, local history and favorites (D-0014); open websites are **not** saved
+  (CD-14, D-0025). All local, no sync.
 
 The accelerated (zero-copy GPU) OSR path was researched; CyberDesk stays on the
 CPU path for now — see `docs/cyberdesk-decisions.md` (D-0009).
@@ -252,7 +261,7 @@ its own floating command set (CD-12).
 
 | Input | Action |
 | --- | --- |
-| `Ctrl+T` | Add a column to the right (up to what fits the width); it becomes active and its command set opens, empty — type an address to load it |
+| `Ctrl+T` | Add a column to the right (up to what fits the width); it becomes active and opens to the start page — search or type an address there |
 | `Ctrl+W` | Close the active column (the last one can't be closed); the rest recenter and a neighbor becomes active |
 | Click a column's **close orb** (hover its top-outer corner) | Close that column (the last one can't be closed) |
 | `Ctrl+1` … `Ctrl+3` | Focus the 1st … 3rd column |
@@ -300,15 +309,15 @@ cyberdesk/
 │  ├─ slots.rs       # slot layout engine (frame_layout/frame_capacity, asymmetric zones) + order mgmt, pure + unit-tested
 │  ├─ theme.rs       # theme tokens -> shader uniforms + settings/command CSS vars
 │  ├─ theme.toml     # the embedded "cyber" token set (single style source; [slots] section)
-│  ├─ store.rs       # schema-versioned SQLite store (settings, history, favorites, session)
+│  ├─ store.rs       # schema-versioned SQLite store (settings, history, favorites)
 │  ├─ settings.rs    # live settings state (search engine, glow, toggles) over the shared store
 │  ├─ memory.rs      # history + favorites domain layer (frecency suggestions) over the store
-│  ├─ session.rs     # slot-workspace persistence (save/restore, plan_restore) over the store
 │  ├─ updates.rs     # update awareness (CD-13): pinned-manifest fetch/parse/compare, info items, background worker
 │  ├─ pulsegrid.rs   # Pulse Grid background: seeded generator + life simulation
 │  ├─ settings.html/.css/.js   # embedded internal settings page assets
 │  ├─ command.html/.css/.js    # embedded floating command-set page assets (CD-12)
 │  ├─ info.html/.css/.js        # embedded update-awareness info panel assets (CD-13)
+│  ├─ start.html/.css/.js       # embedded own start page: Energy Core + search + favorites (CD-14)
 │  ├─ ring.wgsl      # CARVILON ring — dormant since CD-06 (Season-2 motif)
 │  ├─ pulsegrid_*.wgsl  # Pulse Grid: lattice (3 depth weaves) · sprite (SDF prims/pulses) · composite
 │  ├─ deepfield.wgsl # Deep Field ("Calm" variant) background  ·  blit.wgsl (upscale)

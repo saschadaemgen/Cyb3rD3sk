@@ -2,6 +2,65 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0025 - 2026-07-09 - CD-14: own start page (Google banished), no saved websites, big-monitor focus
+
+Three Sascha rulings.
+
+**1 — Google is banished; slots open to an OWN start page.** The hardcoded
+`https://www.google.com/` slot default is gone. Every empty/new slot now loads an
+internal page served from the binary at **`cyberdesk://start/`** — the same scheme
+and isolation as settings/command/info, **zero network** (no fonts, images, or
+remote resources; self-contained like the other internal pages). It carries the
+reserved **Energy Core** motif (CD-06) at last: a bright hollow core inside
+concentric rotating brand-cyan arcs (SVG + CSS, GPU-cheap, `prefers-reduced-motion`
+aware) on a black canvas with a faint static micro-lattice, a search/address
+capsule, and a row of round favorite tiles (the CD-12 launcher language). The
+search box and tiles reuse the existing `navigate` + `query_suggestions` IPC (same
+host-side URL-vs-search classifier + `search_engine` setting) — they act on **this**
+slot, because interacting with a slot makes it the active slot host-side.
+
+*Reasoned wiring notes:* (a) The browser-side message router now forwards
+`on_process_message_received` for **all** views, not just the internal one, so a
+slot's start page can use `cefQuery`. This is safe: `window.cefQuery` is exposed
+ONLY on `cyberdesk://` frames (the render-side `on_context_created` gate), and the
+start page is the sole `cyberdesk://` content a slot ever shows — a web page in a
+slot has no query bridge. (b) `Ctrl+T` now spawns the new slot at the start page
+(the lazy placeholder covers the brief spawn until it paints); the CD-12 Ctrl+T
+floating-capsule auto-reveal is **retired** — the start page's own search box is
+the landing surface (Ctrl+L still reveals the floating capsule). The
+`search_engine` setting keeps Google as one *search* choice (CD-07) — that is the
+user's engine, not a hardcoded start page.
+
+**2 — Websites are not saved (the privacy reversal of CD-10 / D-0018-D-0019).**
+The `session_slots` URL persistence is removed. `restore_session` is now an
+unconditional **default-workspace boot**: one slot at the start page + the internal
+view, on every launch — never restored websites. There is no save path at all
+(the debounced session-save wiring is gone), so open URLs never touch disk. Store
+**schema v5 DROPs the `session_slots` table**, which also **purges** any URLs a
+prior build had persisted (verified against a simulated v4 install carrying a URL:
+after boot the table is gone, schema is 5, no panic). This **supersedes the
+session-URL parts of D-0018/D-0019**; the slot engine, width units, rearrange, and
+open-in-new-slot (the non-persistence parts of those decisions) stand. The
+now-vestigial lazy-slot machinery retires with it (pre-armed `armed` URLs,
+spawn-on-first-touch, the restored-pending placeholder dot) — every slot spawns its
+start page immediately. **History and favorites (CD-07) are untouched** — only the
+restore-open-websites behavior goes; a future "history off" would be its own setting.
+
+**3 — Big-monitor focus for now.** The three main areas (Spine, slots, MF zone)
+target the large monitor this season; sub-1920 / small-resolution polish is
+explicitly deferred (no investment this ticket). The start page scales with
+viewport units, so it is not a regression there, but small-panel layout is not a
+goal until later.
+
+Verified: the start-page layout via a headless Edge one-shot (black backdrop,
+Energy Core, capsule, favorite tiles); zero external resource loads by
+construction; the privacy purge + fresh boot via SQLite inspection; live boots on
+the big-window path with no panic. (Note: the referenced
+`docs/cyberdesk-vision-law.md` does not yet exist in the repo; this ticket was
+self-checked against the stated principles — no bars, floating elements,
+mouse-first, honest security — which the start page and the no-restore default all
+satisfy.)
+
 ## D-0024 - 2026-07-09 - CD-13: the info area is the generic notification-rail seed; V1 informs, never installs
 
 The info area (top-right glyph + floating panel, CD-13) is built on a **generic

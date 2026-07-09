@@ -76,6 +76,18 @@ slots, a permanent right Multifunctional zone, a flexible left Spine zone, gutte
 glyphs. The CD-12 `cdFrame` push below carries the resulting slot rects verbatim,
 so the floating layer adapts with no wire change.
 
+CD-14 (own start page, no saved websites; D-0025) adds **no new commands**. The
+own start page (`cyberdesk://start/`, the default content of every empty slot) is
+served from the binary and reuses the existing `navigate` (search / address box)
+and `query_suggestions ""` (favorite tiles) commands below — both act on the
+active slot (interacting with a slot activates it). The one wiring change: the
+browser-side message router now forwards `on_process_message_received` for **every**
+view, not just the internal one, so a slot's start page can use `window.cefQuery`.
+This is safe — `cefQuery` is exposed only on `cyberdesk://` frames (the render-side
+`on_context_created` gate), and the start page is the sole `cyberdesk://` content a
+slot ever shows (a web page in a slot has no query bridge). Session-URL persistence
+is removed (store-side, no IPC).
+
 CD-12 (floating command sets; D-0021) **retires the single top bar**. The command
 view becomes N floating **ensembles** (one per column) plus a shared favorites
 launcher, so every navigation command below now accepts an **optional `slot`
