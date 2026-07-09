@@ -12,7 +12,7 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, Fullscreen, Window, WindowId, WindowLevel};
 
 use crate::browser::{self, Role};
-use crate::renderer::{self, SlotView, SurfaceRenderer};
+use crate::renderer::{self, InfoGlyph, SlotView, SurfaceRenderer};
 use crate::session;
 use crate::settings;
 use crate::slots::{self, MAX_SLOTS};
@@ -65,14 +65,15 @@ fn gear_geom(width: u32, scale: f32) -> (f32, f32, f32) {
     (w - margin - r, margin + r, r)
 }
 
-/// Which internal overlay (if any) is currently shown. `Bar` is the CD-08
-/// hover-reveal top bar (the former centered command palette); `Settings` is the
-/// gear card. The two are mutually exclusive — one shared internal OSR view.
+/// Which internal overlay (if any) is currently shown. `Command` is the CD-12
+/// floating command band; `Settings` is the gear card; `Info` is the CD-13
+/// update-awareness panel. All mutually exclusive — one shared internal OSR view.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Overlay {
     Closed,
     Settings,
     Command,
+    Info,
 }
 
 pub fn run(windowed: bool) {
@@ -100,6 +101,9 @@ pub fn run(windowed: bool) {
         overlay: Overlay::Closed,
         gear_hover: 0.0,
         gear_hover_target: 0.0,
+        info_hover: 0.0,
+        info_hover_target: 0.0,
+        info_active: 0.0,
         order: vec![0],
         active_slot: 0,
         mouse_role: None,
@@ -147,6 +151,11 @@ struct Shell {
     overlay: Overlay,
     gear_hover: f32,
     gear_hover_target: f32,
+    /// Info glyph hover glow (eased) + its target, and the eased "updates
+    /// available" fraction (0 idle → 1 active) so the glyph fills in smoothly (CD-13).
+    info_hover: f32,
+    info_hover_target: f32,
+    info_active: f32,
     /// Live slots in left-to-right display order, by stable id (an index into the
     /// fixed per-slot browser/texture arrays). Length 1..=MAX_SLOTS. A slot keeps
     /// its id for life, so its CEF handlers (which bake in `Role::Slot(id)`) and
@@ -403,7 +412,7 @@ impl Shell {
         let (w, h) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
         let (cx, cy) = (self.cursor_phys.x as f32, self.cursor_phys.y as f32);
         match self.overlay {
-            Overlay::Settings => {
+            Overlay::Settings | Overlay::Info => {
                 let (x, y, pw, ph) = self.internal_rect(w, h);
                 if cx >= x && cx <= x + pw && cy >= y && cy <= y + ph {
                     Some((Role::Internal, (x, y)))
@@ -846,11 +855,12 @@ impl Shell {
     }
 
     /// The internal view's rectangle (device px) for the current overlay: the
-    /// full-width transparent command band for `Command` (CD-12), the centered
-    /// card for `Settings`.
+    /// full-width transparent command band for `Command` (CD-12), the floating
+    /// top-right card for `Info` (CD-13), the centered card for `Settings`.
     fn internal_rect(&self, w: u32, h: u32) -> (f32, f32, f32, f32) {
         match self.overlay {
             Overlay::Command => (0.0, 0.0, w as f32, self.band_height()),
+            Overlay::Info => self.info_rect(w, h),
             _ => panel_rect(w, h),
         }
     }
@@ -1033,7 +1043,7 @@ impl Shell {
                 // Re-push if the target layout shifted (reflow) while engaged.
                 self.push_frame(false);
             }
-            Overlay::Settings => {}
+            Overlay::Settings | Overlay::Info => {}
         }
 
         // Compositing linger: after disengaging, keep the band composited until
@@ -1095,6 +1105,75 @@ impl Shell {
     /// Close the settings card back to `Closed` (ESC).
     fn close_settings(&mut self) {
         if self.overlay == Overlay::Settings {
+            self.overlay = Overlay::Closed;
+            browser::set_focus(Role::Internal, false);
+            browser::set_focus(Role::Slot(self.active_slot), true);
+        }
+    }
+
+    // --- Update-awareness info glyph + panel (CD-13) ------------------------
+
+    /// Info glyph geometry (device px): (center_x, center_y, radius), just left of
+    /// the gear on the top-right row.
+    fn info_geom(&self) -> (f32, f32, f32) {
+        let (w, _) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
+        let (gcx, gcy, gr) = gear_geom(w, self.scale);
+        let ir = self.theme.updates.glyph_radius * self.scale;
+        let gap = 18.0 * self.scale;
+        (gcx - gr - gap - ir, gcy, ir)
+    }
+
+    /// Is the cursor over the info glyph (generous hit radius)?
+    fn info_hit(&self) -> bool {
+        let (cx, cy, r) = self.info_geom();
+        let dx = self.cursor_phys.x as f32 - cx;
+        let dy = self.cursor_phys.y as f32 - cy;
+        (dx * dx + dy * dy).sqrt() <= r * 1.7
+    }
+
+    /// The info panel card rectangle (device px): a floating top-right card just
+    /// below the glyph row (the floating law — a discrete panel, not a strip).
+    fn info_rect(&self, w: u32, h: u32) -> (f32, f32, f32, f32) {
+        let (wf, hf) = (w as f32, h as f32);
+        let m = 24.0 * self.scale;
+        let pw = (wf * 0.30).clamp(360.0, 480.0).min(wf);
+        let ph = (hf * 0.58).clamp(360.0, 600.0).min(hf);
+        let (_, gcy, gr) = self.info_geom();
+        let top = gcy + gr + 18.0 * self.scale;
+        let x = (wf - pw - m).max(0.0);
+        let y = top.min((hf - ph - m).max(0.0));
+        (x.round(), y.round(), pw.round(), ph.round())
+    }
+
+    /// Toggle the update-awareness info panel (from the info glyph). Mutually
+    /// exclusive with settings / the command band.
+    fn toggle_info(&mut self) {
+        if self.overlay == Overlay::Info {
+            self.overlay = Overlay::Closed;
+            browser::set_focus(Role::Internal, false);
+            browser::set_focus(Role::Slot(self.active_slot), true);
+            return;
+        }
+        // From any state → the info panel. Drop any band state.
+        self.engaged_slot = None;
+        self.bar_hide_at = None;
+        self.band_off_at = None;
+        self.overlay = Overlay::Info;
+        if let Some(r) = self.renderer.as_ref() {
+            let (w, h) = r.size();
+            let (_, _, iw, ih) = self.internal_rect(w, h);
+            browser::set_view_geometry(Role::Internal, iw as u32, ih as u32, self.scale);
+            browser::notify_resized(Role::Internal);
+            self.applied_internal = (iw as u32, ih as u32);
+        }
+        browser::show_internal_info();
+        browser::set_focus(Role::Slot(self.active_slot), false);
+        browser::set_focus(Role::Internal, true);
+    }
+
+    /// Close the info panel back to `Closed` (ESC).
+    fn close_info(&mut self) {
+        if self.overlay == Overlay::Info {
             self.overlay = Overlay::Closed;
             browser::set_focus(Role::Internal, false);
             browser::set_focus(Role::Slot(self.active_slot), true);
@@ -1433,11 +1512,14 @@ impl ApplicationHandler for Shell {
                     return;
                 }
                 let over_gear = self.gear_hit();
+                let over_info = self.info_hit();
                 self.gear_hover_target = if over_gear { 1.0 } else { 0.0 };
+                self.info_hover_target = if over_info { 1.0 } else { 0.0 };
                 // Route the move to the view under the cursor (a slot, or the
                 // overlay). When the cursor crosses from one view to another, send
-                // a mouse-leave to the one it left so its hover states clear.
-                let target = if over_gear { None } else { self.mouse_target() };
+                // a mouse-leave to the one it left so its hover states clear. The
+                // gear and info glyph are shell chrome — no page gets the move.
+                let target = if over_gear || over_info { None } else { self.mouse_target() };
                 let next_role = target.map(|(r, _)| r);
                 if self.mouse_role != next_role
                     && let Some(prev) = self.mouse_role
@@ -1468,6 +1550,11 @@ impl ApplicationHandler for Shell {
                 // forwarded to any page.
                 if button == MouseButton::Left && down && self.gear_hit() {
                     self.toggle_settings();
+                    return;
+                }
+                // The info glyph toggles the update-awareness panel (CD-13).
+                if button == MouseButton::Left && down && self.info_hit() {
+                    self.toggle_info();
                     return;
                 }
                 // A click on a revealed per-slot close orb closes that slot (CD-12);
@@ -1625,12 +1712,13 @@ impl ApplicationHandler for Shell {
                         _ => {}
                     }
                 }
-                // ESC chain (CD-08): bar visible -> hide the bar; else settings
-                // open -> close settings; else quit the shell.
+                // ESC chain: a drag is cancelled first (handled above); else the
+                // open overlay closes (band / settings / info); else quit the shell.
                 if vk == 0x1B && event.state == ElementState::Pressed {
                     match self.overlay {
                         Overlay::Command => self.disengage(),
                         Overlay::Settings => self.close_settings(),
+                        Overlay::Info => self.close_info(),
                         Overlay::Closed => event_loop.exit(),
                     }
                     return;
@@ -1719,6 +1807,19 @@ impl ApplicationHandler for Shell {
                     } else {
                         self.close_orb_quads()
                     };
+                    // The update-awareness info glyph (CD-13): a status light beside
+                    // the gear, filled + pulsing + counted when updates are available.
+                    let (icx, icy, ir) = self.info_geom();
+                    let pulse =
+                        0.5 + 0.5 * (time * std::f32::consts::TAU / self.theme.updates.pulse_period).sin();
+                    let info = InfoGlyph {
+                        center: (icx, icy),
+                        radius: ir,
+                        hover: self.info_hover,
+                        active: self.info_active,
+                        pulse,
+                        count: crate::updates::update_count() as f32,
+                    };
                     if let Some(r) = self.renderer.as_mut() {
                         r.render(
                             time,
@@ -1735,6 +1836,7 @@ impl ApplicationHandler for Shell {
                             is_bar,
                             bar_progress,
                             hover,
+                            &info,
                         );
                     }
                 }
@@ -1787,9 +1889,14 @@ impl ApplicationHandler for Shell {
         // Drive the top bar's reveal/hide state machine and slide easing.
         self.update_band();
 
-        // A committed navigation from the bar slides it away.
+        // A committed navigation closes whatever internal overlay is open: the
+        // command band slides away (CD-12), or the info panel closes as its notes
+        // link loads in the active slot (CD-13).
         if browser::take_overlay_close() {
-            self.disengage();
+            match self.overlay {
+                Overlay::Info => self.close_info(),
+                _ => self.disengage(),
+            }
         }
 
         // Keep the command band's internal view sized to the full-width band as
@@ -1812,6 +1919,10 @@ impl ApplicationHandler for Shell {
 
         // Ease the gear hover glow toward its target.
         self.gear_hover += (self.gear_hover_target - self.gear_hover) * 0.25;
+        // Ease the info glyph hover + its "updates available" fill (CD-13).
+        self.info_hover += (self.info_hover_target - self.info_hover) * 0.25;
+        let info_target = if crate::updates::update_count() > 0 { 1.0 } else { 0.0 };
+        self.info_active += (info_target - self.info_active) * 0.15;
         // Ease the per-slot close-orb reveal toward the hot corner (CD-12).
         self.update_close_orbs();
 

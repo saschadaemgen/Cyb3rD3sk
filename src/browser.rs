@@ -46,6 +46,7 @@ const HOME_URL: &str = "https://www.google.com/";
 const SCHEME: &str = "cyberdesk";
 const SETTINGS_URL: &str = "cyberdesk://settings/";
 const COMMAND_URL: &str = "cyberdesk://command/";
+const INFO_URL: &str = "cyberdesk://info/";
 
 // cef_event_flags_t bits (modifiers for mouse/key events).
 const EVENTFLAG_SHIFT_DOWN: u32 = 1 << 1;
@@ -259,6 +260,10 @@ pub fn show_internal_settings() {
 /// Point the internal view at the command bar page.
 pub fn show_internal_command() {
     load_url(Role::Internal, COMMAND_URL);
+}
+/// Point the internal view at the update-awareness info panel (CD-13).
+pub fn show_internal_info() {
+    load_url(Role::Internal, INFO_URL);
 }
 
 /// Toggle the favorite state of the *active* slot's current page (Ctrl+D from a
@@ -642,6 +647,20 @@ fn command_document() -> String {
     .clone()
 }
 
+/// The update-awareness info panel HTML, built once (same self-contained
+/// inlining discipline as the settings / command pages).
+fn info_document() -> String {
+    static DOC: OnceLock<String> = OnceLock::new();
+    DOC.get_or_init(|| {
+        let theme = crate::theme::Theme::load();
+        include_str!("info.html")
+            .replace("/*__TOKENS__*/", &theme.to_css_vars())
+            .replace("/*__CSS__*/", include_str!("info.css"))
+            .replace("/*__JS__*/", include_str!("info.js"))
+    })
+    .clone()
+}
+
 /// Scheme of a URL, for the command bar's lock/warn hint.
 fn scheme_of(url: &str) -> &'static str {
     if url.starts_with("https://") {
@@ -832,6 +851,20 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
         "bar_typing" => {
             let active = v.get("active").and_then(|x| x.as_bool()).unwrap_or(false);
             BAR_TYPING.store(active, Ordering::Relaxed);
+            Ok(serde_json::json!({ "ok": true }).to_string())
+        }
+        // Update-awareness info panel (CD-13). Internal view only, allowlisted.
+        "get_info_items" => Ok(crate::updates::info_snapshot_json()),
+        "dismiss_item" => {
+            let id = v
+                .get("id")
+                .and_then(|x| x.as_str())
+                .ok_or((2, "missing 'id'".to_string()))?;
+            crate::updates::dismiss(id);
+            Ok(serde_json::json!({ "ok": true }).to_string())
+        }
+        "check_updates" => {
+            crate::updates::request_check();
             Ok(serde_json::json!({ "ok": true }).to_string())
         }
         other => Err((4, format!("unknown cmd: {other}"))),
@@ -1217,14 +1250,16 @@ wrap_scheme_handler_factory! {
             _scheme_name: Option<&CefString>,
             request: Option<&mut Request>,
         ) -> Option<ResourceHandler> {
-            // Route by host/path: cyberdesk://command/ -> command bar, everything
-            // else under the scheme -> settings.
+            // Route by host/path: cyberdesk://command/ -> command bar,
+            // cyberdesk://info/ -> the info panel, everything else -> settings.
             let url = request
                 .as_ref()
                 .map(|r| CefString::from(&r.url()).to_string())
                 .unwrap_or_default();
             let doc = if url.contains("//command") {
                 command_document()
+            } else if url.contains("//info") {
+                info_document()
             } else {
                 settings_document()
             };

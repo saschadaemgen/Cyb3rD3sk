@@ -1,0 +1,119 @@
+/* Info panel styling (CD-13). Colors come entirely from the injected token
+   custom properties (theme.toml / Theme::to_css_vars) — nothing hardcoded. The
+   panel is opaque; the wgpu compositor paints the Pulse Grid behind it. */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: transparent;
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.panel {
+  width: 100%;
+  min-height: 100%;
+  padding: 26px 28px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--corner-radius);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 2px solid var(--brand);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--brand) 55%, transparent);
+  flex: none;
+}
+
+h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.3px; }
+.sub { font-size: 11px; color: var(--text-dim); letter-spacing: 2px; text-transform: uppercase; }
+
+/* --- Update item cards ---------------------------------------------------- */
+.items { display: flex; flex-direction: column; gap: 12px; }
+
+.item {
+  border: 1px solid var(--panel-border);
+  border-left: 3px solid var(--brand);
+  border-radius: calc(var(--corner-radius) * 0.6);
+  padding: 14px 16px;
+  background: color-mix(in srgb, var(--brand) 6%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.item.security { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 7%, transparent); }
+.item.info { border-left-color: var(--accent); }
+
+.item-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.item-title { font-size: 15px; font-weight: 600; }
+.item-sev {
+  font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase;
+  color: var(--text-dim); flex: none;
+}
+.item.security .item-sev { color: var(--warn); }
+.item-body { font-size: 13px; color: var(--text-dim); line-height: 1.45; }
+
+.item-actions { display: flex; gap: 10px; margin-top: 2px; }
+
+.btn {
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--brand);
+  background: transparent;
+  color: var(--brand);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.btn:hover { background: var(--brand); color: var(--bg); }
+.btn.ghost { border-color: var(--panel-border); color: var(--text-dim); }
+.btn.ghost:hover { background: color-mix(in srgb, var(--panel-border) 40%, transparent); color: var(--text); }
+
+/* --- Calm component status ------------------------------------------------ */
+.status-list { display: flex; flex-direction: column; gap: 2px; }
+
+.status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 2px;
+  border-bottom: 1px solid color-mix(in srgb, var(--panel-border) 55%, transparent);
+}
+.status-row:last-child { border-bottom: none; }
+.status-name { font-size: 14px; font-weight: 500; }
+.status-ver { font-size: 12px; color: var(--text-dim); }
+.status-state { font-size: 12px; font-weight: 600; flex: none; }
+.status-state.ok { color: color-mix(in srgb, var(--accent) 85%, var(--text)); }
+.status-state.update { color: var(--brand); }
+
+.empty { font-size: 12.5px; color: var(--text-dim); padding: 4px 2px; }
+
+/* --- Footer --------------------------------------------------------------- */
+.foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--panel-border);
+  margin-top: auto;
+}
+.checked { font-size: 12px; color: var(--text-dim); }

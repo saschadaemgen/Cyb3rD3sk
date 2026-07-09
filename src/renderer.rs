@@ -89,6 +89,33 @@ struct GearUniforms {
     brand: [f32; 4],
 }
 
+/// Info glyph uniforms (`info_glyph.wgsl`, CD-13). std140-aligned.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct InfoUniforms {
+    resolution: [f32; 2],
+    center: [f32; 2],
+    radius: f32,
+    hover: f32,
+    active: f32,
+    pulse: f32,
+    count: f32,
+    _pad: [f32; 3],
+    brand: [f32; 4],
+    base: [f32; 4],
+}
+
+/// The info glyph's per-frame state (CD-13): where it sits, its hover/active ease,
+/// the pulse phase, and the pending-update count for the badge digit.
+pub struct InfoGlyph {
+    pub center: (f32, f32),
+    pub radius: f32,
+    pub hover: f32,
+    pub active: f32,
+    pub pulse: f32,
+    pub count: f32,
+}
+
 #[allow(dead_code)] // Dormant since CD-06 (D-0013); kept for the Season-2 motif.
 fn ring_pipeline(
     device: &wgpu::Device,
@@ -1249,6 +1276,57 @@ impl Gear {
     }
 }
 
+/// The update-awareness info glyph: a small status light over everything
+/// (`info_glyph.wgsl`, CD-13), the same fullscreen-pass shape as the gear.
+struct InfoGlyphPass {
+    pipeline: wgpu::RenderPipeline,
+    uniform_buf: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
+impl InfoGlyphPass {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("info-glyph-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("info_glyph.wgsl").into()),
+        });
+        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("info-glyph-uniforms"),
+            size: std::mem::size_of::<InfoUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("info-glyph-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("info-glyph-bg"),
+            layout: &bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buf.as_entire_binding(),
+            }],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("info-glyph-pl"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+        let pipeline = fullscreen_pipeline(device, &shader, &layout, format, true);
+        Self { pipeline, uniform_buf, bind_group }
+    }
+}
+
 // --- Per-slot decorations (CD-09): placeholders + slot lines ----------------
 
 /// One empty-slot placeholder instance (`slot_placeholder.wgsl`).
@@ -1553,6 +1631,7 @@ pub struct SurfaceRenderer {
     slotlines: SlotLines,
     drag: DragOverlay,
     gear: Gear,
+    info_glyph: InfoGlyphPass,
     field: DeepField,
     pulse: PulseGrid,
     theme: crate::theme::Theme,
@@ -1608,6 +1687,7 @@ impl SurfaceRenderer {
         // each: backing disc + ring/cross). Sized for the larger, close orbs.
         let drag = DragOverlay::new(&device, SURFACE_FORMAT, MAX_SLOTS as u32 * 2 + 4);
         let gear = Gear::new(&device, SURFACE_FORMAT);
+        let info_glyph = InfoGlyphPass::new(&device, SURFACE_FORMAT);
         let field = DeepField::new(&device, SURFACE_FORMAT);
         let pulse = PulseGrid::new(&device, SURFACE_FORMAT);
 
@@ -1623,6 +1703,7 @@ impl SurfaceRenderer {
             slotlines,
             drag,
             gear,
+            info_glyph,
             field,
             pulse,
             theme,
@@ -1689,6 +1770,7 @@ impl SurfaceRenderer {
         is_bar: bool,
         bar_progress: f32,
         gear_hover: f32,
+        info: &InfoGlyph,
     ) {
         let (cfg_w, cfg_h) = (self.config.width, self.config.height);
         let (win_w, win_h) = (cfg_w as f32, cfg_h as f32);
@@ -1908,6 +1990,22 @@ impl SurfaceRenderer {
         self.queue
             .write_buffer(&self.gear.uniform_buf, 0, bytemuck::bytes_of(&gear_u));
 
+        // Info glyph uniforms (CD-13): idle ring / active filled disc + pulse + count.
+        let info_u = InfoUniforms {
+            resolution: [win_w, win_h],
+            center: [info.center.0, info.center.1],
+            radius: info.radius,
+            hover: info.hover.clamp(0.0, 1.0),
+            active: info.active.clamp(0.0, 1.0),
+            pulse: info.pulse.clamp(0.0, 1.0),
+            count: info.count,
+            _pad: [0.0, 0.0, 0.0],
+            brand: [brand[0], brand[1], brand[2], 1.0],
+            base: [base[0], base[1], base[2], 1.0],
+        };
+        self.queue
+            .write_buffer(&self.info_glyph.uniform_buf, 0, bytemuck::bytes_of(&info_u));
+
         // Deep Field: repaint the half-res target at ~30 fps (every other frame,
         // or right after a resize).
         self.field.frame = self.field.frame.wrapping_add(1);
@@ -2063,6 +2161,11 @@ impl SurfaceRenderer {
             // Gear button, over the pages / overlay.
             pass.set_pipeline(&self.gear.pipeline);
             pass.set_bind_group(0, &self.gear.bind_group, &[]);
+            pass.draw(0..3, 0..1);
+
+            // Info glyph (CD-13), beside the gear.
+            pass.set_pipeline(&self.info_glyph.pipeline);
+            pass.set_bind_group(0, &self.info_glyph.bind_group, &[]);
             pass.draw(0..3, 0..1);
 
             // Drag overlay (CD-12): ghost + drop zones, topmost of all.
@@ -2293,6 +2396,31 @@ pub fn capture(path: &str, width: u32, height: u32, theme: &crate::theme::Theme)
         queue.write_buffer(&drag.instance_buf, 0, bytemuck::cast_slice(&drag_insts));
     }
 
+    // CYBERDESK_CAPTURE_INFO=idle|active renders the CD-13 info glyph top-right so
+    // the status light (idle ring / active filled disc + pulse + count badge) reads
+    // headless. `active` shows a 2-item badge; anything else shows the idle ring.
+    let info_glyph = InfoGlyphPass::new(&device, format);
+    let info_mode = std::env::var("CYBERDESK_CAPTURE_INFO").ok();
+    if let Some(mode) = &info_mode {
+        let ir = theme.updates.glyph_radius;
+        let cx = width as f32 - 30.0 - 22.0 - 18.0 - ir; // left of where the gear sits
+        let cy = 30.0 + 22.0;
+        let active = if mode == "active" { 1.0 } else { 0.0 };
+        let info_u = InfoUniforms {
+            resolution: [width as f32, height as f32],
+            center: [cx, cy],
+            radius: ir,
+            hover: 0.0,
+            active,
+            pulse: 0.6,
+            count: if active > 0.5 { 2.0 } else { 0.0 },
+            _pad: [0.0, 0.0, 0.0],
+            brand: [brand[0], brand[1], brand[2], 1.0],
+            base: [base[0], base[1], base[2], 1.0],
+        };
+        queue.write_buffer(&info_glyph.uniform_buf, 0, bytemuck::bytes_of(&info_u));
+    }
+
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("capture-target"),
         size: wgpu::Extent3d {
@@ -2371,6 +2499,11 @@ pub fn capture(path: &str, width: u32, height: u32, theme: &crate::theme::Theme)
             pass.set_bind_group(0, &drag.globals_bg, &[]);
             pass.set_vertex_buffer(0, drag.instance_buf.slice(..));
             pass.draw(0..6, 0..drag_insts.len() as u32);
+        }
+        if info_mode.is_some() {
+            pass.set_pipeline(&info_glyph.pipeline);
+            pass.set_bind_group(0, &info_glyph.bind_group, &[]);
+            pass.draw(0..3, 0..1);
         }
     }
     encoder.copy_texture_to_buffer(
