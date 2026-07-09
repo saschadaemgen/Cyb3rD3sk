@@ -13,7 +13,7 @@ feathered compositing, and an isolated in-shell settings surface.
 
 ---
 
-## State after CD-09 (Season 1 extended)
+## State after CD-10 (Season 1 extended)
 
 * **Shell:** Borderless fullscreen on the primary monitor, dark background
   (`#04070A`), vsync. The shell background is the Pulse Grid alone — the CARVILON
@@ -49,6 +49,17 @@ feathered compositing, and an isolated in-shell settings surface.
   drives whichever column it is over (a click makes that column active). The Pulse
   Grid glows in the gutters and margins, dimmed under each column by the zone
   shadow. On the ultrawide, four different sites sit pixel-aligned side by side.
+* **A permanent, fluid workspace (CD-10, D-0018/D-0019):** the slot workspace
+  **survives restarts** — the columns (order, widths, which was active) are saved
+  to SQLite on every change (debounced) and restored on launch; the active column
+  reloads immediately, the rest stay lazy with their URL pre-armed (a small
+  scheme-colored dot on the placeholder marks a page waiting) and load on first
+  touch. Columns can be **reordered** (`Ctrl+Shift+←/→` swap with a neighbor) and
+  **widened** to double width (`Ctrl+Shift+D` — a two-column-wide slot for a
+  web-app, the group staying centered and pixel-aligned; no-op if it won't fit).
+  A **real click on a `target=_blank` link, or a `Ctrl`/middle-click on any link,
+  opens the target in a new column beside the source** (which becomes active), or
+  in place when the grid is already full; ad/script popups stay suppressed.
 * **Surf columns (CEF, off-screen rendering):** each column's CEF browser renders
   off-screen (`on_paint`); CyberDesk uploads each frame into that slot's wgpu
   texture and composites it at the slot's rectangle (70 % tall, centered). Column
@@ -89,7 +100,8 @@ feathered compositing, and an isolated in-shell settings surface.
   comes from an embedded theme (`src/theme.toml`), resolved both into wgpu shader
   uniforms and into the settings/command pages' CSS custom properties. App state
   lives in a schema-versioned SQLite store under `%LOCALAPPDATA%\CyberDesk\` —
-  settings plus local history and favorites (D-0014), all local, no sync.
+  settings, local history and favorites (D-0014), and the slot session (D-0019),
+  all local, no sync.
 
 The accelerated (zero-copy GPU) OSR path was researched; CyberDesk stays on the
 CPU path for now — see `docs/cyberdesk-decisions.md` (D-0009).
@@ -150,6 +162,9 @@ cargo run --release
 cargo run --release -- --windowed
 ```
 
+`CYBERDESK_WINDOW_SIZE=WxH` overrides the dev-window size (e.g. `2560x900` to
+exercise multi-column layouts on a non-ultrawide).
+
 * Move the mouse to the **top edge** (or press **`Ctrl+L`**) to reveal the command
   top bar; **`ESC`** walks the chain — hide the bar, else close settings, else
   quit. See **Controls** below for the full map.
@@ -173,6 +188,9 @@ judgment), `CYBERDESK_CAPTURE_GLOW=<mult>` brightens it (e.g. to inspect the fai
 far layer), and `CYBERDESK_CAPTURE_SLOTS=N` renders N placeholder slot columns
 (CD-09) so the multi-column layout — columns, gutters, glowing margins, zone
 shadow, index glyphs — can be eyeballed headlessly (e.g. `=4` on the ultrawide).
+`CYBERDESK_CAPTURE_UNITS=2,1,…` overrides it with an explicit per-column
+width-unit sequence (CD-10 double slots), and `CYBERDESK_CAPTURE_PENDING=N` marks
+the first N columns as restored-pending (the scheme-colored placeholder dot).
 
 ---
 
@@ -190,7 +208,10 @@ the cursor.
 | `Ctrl+W` | Close the active column (the last one can't be closed); the rest recenter and a neighbor becomes active |
 | `Ctrl+1` … `Ctrl+4` | Focus the 1st … 4th column |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Cycle the active column forward / backward |
+| `Ctrl+Shift+←` / `Ctrl+Shift+→` | Swap the active column with its left / right neighbor |
+| `Ctrl+Shift+D` | Toggle the active column between single and double width (no-op if a double won't fit) |
 | Click a column | Make it the active column |
+| Click a `target=_blank` link, or `Ctrl+click` / middle-click a link | Open it in a new column beside the source (or in place if the grid is full) |
 | Mouse to a column's top edge | Reveal the top bar above it (slides down); it retreats when the mouse leaves it, after a short grace period |
 | `Ctrl+L` | Reveal the top bar (active column) with the input focused + selected |
 | type (in the bar) | Chips give way to live suggestions from favorites + history; moving the mouse away no longer hides the bar while you type |
@@ -228,9 +249,10 @@ cyberdesk/
 │  ├─ slots.rs       # slot layout engine (max_slots, slot_rects) + order management, pure + unit-tested
 │  ├─ theme.rs       # theme tokens -> shader uniforms + settings/command CSS vars
 │  ├─ theme.toml     # the embedded "cyber" token set (single style source; [slots] section)
-│  ├─ store.rs       # schema-versioned SQLite store (settings, history, favorites)
+│  ├─ store.rs       # schema-versioned SQLite store (settings, history, favorites, session)
 │  ├─ settings.rs    # live settings state (search engine, glow, toggles) over the shared store
 │  ├─ memory.rs      # history + favorites domain layer (frecency suggestions) over the store
+│  ├─ session.rs     # slot-workspace persistence (save/restore, plan_restore) over the store
 │  ├─ pulsegrid.rs   # Pulse Grid background: seeded generator + life simulation
 │  ├─ settings.html/.css/.js   # embedded internal settings page assets
 │  ├─ command.html/.css/.js    # embedded command-bar page assets

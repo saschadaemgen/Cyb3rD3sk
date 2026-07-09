@@ -63,6 +63,11 @@ are never navigated through this channel. Error codes share the single space
 defined above (1 = malformed request JSON, 2 = missing/wrong-typed field, 4 =
 unknown `cmd`).
 
+CD-10 (sessions, width units, rearrange, open-in-new-slot; D-0018/D-0019) added
+**no IPC** either: session persistence is store-side, the width/rearrange
+shortcuts are host-side key handling, and open-in-new-slot is a CEF
+`on_before_popup` decision (not a page command). The wire format is unchanged.
+
 ### `get_nav_state` (view -> host)
 
 - Request: `{"cmd":"get_nav_state"}`

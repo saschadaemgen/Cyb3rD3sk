@@ -2,6 +2,102 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0019 - 2026-07-09 - CD-10: session restore, width units, and slot rearrange
+
+CD-10 makes the CD-09 slot system feel permanent and fluid: the workspace
+survives restarts, columns can be reordered and widened.
+
+**Session workspace (persisted).** A new schema-v3 `session_slots(position, url,
+width_units, active)` table (store.rs) holds one implicit session — the full
+ordered slot list. It is written **wholesale** (delete + insert in a transaction)
+on every meaningful change (open / close / navigate-commit / rearrange / width
+toggle / active change), **debounced ~500 ms** off the render hot path: the shell
+computes a compact session signature each frame and arms a save only when it
+differs from the last-saved one (so link-driven navigations are captured too,
+not just host-side actions). `session.rs` is the domain layer over the shared
+store (mirroring memory.rs), including the pure, unit-tested `plan_restore` (fit
+saved slots from the left by width units, the rest to overflow, active fallback)
+and the `persist_url` filter (internal `cyberdesk://` / blank / empty slots
+persist as an empty URL — same rule as history/favorites, D-0014).
+
+- **Restore on startup:** the saved order / widths / active are rebuilt with fresh
+  contiguous slot ids. The **active slot spawns immediately** with its URL; the
+  rest stay **lazy with the URL pre-armed** and spawn on their first interaction
+  (activation via click / Ctrl+1..4 / Ctrl+Tab — routed through `set_active`,
+  which spawns an armed slot). This keeps startup light while the workspace
+  reappears. A fresh install / no session falls back to the CD-09 default: one
+  slot on the home page.
+- **Placeholder for a pending slot:** the shell has no text rendering (the index
+  glyphs are hand-drawn 7-segment SDF, not a font), so a restored-but-unspawned
+  column keeps its index glyph and adds a small **scheme-colored pending dot**
+  (https → accent, http → warn, else → text-dim) — the briefing's honest middle
+  ground, distinguishing "a page is waiting here" from a genuinely empty column.
+  The pending URL is also visible via the top-bar prefill when that slot is active.
+- **Windowed shrink:** restoring more slots than the current width allows keeps
+  what fits from the left; the rest are held in an in-memory overflow that is
+  re-saved (so a wider **restart** brings them back). A live window shrink closes
+  columns from the right into the same overflow.
+
+**Width units (double slots).** Each slot carries `width_units` (1 or 2). The
+layout math extends to `slots::slot_rects_units`: a `u`-unit slot spans
+`u·slot_width + (u-1)·gutter` (it absorbs its internal gutter), and — the tidy
+invariant — a group of total units `U` occupies **exactly the same centered
+extent as `U` single columns**, so `max_slots(width)` (the column-fit) is also the
+unit budget. `slot_rects` becomes a single-unit convenience over it. **Ctrl+Shift+D**
+toggles the active slot 1↔2 units; doubling is a **no-op if it would overflow** the
+unit budget, halving always works. Only the toggled slot's OSR view resizes (its
+page reflows); the others merely recenter. Active indication, mouse hit-testing,
+the top bar, zone shadows and loading lines are all **unit-agnostic** — they read
+each slot's actual rect from `slot_rects_units`, no duplicated logic. Unit-tested:
+mixed 1/2-unit sequences, double span, same-extent-as-columns, centering.
+
+**Rearrange (hard swap).** **Ctrl+Shift+Left/Right** swaps the active slot with its
+neighbor. Per the stable-id order model (D-0017), this is a **pure order operation**
+— the slot keeps its id (and its CEF handlers / texture), only its display position
+changes; nothing resizes (widths unchanged), so the compositor picks up the new
+positions on the next frame with no browser move and no CEF call. **Decision: a
+hard swap, no slide animation.** The briefing invited an optional eased slide
+(reusing the CD-08 bar-slide interpolation), but an animated position swap would
+have to interpolate each slot's rect while the mouse hit-test, the bar geometry and
+the CEF view origins all read those rects — a real desync risk during the ~180 ms
+tween, for a polish nicety that cannot be verified headlessly (no desktop scrape).
+The hard swap is instant, correct, and matches the "swap is an order operation, not
+a browser move" guidance. The animated slide is deferred to the Season-2 Edit-Mode
+drag language (which specifies the motion vocabulary first, a CD-10 non-goal).
+
+## D-0018 - 2026-07-09 - CD-10: open links in new slots (supersedes D-0011 when capacity exists)
+
+The gesture-aware popup policy (D-0011) navigated a user-gesture popup into the
+source view in place. CD-10 extends it: a **user-gesture popup opens in a NEW slot
+to the right of the source** when there is room, becoming active — the "open link
+in new column" of the zone vision. This **supersedes D-0011's navigate-in-place
+rule whenever capacity exists**; with a full grid it falls back to D-0011 (navigate
+the source slot's main frame). Non-gesture popups (ad / script `window.open`) stay
+fully suppressed. No separate OS window ever opens — `on_before_popup` always
+returns 1.
+
+- **Mechanism:** `on_before_popup` (CEF UI thread, per source slot) queues
+  `(source_slot_id, target_url)` for any `user_gesture != 0` popup and suppresses
+  the window. The shell's main thread drains the queue and opens each in a fresh
+  lazy slot inserted right of the source (reusing the tested `slots::insert_position`
+  and the `create_browser_url` lazy-spawn), which spawns immediately with the URL
+  and becomes active; if `order.len() == MAX_SLOTS` or the unit budget is full, it
+  navigates the source slot in place instead.
+- **Ctrl+click / middle-click:** these ride the **same** path. Chromium routes a
+  modified click on a link through `on_before_popup` as a tab disposition
+  (`NEW_FOREGROUND_TAB` / `NEW_BACKGROUND_TAB`, confirmed against the pinned crate's
+  `WindowOpenDisposition`) with `user_gesture = 1`, so no separate mouse handling is
+  needed — the gesture gate covers `target=_blank` clicks and modified clicks alike.
+- **Honesty note:** the `target=_blank` gesture path has driven `on_before_popup`
+  since CD-04 (D-0011), so it is proven in this app. The Ctrl-/middle-click routing
+  is standard Chromium behavior (the disposition enum is present in the crate) but
+  was **not** click-injected end-to-end here — the shell cannot synthesize a real
+  in-page click headlessly. The app-side new-slot machinery *was* verified
+  end-to-end (a temporary self-test drove `open_in_new_slot`; the session then held
+  the source plus the new active column, since removed). If a specific site's JS
+  intercepts the modified click, no popup fires and nothing opens — the standard
+  gesture-popup contract.
+
 ## D-0017 - 2026-07-09 - CD-09: the multi-slot engine (columns, lazy spawn, focus routing) and the D-0009 verdict
 
 CD-09 turns the single surf zone into the zone system the whole season was built
