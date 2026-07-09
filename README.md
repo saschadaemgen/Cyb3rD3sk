@@ -13,13 +13,14 @@ feathered compositing, and an isolated in-shell settings surface.
 
 ---
 
-## State after CD-07 (Season 1 extended)
+## State after CD-08 (Season 1 extended)
 
 * **Shell:** Borderless fullscreen on the primary monitor, dark background
   (`#04070A`), vsync. The shell background is the Pulse Grid alone — the CARVILON
   ring was removed from the shell in CD-06 (its motif migrates to the Season-2
-  start animation / Energy Core, D-0013). `ESC` quits cleanly (from anywhere,
-  even with the page focused). Dev mode via `--windowed` (1600×900).
+  start animation / Energy Core, D-0013). `ESC` walks a small chain — hide the
+  top bar, else close settings, else quit (CD-08) — and otherwise quits cleanly
+  from anywhere. Dev mode via `--windowed` (1600×900).
 * **Pulse Grid background:** a seeded circuit board that lives behind the shell,
   built as **three depth layers** (far → mid → near) baked into one
   full-resolution HDR texture — a crisp bright front, a dimmer middle, and a
@@ -46,20 +47,22 @@ feathered compositing, and an isolated in-shell settings surface.
   the wider CD-05 band that read as a vignette; toggleable back to the hard
   rounded corner). Mouse and keyboard are forwarded into the page (a Google
   search, clicking, and scrolling all work) and the cursor follows the page.
-* **Free surfing (command palette + memory):** `Ctrl+L` summons the command
-  palette over the surf zone; its text is classified host-side as a URL or a
-  search on the chosen engine. As you type it shows up to six live **suggestions**
-  drawn from your favorites and history — favorites first, then history by a
-  simple frecency (empty input lists the top favorites); `Arrow` keys move the
-  selection, `Enter` navigates the selected entry (or the raw text), a click
-  navigates. **`Ctrl+D`** favorites the current page and a star in the bar
-  reflects and toggles it live. Back / forward / reload and the mouse's
-  forward/back buttons drive the page history, an amber glyph flags a
-  plain-`http://` page, and a loading line traces the top of the zone. Popups
-  follow a gesture-aware policy (D-0011): a real click on a `target=_blank` link
-  navigates the surf view in place, script `window.open` is dropped — no second
-  window ever opens. There is **no favorites bar** by design — the palette is the
-  favorites/history surface (D-0014).
+* **Free surfing (hover-reveal top bar + memory):** the command surface is a
+  **top bar** that slides down from the top edge (CD-08, D-0016) — move the mouse
+  into the gap above the surf zone, or press `Ctrl+L` (which focuses + selects the
+  input). It holds the address input (classified host-side as a URL or a search on
+  the chosen engine) with your **favorites as clickable chips** below; start
+  typing and the chips give way to up to six live **suggestions** from favorites +
+  history — favorites first, then history by a simple frecency. `Arrow` keys move
+  the selection, `Enter` navigates the selected entry (or the raw text), a click
+  (chip or suggestion) navigates. **`Ctrl+D`** favorites the current page and the
+  star reflects and toggles it live. The bar slides away when the mouse leaves it
+  (after a short grace period, never while you are typing), when a navigation
+  commits, or on `ESC`. Back / forward / reload and the mouse's forward/back
+  buttons drive the page history, an amber glyph flags a plain-`http://` page, and
+  a loading line traces the top of the zone. Popups follow a gesture-aware policy
+  (D-0011): a real click on a `target=_blank` link navigates the surf view in
+  place, script `window.open` is dropped — no second window ever opens.
 * **Settings:** a gear button (top-right) opens an in-shell settings card — a
   **second, web-isolated OSR view** locked to an internal `cyberdesk://` custom
   scheme (D-0010), served entirely in-process from embedded assets. It can never
@@ -134,8 +137,9 @@ cargo run --release
 cargo run --release -- --windowed
 ```
 
-* **`Ctrl+L`** opens the command palette; **`ESC`** closes an open overlay
-  (palette or settings), otherwise quits. See **Controls** below for the full map.
+* Move the mouse to the **top edge** (or press **`Ctrl+L`**) to reveal the command
+  top bar; **`ESC`** walks the chain — hide the bar, else close settings, else
+  quit. See **Controls** below for the full map.
 * The **gear** button (top-right) opens the settings card; the search-engine
   select, the slider, and the toggles apply live and persist across restarts.
 * The first build is slow because CMake+Ninja compile `libcef_dll_wrapper`. The
@@ -164,22 +168,24 @@ you summon it. All navigation shortcuts act on the surf view.
 
 | Input | Action |
 | --- | --- |
-| `Ctrl+L` | Open the command palette over the surf zone (from any state) |
-| type (in the palette) | Filter live suggestions from favorites + history (empty input lists the top favorites) |
+| Mouse to the top edge | Reveal the top bar (slides down); it retreats when the mouse leaves it, after a short grace period |
+| `Ctrl+L` | Reveal the top bar with the input focused + selected (from any state) |
+| type (in the bar) | Chips give way to live suggestions from favorites + history; moving the mouse away no longer hides the bar while you type |
 | `↑` / `↓` | Move the suggestion selection |
-| `Enter` (in the palette) | Navigate the selected suggestion, or the typed text — a scheme, a dotted host, or `localhost` loads as a URL (default `https://`); anything else searches the chosen engine |
+| click a favorite chip | Navigate to that favorite (the bar retreats) |
+| `Enter` (in the bar) | Navigate the selected suggestion, or the typed text — a scheme, a dotted host, or `localhost` loads as a URL (default `https://`); anything else searches the chosen engine |
 | `Ctrl+D` | Favorite / unfavorite the current page (star reflects it live) |
 | `Alt+←` / `Alt+→` | History back / forward |
 | Mouse button 4 / 5 | History back / forward |
 | `F5` / `Ctrl+R` | Reload |
 | `Ctrl+Shift+R` | Hard reload (ignore cache) |
-| `ESC` | Close the command palette or settings card if open, otherwise quit |
+| `ESC` | Hide the top bar, else close the settings card, else quit |
 
-An amber glyph in the command palette marks a page served over plain `http://`
+An amber glyph in the top bar marks a page served over plain `http://`
 (e.g. `neverssl.com`, which stays http by design); `https` and internal pages
 show no warning. The **gear** (top-right) opens the settings card with a live,
 persisted **search-engine** select (Google / DuckDuckGo / Bing / Startpage — the
-command-palette search fallback), a **glow-intensity** slider (50–220 %,
+top-bar search fallback), a **glow-intensity** slider (50–220 %,
 brightness of the animated background), and three toggles: **animated background**
 (the Pulse Grid, or whichever background the template selects), **feathered
 edges**, and **stay in foreground** (keep the fullscreen shell above other
@@ -195,7 +201,7 @@ cyberdesk/
 │  ├─ main.rs        # entry point, CLI, process model
 │  ├─ app.rs         # winit event loop, window, input routing, nav keys, foreground guard
 │  ├─ renderer.rs    # wgpu renderer: shell + page/panel compositing, capture
-│  ├─ browser.rs     # CEF OSR (two views), custom scheme, isolation, settings/nav/palette IPC
+│  ├─ browser.rs     # CEF OSR (two views), custom scheme, isolation, settings/nav/top-bar IPC
 │  ├─ theme.rs       # theme tokens -> shader uniforms + settings/command CSS vars
 │  ├─ theme.toml     # the embedded "cyber" token set (single style source)
 │  ├─ store.rs       # schema-versioned SQLite store (settings, history, favorites)
@@ -214,9 +220,9 @@ cyberdesk/
 │  └─ fetch-cef.ps1  # downloads the pinned CEF version into vendor/cef/
 ├─ docs/                          # living project documents (English)
 │  ├─ cyberdesk-architecture.md
-│  ├─ cyberdesk-decisions.md      # D-0001 … D-0015
+│  ├─ cyberdesk-decisions.md      # D-0001 … D-0016
 │  ├─ cyberdesk-security.md
-│  ├─ cyberdesk-wire-format.md    # settings + navigation + command-palette IPC schema
+│  ├─ cyberdesk-wire-format.md    # settings + navigation + top-bar IPC schema
 │  ├─ cyberdesk-feature-backlog.md
 │  └─ cyberdesk-roadmap.txt
 ├─ .cargo/config.toml

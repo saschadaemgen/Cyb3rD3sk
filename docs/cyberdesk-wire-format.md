@@ -1,6 +1,6 @@
 # CyberDesk - Wire Format
 
-Project CARVILON CyberDesk - living document - Status: 2026-07-08
+Project CARVILON CyberDesk - living document - Status: 2026-07-09
 
 Deliberately thin for now - the formats emerge from CD-02 on. Rule: every interface change is documented here before it lands on main.
 
@@ -61,11 +61,15 @@ malformed request JSON, 2 = missing/wrong-typed field, 4 = unknown `cmd`).
 ### `get_nav_state` (view -> host)
 
 - Request: `{"cmd":"get_nav_state"}`
-- Success: `{"url":<str>,"title":<str>,"can_back":<bool>,"can_forward":<bool>,"loading":<bool>,"scheme":<str>,"favorite":<bool>}`
+- Success: `{"url":<str>,"title":<str>,"can_back":<bool>,"can_forward":<bool>,"loading":<bool>,"scheme":<str>,"favorite":<bool>,"autofocus":<bool>}`
   - `scheme` ∈ { `https`, `http`, `other` }, derived host-side from `url`. The
     command bar paints the amber "insecure" hint when `scheme == "http"`.
   - `favorite` (CD-07) is whether `url` is currently a favorite; it drives the
     star glyph in the command bar.
+  - `autofocus` (CD-08) tells the bar page whether to focus + select its input on
+    this open: `true` for a Ctrl+L reveal, `false` for a hover-to-top reveal
+    (which shows the favorites chips without stealing the caret). Set host-side
+    before each reveal.
 - Failure: code 1 (malformed request JSON).
 
 ### `navigate` (view -> host)
@@ -76,8 +80,10 @@ malformed request JSON, 2 = missing/wrong-typed field, 4 = unknown `cmd`).
   - `localhost` (optionally `:port`/`/path`), or a dot with no whitespace ->
     `https://<input>`
   - empty -> `about:blank`
-  - otherwise -> `https://www.google.com/search?q=<urlencoded>`
-- Effect: loads the resolved URL in the surf view and closes the command overlay.
+  - otherwise -> `https://www.google.com/search?q=<urlencoded>` (or the selected
+    search engine, CD-07)
+- Effect: loads the resolved URL in the surf view and slides the top bar away
+  (CD-08; a committed navigation is one of the bar's hide triggers).
 - Success: `{"ok":true,"url":"<resolved-url>"}`
 - Failure: code 1 (malformed request), 2 (missing `input`).
 
@@ -109,8 +115,11 @@ error-code space as above (internal `cyberdesk://command/` view only). All local
   - Ranking (host-side): matching favorites first (in their saved order), then
     matching history by frecency (see D-0014). Empty `input` returns the top
     favorites. Matching is a case-insensitive substring on url + title.
-  - The reply length also sets the palette's height host-side (the view is sized
-    to `input bar + N rows`).
+  - CD-08: the bar renders an empty-`input` reply as the favorites **chip** row
+    (up to `command.max_results` chips) and a non-empty reply as the suggestion
+    **list**. Host-side, the reply length plus whether `input` was empty size the
+    bar (`input row + chip row`, or `input row + N suggestion rows`). Only one of
+    the two bodies is ever populated, so the height stays exact.
 - Failure: code 1 (malformed request JSON).
 
 ### `toggle_favorite` (view -> host)
@@ -125,6 +134,29 @@ error-code space as above (internal `cyberdesk://command/` view only). All local
 The surf-view **Ctrl+D** toggles the current page's favorite host-side (from the
 shell key map) rather than over this channel; the palette's star and its Ctrl+D
 use `toggle_favorite`.
+
+## Top bar IPC (CD-08, live)
+
+The command surface is now a hover-reveal **top bar** (D-0016). Its reveal/hide
+animation is entirely host-side; the page adds one signal so a typing user is not
+interrupted by a mouse-out. Chips reuse the empty-`input` `query_suggestions`
+above — there is no separate favorites command.
+
+### `bar_typing` (view -> host)
+
+- Request: `{"cmd":"bar_typing","active":<bool>}`
+  - `active` = the bar's input is focused **and** holds text (the prefilled URL
+    counts). The page reports it on the input's focus / blur / input events, only
+    when the value changes.
+- Effect: while `active` is true the host's mouse-out hysteresis will not hide the
+  bar. It is reset to `false` host-side on every reveal (a fresh page reports its
+  own state), so a stale value cannot wedge the bar open.
+- Success: `{"ok":true}`
+- Failure: code 1 (malformed request JSON). A missing `active` defaults to false.
+
+The reveal (hover into the top gap, or Ctrl+L which sets `autofocus`) and the hide
+(mouse-out + ~250 ms hysteresis, a committed `navigate`, or ESC — with the typing
+exception above) are decided host-side; see docs/cyberdesk-decisions.md D-0016.
 
 ## NetGuard policy (sketch)
 

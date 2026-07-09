@@ -2,6 +2,63 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0016 - 2026-07-09 - CD-08: the command surface is a hover-reveal top bar
+
+Sascha's CD-07 acceptance changed the command surface: from the centered command
+palette (D-0014) to a **hover-reveal top bar** living in the free gap above the
+surf zone. This explicitly **revises D-0014's "no favorites bar"** — a favorites
+surface with its own clickable controls now exists, as Sascha's call. It is a
+functional v1 in the token world; the design-law polish stays Season 2.
+
+**Surface.** The bar spans the surf-zone width, anchored to the top edge. It
+holds the address input (scheme hint + star + back/forward/reload glyphs) and,
+below it, one of two bodies: the favorites as clickable **chips** (title + star,
+click navigates) while the input is untouched, or the CD-07 live suggestion
+**list** while typing. The palette logic is reused wholesale — only the surface
+moved. Chips reuse the empty-`input` `query_suggestions` (favorites, capped at
+`command.max_results`); there is no separate favorites command (implementer's
+call from the briefing). Favorites beyond the cap are not chipped in v1
+(management UI is a later ticket).
+
+**Reveal** (slide down, ~180 ms ease-out, host-side): the cursor enters the top
+hot zone (the gap band above the surf zone, full surf width), OR Ctrl+L (which
+also focuses + selects the input — unchanged). **Hide** (slide up, same ease):
+the cursor leaves the union of hot zone + bar rect with a **~250 ms hysteresis**
+(no flicker on grazing touches), OR a navigation commits, OR ESC. **Typing
+exception:** while the input is focused and holds text (the prefilled URL counts,
+so a keyboard user is never cut off), a mouse-out does NOT hide the bar — only
+ESC, Enter (navigate), or a chip/suggestion click end it then. A **Ctrl+L reveal**
+additionally only becomes subject to the mouse-out hysteresis once the cursor has
+*engaged* the bar (entered it at least once), so a keyboard reveal is never
+hidden before the user can type. ESC chain is now **bar -> settings -> quit**.
+
+**Mechanics.** A tiny host-side state machine (a 0..1 slide `progress`, eased,
+plus a hysteresis deadline and an "engaged" flag) drives the one shared internal
+OSR view (mutually exclusive with the settings card, as before). The page renders
+at the full bar size; the compositor reveals it from the top edge by
+**scissor-clipping** the panel draw to `progress * height` — the bar is drawn with
+square corners flush to the top, and the zone shadow dims only the visible slice.
+The bar height is computed host-side from the shared theme tokens (`input_height`
++ the new `chip_row`, or `input_height + N*row_height + 2*list_pad`), so the page
+CSS and the composite stay in lockstep as the body changes — no per-frame
+allocation, no page-reported geometry. Two IPC additions carry the little the
+host cannot derive: `autofocus` in `get_nav_state` (Ctrl+L vs hover) and a
+`bar_typing` signal for the mouse-out exception (see wire-format). The loading
+line stays at the surf zone's top edge; the bar lives above it in the gap and
+composites over it only where a tall body overlaps the surf zone's top margin.
+
+**Favorites bug (Stage A), measured first.** The CD-07 "only one favorite ever
+shows" was diagnosed on the real DB before any code change (measure-before-
+guessing): storage and the empty-input query are correct — two distinct URLs
+produce two rows and `query_suggestions("")` returns both (verified on a scratch
+DB and by a regression test). The fault was the display: the palette prefilled
+its input with the current surf URL and filtered the suggestion list by it, so
+only the favorite matching the current page ever showed; the D-0014 empty-input
+favorites surface was never reached on open. The fix (committed separately as
+`fix(command)`, not the briefing's `fix(memory)` — the memory layer was never at
+fault) shows the full favorites list while the input holds the untouched
+prefilled URL; the top bar's chips then make the favorites surface explicit.
+
 ## D-0015 - 2026-07-08 - CD-07: the settings "select" is a custom in-page dropdown
 
 The search-engine setting needs a select control, but the internal views are
