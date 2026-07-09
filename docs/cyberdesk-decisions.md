@@ -2,6 +2,64 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0020 - 2026-07-09 - CD-11: the main frame — side zones, reflow-to-rails, control gutters
+
+Sascha's ruling: this IS the main system, and it was missing. The slot group did
+not own the full width — but the width does not belong to the browsers alone.
+**Left and right of the slots live side zones, first-class citizens** (placeholders
+now; their future contents are the Spine and the status / files / music rails).
+When the browsers demand the width, the side zones **retreat, animated, into thin
+rails**, and expand back when slots close. The gutters widen into reserved control
+territory (CD-12 puts drop zones there).
+
+**The frame law (pure, deterministic math — `slots::frame_layout`).** The frame is
+`side | gutter | slots | gutter | side`, centered in the window. Because it is
+symmetric, the slot group stays centered in the window — so `slot_rects_units`
+(D-0017/D-0019) is **reused unchanged** and the side zones simply flank the group,
+one gutter away, at the slot height. One function decides everything (side state,
+side width, all rects); no incremental fudging.
+
+- **Side state.** **Full** if the slot group plus full side zones (`side_zone_width`
+  = 320) and their flanking gutters fits the window; else **Rail** (`side_rail_width`
+  = 48). One decision from the total slot units.
+- **Capacity.** The shell caps slots against `frame_capacity` — the unit budget of
+  the **rail** center budget (the roomiest side state), so slots never exceed what
+  the frame will ever hold. Side zones therefore reduce mid-size capacity vs the
+  pre-CD-11 `max_slots`: measured 1920→1, 2560→1, 3840→2 slots; the 5120 ultrawide
+  still reaches **four** (1–3 slots show full side zones, the fourth forces rails).
+  A window narrower than one slot + full sides (e.g. the 1600 dev window) shows the
+  rail state at one slot. `max_slots` stays as the tested no-side-zones building
+  block.
+- **Placeholder until content.** The side zones render in the slot-placeholder
+  family with a differing glyph — a subtle fill above base, a thin inset outline,
+  and a small centered **diamond** (rotated-square outline) core glyph. No text: the
+  shell has no font (the slot index glyphs are hand-drawn 7-segment SDF, D-0019).
+  Geometry now; content in later seasons.
+
+**Control-gutter reservation.** The `gutter` token widened **24 → 40** (both between
+slots and between the slot group and the side zones). This is deliberately generous
+control surface — CD-12 builds drop zones here, and the Pulse Grid glowing in it is
+intended. **Token calibration (reasoned):** the briefing's target was ~48, but 48
+does not fit four 1200px slots at rail on the 5120 ultrawide once the rails and
+gutters are subtracted; 40 fits with a ~24 px margin (2·48 + 2·40 + 4·1200 + 3·40 =
+5096 ≤ 5120) and keeps `slot_width` at its established 1200. Side-zone / rail widths
+are `~` in the briefing and taken as 320 / 48.
+
+**Animation-safety construction (pre-empting the D-0019 hard-swap precedent).** In
+CD-10 the slot **swap** was left a hard jump (D-0019) because an animated version
+risked the rendered rects and the input hit-tests disagreeing mid-tween. The reflow
+here is animated **and** safe by construction, exactly as the briefing required: the
+shell keeps one **animated frame** — per-slot rects ease toward the `frame_layout`
+target (a newly added slot grows from a collapsed sliver at its target centre) and a
+single interpolated `side_width` drives the side rects, all computed **once per
+frame**. Rendering (the composited slots + side zones + zone shadows) and input
+(mouse hit-tests, and later the CD-12 drop targets) read that **same** per-frame
+geometry (`disp_slots` / `disp_rect`), so desync is impossible — Ctrl+T/W, unit
+toggles and window resizes reflow as one fluid ~220 ms ease-out (the top-bar slide's
+interpolation pattern), never a jump. The reflow is explicitly **not** downgraded to
+a hard jump. (The top bar reads the settled target rect, not the animated one, so
+its CEF view size stays stable while the columns glide.)
+
 ## D-0019 - 2026-07-09 - CD-10: session restore, width units, and slot rearrange
 
 CD-10 makes the CD-09 slot system feel permanent and fluid: the workspace

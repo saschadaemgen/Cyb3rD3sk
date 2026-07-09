@@ -68,6 +68,10 @@ CD-10 (sessions, width units, rearrange, open-in-new-slot; D-0018/D-0019) added
 shortcuts are host-side key handling, and open-in-new-slot is a CEF
 `on_before_popup` decision (not a page command). The wire format is unchanged.
 
+CD-11 (the main frame — side zones, reflow-to-rails; D-0020) is likewise **no
+IPC**: the frame is pure host-side layout math (`slots::frame_layout`) and shell
+rendering. The wire format is unchanged.
+
 ### `get_nav_state` (view -> host)
 
 - Request: `{"cmd":"get_nav_state"}`

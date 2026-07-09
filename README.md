@@ -13,7 +13,7 @@ feathered compositing, and an isolated in-shell settings surface.
 
 ---
 
-## State after CD-10 (Season 1 extended)
+## State after CD-11 (Season 1 extended)
 
 * **Shell:** Borderless fullscreen on the primary monitor, dark background
   (`#04070A`), vsync. The shell background is the Pulse Grid alone — the CARVILON
@@ -39,10 +39,22 @@ feathered compositing, and an isolated in-shell settings surface.
   a scan sweep) is preserved as a token-selectable "Calm" variant
   (`background.kind = "deep_field"`). See `docs/cyberdesk-decisions.md` (D-0012,
   D-0013).
+* **The main frame — side zones + reflow-to-rails (CD-11, D-0020):** the slot group
+  no longer owns the full width. **Side zones flank it left and right** (placeholder
+  now — a subtle fill, a thin outline, a small diamond glyph; the Spine and the
+  status / files / music rails live here in later seasons), first-class citizens of
+  the layout. With one or two columns they show full width; when the browsers demand
+  the width (four columns on the ultrawide) the side zones **retreat, animated, into
+  thin rails** and the columns recenter — one fluid ~220 ms motion, driven by a
+  single per-frame layout that both rendering and input read (so it never desyncs or
+  jumps). The gutters widened into deliberately generous **control territory** (24 →
+  40 px) — reserved for CD-12 — with the Pulse Grid glowing in it. There are no new
+  controls; the frame is entirely automatic (`slots::frame_layout` decides). Side
+  zones eat width, so mid-size panels hold fewer columns than before (a 2560 panel
+  now shows one column flanked by side zones); the 5120 ultrawide still reaches four.
 * **Slot engine — fixed-width content columns (CD-09, D-0017):** the surf zone is
   now up to **four fixed-width columns** ("slots", 1200 logical px each) side by
-  side, gutter-spaced and centered — four fit the 5120 ultrawide, one a 1920
-  panel. `Ctrl+T` adds a column (lazily: it shows a placeholder with its index
+  side, gutter-spaced and centered between the side zones. `Ctrl+T` adds a column (lazily: it shows a placeholder with its index
   glyph until its first navigation, no white flash), `Ctrl+W` closes the active
   one, `Ctrl+1..4` / `Ctrl+Tab` switch. One column is **active** at a time (a thin
   brand accent underlines it): the keyboard and the top bar drive it; the mouse
@@ -196,11 +208,13 @@ the first N columns as restored-pending (the scheme-colored placeholder dot).
 
 ## Controls
 
-The shell shows **fixed-width content columns** ("slots") — up to four side by
-side on an ultrawide, one on a 1920 panel. Each column is a stripped-down browser
-with no visible chrome until you summon it. Keyboard shortcuts act on the **active
-slot** (a thin brand accent underlines it); mouse actions act on the slot under
-the cursor.
+The shell shows **fixed-width content columns** ("slots") flanked by **side zones**
+left and right (CD-11) — up to four columns on an ultrawide (the side zones retreat
+to thin rails), fewer with the side zones at full width on smaller panels. The frame
+reflows automatically; there are no controls for it. Each column is a stripped-down
+browser with no visible chrome until you summon it. Keyboard shortcuts act on the
+**active slot** (a thin brand accent underlines it); mouse actions act on the slot
+under the cursor.
 
 | Input | Action |
 | --- | --- |
