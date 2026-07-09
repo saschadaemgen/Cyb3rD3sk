@@ -107,7 +107,7 @@ pub fn run(windowed: bool) {
         overlay: Overlay::Closed,
         gear_hover: 0.0,
         gear_hover_target: 0.0,
-        slot_count: 1,
+        order: vec![0],
         active_slot: 0,
         loading: [0.0; MAX_SLOTS],
         applied_title: String::new(),
@@ -141,9 +141,13 @@ struct Shell {
     overlay: Overlay,
     gear_hover: f32,
     gear_hover_target: f32,
-    /// Number of live slots (columns), 1..=MAX_SLOTS.
-    slot_count: usize,
-    /// The active slot: keyboard input, the top bar and the scheme hint act on it.
+    /// Live slots in left-to-right display order, by stable id (an index into the
+    /// fixed per-slot browser/texture arrays). Length 1..=MAX_SLOTS. A slot keeps
+    /// its id for life, so its CEF handlers (which bake in `Role::Slot(id)`) and
+    /// its texture never move; only its position in this list changes.
+    order: Vec<usize>,
+    /// The active slot id: keyboard input, the top bar and the scheme hint act on
+    /// it. Always a member of `order`.
     active_slot: usize,
     /// Per-slot loading-line intensity, eased toward on (loading) / off (done).
     loading: [f32; MAX_SLOTS],
@@ -222,17 +226,24 @@ impl Shell {
         }
     }
 
-    /// The current slot rectangles (device px) for a given surface size.
+    /// The current slot rectangles (device px, one per live column in display
+    /// order) for a given surface size.
     fn slot_rects_wh(&self, w: u32, h: u32) -> Vec<slots::Rect> {
-        slots::slot_rects(w, h, self.slot_count, self.scale, &self.theme.slots)
+        slots::slot_rects(w, h, self.order.len(), self.scale, &self.theme.slots)
     }
 
-    /// The active slot's rectangle for a given surface size (falls back to the
-    /// first slot if `active_slot` is somehow out of range).
+    /// The display position (index into `order`) of the active slot.
+    fn active_position(&self) -> usize {
+        self.order
+            .iter()
+            .position(|&id| id == self.active_slot)
+            .unwrap_or(0)
+    }
+
+    /// The active slot's rectangle for a given surface size.
     fn active_rect_wh(&self, w: u32, h: u32) -> slots::Rect {
         let rects = self.slot_rects_wh(w, h);
-        let i = self.active_slot.min(rects.len().saturating_sub(1));
-        rects[i]
+        rects[self.active_position().min(rects.len().saturating_sub(1))]
     }
 
     /// The active slot's rectangle at the current surface size.
@@ -246,6 +257,95 @@ impl Shell {
     fn capacity(&self) -> usize {
         let (w, _) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
         slots::max_slots(w, self.scale, &self.theme.slots)
+    }
+
+    /// Make slot id `id` the active slot: move CEF keyboard focus (only while no
+    /// overlay is open — otherwise the internal view holds focus) and update the
+    /// browser-side active-slot pointer the top bar / IPC read.
+    fn set_active(&mut self, id: usize) {
+        if !self.order.contains(&id) || id == self.active_slot {
+            return;
+        }
+        if self.overlay == Overlay::Closed {
+            browser::set_focus(Role::Slot(self.active_slot), false);
+        }
+        self.active_slot = id;
+        browser::set_active_slot(id);
+        if self.overlay == Overlay::Closed {
+            browser::set_focus(Role::Slot(id), true);
+        }
+    }
+
+    /// Focus the slot in display position `pos1` (1-based, Ctrl+1..4). No-op if
+    /// there is no slot at that position.
+    fn focus_slot_position(&mut self, pos1: usize) {
+        if pos1 >= 1
+            && pos1 <= self.order.len()
+            && let Some(&id) = self.order.get(pos1 - 1)
+        {
+            self.set_active(id);
+        }
+    }
+
+    /// Cycle the active slot forward / backward (Ctrl+Tab / Ctrl+Shift+Tab).
+    fn cycle_active(&mut self, forward: bool) {
+        if self.order.len() <= 1 {
+            return;
+        }
+        let next = slots::cycle_position(self.active_position(), self.order.len(), forward);
+        self.set_active(self.order[next]);
+    }
+
+    /// Add a slot right of the active one (Ctrl+T). No-op at capacity / MAX_SLOTS.
+    /// The new slot is lazy (placeholder, no browser); it becomes active and the
+    /// top bar reveals focused + empty so the user can type its first address.
+    fn add_slot(&mut self) {
+        if self.order.len() >= self.capacity() {
+            return;
+        }
+        let Some(free) = slots::free_id(&self.order) else {
+            return;
+        };
+        // Drop keyboard focus from the outgoing active slot's browser before the
+        // new (lazy, browser-less) slot takes over; the bar then holds focus.
+        if self.overlay == Overlay::Closed {
+            browser::set_focus(Role::Slot(self.active_slot), false);
+        }
+        let pos = slots::insert_position(&self.order, self.active_slot);
+        self.order.insert(pos, free);
+        self.loading[free] = 0.0;
+        self.active_slot = free;
+        browser::set_active_slot(free);
+        // Recentre the group and re-size every view for the new column count.
+        self.push_geometry();
+        self.notify_all_resized();
+        // Reveal the bar focused + empty (the lazy slot's URL is empty), ready to
+        // type the first address (which spawns the browser via `navigate`).
+        self.reveal_bar(true);
+    }
+
+    /// Close the active slot (Ctrl+W). The last slot cannot be closed. The
+    /// browser shuts down cleanly, the group recenters, and the nearest neighbor
+    /// becomes active.
+    fn close_active_slot(&mut self) {
+        if self.order.len() <= 1 {
+            return;
+        }
+        let pos = self.active_position();
+        let id = self.order.remove(pos);
+        browser::close_slot(id);
+        if let Some(r) = self.renderer.as_mut() {
+            r.clear_slot(id);
+        }
+        self.loading[id] = 0.0;
+        let new_pos = slots::neighbor_position(pos, self.order.len());
+        self.active_slot = self.order[new_pos];
+        browser::set_active_slot(self.active_slot);
+        if self.overlay == Overlay::Closed {
+            browser::set_focus(Role::Slot(self.active_slot), true);
+        }
+        self.push_geometry();
+        self.notify_all_resized();
     }
 
     /// The internal view's rectangle (device px) for the current overlay: the
@@ -462,8 +562,10 @@ impl Shell {
     fn push_geometry(&mut self) {
         if let Some(r) = self.renderer.as_ref() {
             let (w, h) = r.size();
-            for (i, rc) in self.slot_rects_wh(w, h).iter().enumerate() {
-                browser::set_view_geometry(Role::Slot(i), rc.w as u32, rc.h as u32, self.scale);
+            let rects = self.slot_rects_wh(w, h);
+            for (p, &id) in self.order.iter().enumerate() {
+                let rc = rects[p];
+                browser::set_view_geometry(Role::Slot(id), rc.w as u32, rc.h as u32, self.scale);
             }
             let (_, _, iw, ih) = self.internal_rect(w, h);
             browser::set_view_geometry(Role::Internal, iw as u32, ih as u32, self.scale);
@@ -472,24 +574,32 @@ impl Shell {
 
     /// Notify CEF that every live slot view (and the internal view) was resized.
     fn notify_all_resized(&self) {
-        for i in 0..self.slot_count {
-            browser::notify_resized(Role::Slot(i));
+        for &id in &self.order {
+            browser::notify_resized(Role::Slot(id));
         }
         browser::notify_resized(Role::Internal);
     }
 
     /// Re-clamp the live slot count to what the current width allows (called on
-    /// resize / DPI change). Stage B closes the excess slots' browsers here; in
-    /// Stage A there is only ever one slot, so this just keeps `active_slot` in
-    /// range.
+    /// resize / DPI change): close the excess columns from the right (clean
+    /// browser shutdown; CD-10 will preserve their URLs). Keeps `active_slot`
+    /// valid, promoting a neighbor if the active column was closed.
     fn reflow_slots(&mut self) {
         let cap = self.capacity().max(1);
-        if self.slot_count > cap {
-            self.slot_count = cap;
+        while self.order.len() > cap {
+            let id = self.order.pop().expect("order is non-empty");
+            browser::close_slot(id);
+            if let Some(r) = self.renderer.as_mut() {
+                r.clear_slot(id);
+            }
+            self.loading[id] = 0.0;
         }
-        if self.active_slot >= self.slot_count {
-            self.active_slot = self.slot_count - 1;
+        if !self.order.contains(&self.active_slot) {
+            self.active_slot = *self.order.last().expect("order is non-empty");
             browser::set_active_slot(self.active_slot);
+            if self.overlay == Overlay::Closed {
+                browser::set_focus(Role::Slot(self.active_slot), true);
+            }
         }
     }
 
@@ -666,6 +776,45 @@ impl ApplicationHandler for Shell {
                     browser::toggle_current_favorite();
                     return;
                 }
+                // Slot management (CD-09), intercepted host-side before the page
+                // sees the key: Ctrl+T add, Ctrl+W close, Ctrl+Tab / Ctrl+Shift+Tab
+                // cycle, Ctrl+1..4 focus by position.
+                if event.state == ElementState::Pressed
+                    && self.mods.control_key()
+                    && let PhysicalKey::Code(code) = event.physical_key
+                {
+                    match code {
+                        KeyCode::KeyT => {
+                            self.add_slot();
+                            return;
+                        }
+                        KeyCode::KeyW => {
+                            self.close_active_slot();
+                            return;
+                        }
+                        KeyCode::Tab => {
+                            self.cycle_active(!self.mods.shift_key());
+                            return;
+                        }
+                        KeyCode::Digit1 => {
+                            self.focus_slot_position(1);
+                            return;
+                        }
+                        KeyCode::Digit2 => {
+                            self.focus_slot_position(2);
+                            return;
+                        }
+                        KeyCode::Digit3 => {
+                            self.focus_slot_position(3);
+                            return;
+                        }
+                        KeyCode::Digit4 => {
+                            self.focus_slot_position(4);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 // ESC chain (CD-08): bar visible -> hide the bar; else settings
                 // open -> close settings; else quit the shell.
                 if vk == 0x1B && event.state == ElementState::Pressed {
@@ -738,15 +887,16 @@ impl ApplicationHandler for Shell {
                 let size = self.renderer.as_ref().map(|r| r.size());
                 if let Some((w, h)) = size {
                     let internal = self.internal_rect(w, h);
+                    let rects = self.slot_rects_wh(w, h);
                     let slot_views: Vec<SlotView> = self
-                        .slot_rects_wh(w, h)
+                        .order
                         .iter()
                         .enumerate()
-                        .map(|(i, rc)| SlotView {
-                            rect: (rc.x, rc.y, rc.w, rc.h),
-                            loading: self.loading.get(i).copied().unwrap_or(0.0),
-                            active: i == self.active_slot,
-                            index: i,
+                        .map(|(p, &id)| SlotView {
+                            rect: (rects[p].x, rects[p].y, rects[p].w, rects[p].h),
+                            loading: self.loading[id],
+                            active: id == self.active_slot,
+                            index: id,
                         })
                         .collect();
                     if let Some(r) = self.renderer.as_mut() {
@@ -828,10 +978,10 @@ impl ApplicationHandler for Shell {
         // Ease the gear hover glow toward its target.
         self.gear_hover += (self.gear_hover_target - self.gear_hover) * 0.25;
 
-        // Ease each slot's loading line toward on (loading) / off (done).
-        for i in 0..self.slot_count {
-            let target = if browser::slot_loading(i) { 1.0 } else { 0.0 };
-            self.loading[i] += (target - self.loading[i]) * 0.15;
+        // Ease each live slot's loading line toward on (loading) / off (done).
+        for &id in &self.order {
+            let target = if browser::slot_loading(id) { 1.0 } else { 0.0 };
+            self.loading[id] += (target - self.loading[id]) * 0.15;
         }
 
         // In windowed dev mode, reflect the active slot's page title in the OS
@@ -862,8 +1012,10 @@ impl ApplicationHandler for Shell {
 
         // Upload freshly painted frames into their textures (per slot + overlay).
         if let Some(r) = self.renderer.as_mut() {
-            for i in 0..self.slot_count {
-                browser::with_dirty_frame(Role::Slot(i), |data, w, h| r.upload_slot(i, data, w, h));
+            for &id in &self.order {
+                browser::with_dirty_frame(Role::Slot(id), |data, w, h| {
+                    r.upload_slot(id, data, w, h)
+                });
             }
             browser::with_dirty_frame(Role::Internal, |data, w, h| r.upload_panel(data, w, h));
         }

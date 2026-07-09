@@ -1573,6 +1573,17 @@ impl SurfaceRenderer {
             .upload(&self.device, &self.queue, &self.page_pipeline, data, w, h);
     }
 
+    /// Drop slot `i`'s page texture so a closed/re-lazy slot shows the placeholder
+    /// again instead of a stale page (CD-09 Ctrl+W / resize shrink).
+    pub fn clear_slot(&mut self, i: usize) {
+        if let Some(slot) = self.slots.get_mut(i) {
+            slot.texture = None;
+            slot.tex_bind_group = None;
+            slot.width = 0;
+            slot.height = 0;
+        }
+    }
+
     /// Render one frame. Rects are in device pixels. `slots` are the surf
     /// columns (each with its rect, loading intensity and active flag); `panel`
     /// is the internal overlay (settings card / top bar); `gear` is the settings

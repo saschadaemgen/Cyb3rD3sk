@@ -410,6 +410,24 @@ pub fn create_browser_url(role: Role, parent_hwnd: isize, url: &str) {
     assert_eq!(created, 1, "CefBrowserHost::CreateBrowser failed");
 }
 
+/// Close slot `i`'s browser cleanly (Ctrl+W, or a resize that drops columns).
+/// The slot becomes lazy again — browser taken and force-closed, nav state and
+/// frame reset — so a later navigation re-spawns it. No-op if it has no browser.
+pub fn close_slot(i: usize) {
+    if i >= MAX_SLOTS {
+        return;
+    }
+    let browser = view(Role::Slot(i)).browser.lock().unwrap().take();
+    if let Some(browser) = browser
+        && let Some(host) = browser.host()
+    {
+        // force_close = 1: shut down without the before-unload prompt.
+        host.close_browser(1);
+    }
+    *view(Role::Slot(i)).nav.lock().unwrap() = SlotNav::default();
+    *view(Role::Slot(i)).frame.lock().unwrap() = FrameBuffer::default();
+}
+
 /// Opaque ARGB (0xFFRRGGBB) from a `#RRGGBB` token, for a CEF backing color.
 fn argb_from_hex(hex: &str) -> u32 {
     let c = crate::theme::hex3(hex);

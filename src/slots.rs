@@ -94,6 +94,49 @@ pub fn nearest_slot(width: u32, height: u32, n: usize, scale: f32, t: &Slots, px
     best
 }
 
+// --- Slot-order management (CD-09 Stage B) ----------------------------------
+// Pure helpers over the live-slot order list (`order`), separated from the shell
+// so the Ctrl+T / Ctrl+W / Ctrl+1..4 / Ctrl+Tab index logic is unit-testable
+// without a window or CEF. `order` holds live slot *ids* in display order; each
+// id is a stable index into the fixed per-slot arrays.
+
+/// The lowest free slot id not present in `order` (`0..MAX_SLOTS`), or `None`
+/// when all `MAX_SLOTS` ids are in use.
+pub fn free_id(order: &[usize]) -> Option<usize> {
+    (0..MAX_SLOTS).find(|id| !order.contains(id))
+}
+
+/// The display position where Ctrl+T inserts a new slot: immediately right of
+/// the active slot (or the end if `active` is somehow absent).
+pub fn insert_position(order: &[usize], active: usize) -> usize {
+    order
+        .iter()
+        .position(|&id| id == active)
+        .map(|p| p + 1)
+        .unwrap_or(order.len())
+        .min(order.len())
+}
+
+/// After removing the slot at display position `pos`, the position of the slot
+/// that should become active in the shortened order (length `len_after`): the
+/// old right neighbor if there is one, else the new last (old left neighbor).
+pub fn neighbor_position(pos: usize, len_after: usize) -> usize {
+    pos.min(len_after.saturating_sub(1))
+}
+
+/// The next active display position when cycling (Ctrl+Tab forward /
+/// Ctrl+Shift+Tab backward) from `pos` in an order of length `len`.
+pub fn cycle_position(pos: usize, len: usize, forward: bool) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    if forward {
+        (pos + 1) % len
+    } else {
+        (pos + len - 1) % len
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +260,74 @@ mod tests {
         assert!(r.contains(200.0, 200.0));
         assert!(!r.contains(99.0, 200.0));
         assert!(!r.contains(200.0, 451.0));
+    }
+
+    #[test]
+    fn free_id_picks_lowest_gap_then_none_when_full() {
+        assert_eq!(free_id(&[0]), Some(1));
+        assert_eq!(free_id(&[0, 1]), Some(2));
+        // A hole in the middle is reused (stable ids, not contiguous).
+        assert_eq!(free_id(&[0, 2]), Some(1));
+        assert_eq!(free_id(&[0, 1, 2, 3]), None);
+    }
+
+    #[test]
+    fn insert_position_is_right_of_active() {
+        // active at the end -> append.
+        assert_eq!(insert_position(&[0], 0), 1);
+        assert_eq!(insert_position(&[0, 1, 2], 2), 3);
+        // active in the middle -> insert just after it.
+        assert_eq!(insert_position(&[0, 1, 2], 0), 1);
+        assert_eq!(insert_position(&[0, 1, 2], 1), 2);
+    }
+
+    #[test]
+    fn ctrl_t_inserts_a_free_id_right_of_active() {
+        // order [0], active 0 -> add: free 1 at pos 1 -> [0,1], active 1.
+        let mut order = vec![0usize];
+        let free = free_id(&order).unwrap();
+        let pos = insert_position(&order, 0);
+        order.insert(pos, free);
+        assert_eq!(order, vec![0, 1]);
+        assert_eq!(free, 1);
+
+        // Add again right of active 1 -> [0,1,2].
+        let free = free_id(&order).unwrap();
+        let pos = insert_position(&order, 1);
+        order.insert(pos, free);
+        assert_eq!(order, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn neighbor_after_close_prefers_right_then_left() {
+        // Close the middle of [a,b,c] at pos 1 -> [a,c]; the slot now at pos 1
+        // (old right neighbor) becomes active.
+        assert_eq!(neighbor_position(1, 2), 1);
+        // Close the last of [a,b,c] at pos 2 -> [a,b]; the new last (pos 1,
+        // old left neighbor) becomes active.
+        assert_eq!(neighbor_position(2, 2), 1);
+        // Close the first at pos 0 -> the new first (old right neighbor).
+        assert_eq!(neighbor_position(0, 2), 0);
+    }
+
+    #[test]
+    fn ctrl_w_removes_active_and_promotes_neighbor() {
+        // [0,1,2], active 1 at pos 1 -> remove -> [0,2], new active pos 1 = id 2.
+        let mut order = vec![0usize, 1, 2];
+        let pos = order.iter().position(|&id| id == 1).unwrap();
+        order.remove(pos);
+        assert_eq!(order, vec![0, 2]);
+        let new_pos = neighbor_position(pos, order.len());
+        assert_eq!(order[new_pos], 2);
+    }
+
+    #[test]
+    fn cycle_wraps_both_directions() {
+        assert_eq!(cycle_position(0, 3, true), 1);
+        assert_eq!(cycle_position(2, 3, true), 0); // wrap forward
+        assert_eq!(cycle_position(0, 3, false), 2); // wrap backward
+        assert_eq!(cycle_position(1, 3, false), 0);
+        // Single slot: no movement.
+        assert_eq!(cycle_position(0, 1, true), 0);
     }
 }
