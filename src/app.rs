@@ -320,6 +320,8 @@ impl Shell {
                 let r = self.disp_rect(id);
                 (r.x, r.y)
             }
+            // The MF-zone view's origin is the animated right-zone top-left (CD-18).
+            Role::MfZone => (self.disp_right.x, self.disp_right.y),
         }
     }
 
@@ -402,16 +404,27 @@ impl Shell {
             Overlay::Command => {
                 // Over the engaged ensemble's band column, or the launcher strip ->
                 // the transparent band (internal view, origin at the window origin);
-                // elsewhere the slot under the cursor (so another column's gap can
-                // engage it, and slots stay usable). CD-12.
+                // over the MF zone -> its content view (tab clicks); elsewhere the
+                // slot under the cursor (so another column's gap can engage it, and
+                // slots stay usable). CD-12 / CD-18.
                 let over_ensemble = self.engaged_band_rect().map(|r| self.point_in(r)).unwrap_or(false);
                 if over_ensemble || self.point_in(self.launcher_rect()) {
                     Some((Role::Internal, (0.0, 0.0)))
+                } else if self.disp_right.contains(cx, cy) {
+                    Some((Role::MfZone, (self.disp_right.x, self.disp_right.y)))
                 } else {
                     self.slot_at_cursor().map(|(id, r)| (Role::Slot(id), (r.x, r.y)))
                 }
             }
-            Overlay::Closed => self.slot_at_cursor().map(|(id, r)| (Role::Slot(id), (r.x, r.y))),
+            // The permanent MF-zone content view takes clicks over its rect (tab
+            // switching / scrolling); otherwise the slot under the cursor (CD-18).
+            Overlay::Closed => {
+                if self.disp_right.contains(cx, cy) {
+                    Some((Role::MfZone, (self.disp_right.x, self.disp_right.y)))
+                } else {
+                    self.slot_at_cursor().map(|(id, r)| (Role::Slot(id), (r.x, r.y)))
+                }
+            }
         }
     }
 
@@ -1242,15 +1255,22 @@ impl Shell {
             }
             let (_, _, iw, ih) = self.internal_rect(w, h);
             browser::set_view_geometry(Role::Internal, iw as u32, ih as u32, self.scale);
+            // MF-zone view (CD-18): its texture is a constant size (mf_zone_width x
+            // slot height); only its X animates during reflow (carried by the render
+            // NDC rect), so geometry is set here on resize, not per frame.
+            let mf = slots::frame_layout(w, h, &self.units_in_order(), self.scale, &self.theme.slots).right;
+            browser::set_view_geometry(Role::MfZone, mf.w as u32, mf.h as u32, self.scale);
         }
     }
 
-    /// Notify CEF that every live slot view (and the internal view) was resized.
+    /// Notify CEF that every live slot view (and the internal + MF-zone views) was
+    /// resized.
     fn notify_all_resized(&self) {
         for &id in &self.order {
             browser::notify_resized(Role::Slot(id));
         }
         browser::notify_resized(Role::Internal);
+        browser::notify_resized(Role::MfZone);
     }
 
     /// Total width in units of the live slots (CD-10).
@@ -1309,6 +1329,7 @@ impl Shell {
         browser::set_slot_tor(0, tor);
         self.push_geometry();
         browser::create_browser(Role::Internal, hwnd);
+        browser::create_browser(Role::MfZone, hwnd); // → cyberdesk://mfzone/ (permanent)
         browser::create_browser(Role::Slot(0), hwnd); // → cyberdesk://start/
     }
 
@@ -1888,6 +1909,7 @@ impl ApplicationHandler for Shell {
                 });
             }
             browser::with_dirty_frame(Role::Internal, |data, w, h| r.upload_panel(data, w, h));
+            browser::with_dirty_frame(Role::MfZone, |data, w, h| r.upload_mfzone(data, w, h));
         }
 
         // Opt-in web-isolation self-test: try to steer the internal view onto the

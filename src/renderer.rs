@@ -1627,6 +1627,9 @@ pub struct SurfaceRenderer {
     page_pipeline: PagePipeline,
     slots: Vec<PageTarget>,
     panel: PageTarget,
+    /// The permanent MF-zone content view (CD-18): an opaque page composited into
+    /// the right zone rect, replacing the placeholder glyph once it has a texture.
+    mfzone: PageTarget,
     placeholder: SlotPlaceholder,
     slotlines: SlotLines,
     drag: DragOverlay,
@@ -1679,6 +1682,7 @@ impl SurfaceRenderer {
             .map(|_| PageTarget::new(&device, &page_pipeline))
             .collect();
         let panel = PageTarget::new(&device, &page_pipeline);
+        let mfzone = PageTarget::new(&device, &page_pipeline);
         // Placeholder instances: up to MAX_SLOTS empty slots + 2 side zones.
         let placeholder = SlotPlaceholder::new(&device, SURFACE_FORMAT, MAX_SLOTS as u32 + 2);
         let slotlines = SlotLines::new(&device, SURFACE_FORMAT, MAX_SLOTS as u32);
@@ -1699,6 +1703,7 @@ impl SurfaceRenderer {
             page_pipeline,
             slots,
             panel,
+            mfzone,
             placeholder,
             slotlines,
             drag,
@@ -1732,6 +1737,12 @@ impl SurfaceRenderer {
     /// Upload a freshly painted internal-view frame (BGRA) into the panel texture.
     pub fn upload_panel(&mut self, data: &[u8], w: u32, h: u32) {
         self.panel
+            .upload(&self.device, &self.queue, &self.page_pipeline, data, w, h);
+    }
+
+    /// Upload a freshly painted MF-zone frame (BGRA) into the MF-zone texture (CD-18).
+    pub fn upload_mfzone(&mut self, data: &[u8], w: u32, h: u32) {
+        self.mfzone
             .upload(&self.device, &self.queue, &self.page_pipeline, data, w, h);
     }
 
@@ -1858,7 +1869,22 @@ impl SurfaceRenderer {
         // outline + a core glyph. `sides` is [left Spine, right MF]; the left gets
         // the diamond (glyph 0), the right MF gets a distinct rows glyph (glyph
         // -1) so the permanent zone reads apart. No page / loading / active lines.
+        // CD-18: the right MF zone renders the opaque `cyberdesk://mfzone/` page once
+        // it has a texture; until the first paint it keeps the rows-glyph placeholder.
         for (i, s) in sides.iter().enumerate() {
+            if i == 1 && self.mfzone.has_texture() {
+                let u = PageUniforms {
+                    rect_ndc: [to_ndc_x(s.0), to_ndc_y(s.1), to_ndc_x(s.0 + s.2), to_ndc_y(s.1 + s.3)],
+                    px_size: [self.mfzone.width.max(1) as f32, self.mfzone.height.max(1) as f32],
+                    corner_radius,
+                    feather: feather_px,
+                    feather_exp,
+                    _pad: [0.0; 3],
+                };
+                self.queue
+                    .write_buffer(&self.mfzone.uniform_buf, 0, bytemuck::bytes_of(&u));
+                continue;
+            }
             let core = if i == 1 { -1.0 } else { 0.0 };
             placeholders.push(PlaceholderInstance {
                 rect: [s.0, s.1, s.2, s.3],
@@ -2125,6 +2151,15 @@ impl SurfaceRenderer {
                     pass.set_bind_group(1, tex_bind_group, &[]);
                     pass.draw(0..6, 0..1);
                 }
+            }
+
+            // MF-zone page (CD-18): the opaque content view in the right zone, drawn
+            // once painted (its rows-glyph placeholder is suppressed in that case).
+            // Same page pipeline, still bound above.
+            if let Some(tex_bind_group) = self.mfzone.tex_bind_group.as_ref() {
+                pass.set_bind_group(0, &self.mfzone.uniform_bind_group, &[]);
+                pass.set_bind_group(1, tex_bind_group, &[]);
+                pass.draw(0..6, 0..1);
             }
 
             // Lazy-slot placeholders (fill + index glyph), for slots with no

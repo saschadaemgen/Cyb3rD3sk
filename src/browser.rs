@@ -47,6 +47,7 @@ const SETTINGS_URL: &str = "cyberdesk://settings/";
 const COMMAND_URL: &str = "cyberdesk://command/";
 const INFO_URL: &str = "cyberdesk://info/";
 const START_URL: &str = "cyberdesk://start/";
+const MFZONE_URL: &str = "cyberdesk://mfzone/";
 
 // cef_event_flags_t bits (modifiers for mouse/key events).
 const EVENTFLAG_SHIFT_DOWN: u32 = 1 << 1;
@@ -58,12 +59,15 @@ pub const EVENTFLAG_RIGHT_MOUSE_BUTTON: u32 = 1 << 6;
 
 /// Which OSR view a call targets. `Slot(i)` is one of the up-to-[`MAX_SLOTS`]
 /// surf columns (CD-09); `Internal` is the single shared overlay view (settings
-/// card / command bar). `i` is always `< MAX_SLOTS` (the shell clamps the live
-/// slot count), so slot and internal indices never collide.
+/// card / command bar / info / start); `MfZone` is the permanent right
+/// Multifunctional-zone content view (CD-18, `cyberdesk://mfzone/`). `i` is always
+/// `< MAX_SLOTS` (the shell clamps the live slot count), so the indices never
+/// collide.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Slot(usize),
     Internal,
+    MfZone,
 }
 
 impl Role {
@@ -71,6 +75,7 @@ impl Role {
         match self {
             Role::Slot(i) => i,
             Role::Internal => MAX_SLOTS,
+            Role::MfZone => MAX_SLOTS + 1,
         }
     }
 }
@@ -130,9 +135,10 @@ impl ViewState {
 }
 
 /// The per-view state array: `MAX_SLOTS` surf slots at indices `0..MAX_SLOTS`,
-/// then the internal overlay view at `MAX_SLOTS`.
-fn views() -> &'static [ViewState; MAX_SLOTS + 1] {
-    static V: OnceLock<[ViewState; MAX_SLOTS + 1]> = OnceLock::new();
+/// then the internal overlay view at `MAX_SLOTS`, then the permanent MF-zone view
+/// at `MAX_SLOTS + 1` (CD-18).
+fn views() -> &'static [ViewState; MAX_SLOTS + 2] {
+    static V: OnceLock<[ViewState; MAX_SLOTS + 2]> = OnceLock::new();
     V.get_or_init(|| std::array::from_fn(|_| ViewState::new()))
 }
 fn view(role: Role) -> &'static ViewState {
@@ -357,6 +363,7 @@ pub fn create_browser(role: Role, parent_hwnd: isize) {
     let url = match role {
         Role::Slot(_) => START_URL,
         Role::Internal => SETTINGS_URL,
+        Role::MfZone => MFZONE_URL,
     };
     create_browser_url(role, parent_hwnd, url);
 }
@@ -394,6 +401,9 @@ pub fn create_browser_url(role: Role, parent_hwnd: isize, url: &str) {
         // its own opaque panel background in CSS. OSR delivers premultiplied BGRA
         // with alpha, which the compositor blends OVER.
         Role::Internal => 0x0000_0000u32,
+        // MF zone: OPAQUE — it is permanent content filling its rect (CD-18), not a
+        // floating overlay; an opaque backing keeps the Pulse Grid from bleeding.
+        Role::MfZone => 0xFFFF_FFFFu32,
     };
     let browser_settings = BrowserSettings {
         windowless_frame_rate: 60,
@@ -899,6 +909,20 @@ fn info_document() -> String {
     .clone()
 }
 
+/// The MF-zone tabbed viewer page (CD-18): Tor status + log stream, the full app
+/// log, and a reserved Terminal placeholder. Served into the permanent right zone.
+fn mfzone_document() -> String {
+    static DOC: OnceLock<String> = OnceLock::new();
+    DOC.get_or_init(|| {
+        let theme = crate::theme::Theme::load();
+        include_str!("mfzone.html")
+            .replace("/*__TOKENS__*/", &theme.to_css_vars())
+            .replace("/*__CSS__*/", include_str!("mfzone.css"))
+            .replace("/*__JS__*/", include_str!("mfzone.js"))
+    })
+    .clone()
+}
+
 /// Scheme of a URL, for the command bar's lock/warn hint.
 fn scheme_of(url: &str) -> &'static str {
     if url.starts_with("https://") {
@@ -1239,16 +1263,17 @@ wrap_client! {
             // Only surf slots drive their loading line / nav state.
             match self.role {
                 Role::Slot(_) => Some(CyberLoadHandler::new(self.role)),
-                Role::Internal => None,
+                Role::Internal | Role::MfZone => None,
             }
         }
         fn life_span_handler(&self) -> Option<LifeSpanHandler> {
             Some(CyberLifeSpanHandler::new(self.role, self.tor))
         }
         fn request_handler(&self) -> Option<RequestHandler> {
-            // Web isolation + IPC lifecycle only on the internal view.
+            // Web isolation (cyberdesk:// only) on the internal views — the shared
+            // overlay AND the MF-zone content view (CD-18).
             match self.role {
-                Role::Internal => Some(InternalRequestHandler::new()),
+                Role::Internal | Role::MfZone => Some(InternalRequestHandler::new()),
                 Role::Slot(_) => None,
             }
         }
@@ -1474,8 +1499,13 @@ wrap_life_span_handler! {
                     }
                     return;
                 }
-                // Give the OSR browser keyboard focus so the page accepts input.
-                if let Some(host) = browser.host() {
+                // Give the OSR browser keyboard focus so the page accepts input —
+                // EXCEPT the MF-zone view (CD-18): it is eagerly created like the
+                // slots, and focusing it would steal keyboard focus from Slot(0). It
+                // is mouse-driven (tab clicks) and never wants the keyboard.
+                if !matches!(self.role, Role::MfZone)
+                    && let Some(host) = browser.host()
+                {
                     host.set_focus(1);
                 }
                 *view(self.role).browser.lock().unwrap() = Some(browser.clone());
@@ -1557,6 +1587,8 @@ wrap_scheme_handler_factory! {
                 info_document()
             } else if url.contains("//start") {
                 start_document()
+            } else if url.contains("//mfzone") {
+                mfzone_document()
             } else {
                 settings_document()
             };

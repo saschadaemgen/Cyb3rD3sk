@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CyberDesk MF Zone</title>
+<link rel="icon" href="data:,">
+<style>
+/*__TOKENS__*/
+/*__CSS__*/
+</style>
+</head>
+<body>
+  <main class="mf">
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="tor" role="tab" aria-selected="true">Tor</button>
+      <button class="tab" data-tab="log" role="tab" aria-selected="false">Log</button>
+      <button class="tab" data-tab="term" role="tab" aria-selected="false">Terminal</button>
+    </nav>
+
+    <!-- Tor: live status header + the tor/arti log stream (CD-18). -->
+    <section class="pane active" data-pane="tor">
+      <header class="tor-head" id="tor-head">
+        <span class="tor-dot" id="tor-dot"></span>
+        <div class="tor-head-txt">
+          <div class="tor-state" id="tor-state">…</div>
+          <div class="tor-reason" id="tor-reason" hidden></div>
+        </div>
+      </header>
+      <div class="stream" id="tor-stream"></div>
+    </section>
+
+    <!-- Log: live tail of the full app log, with a level filter + copy. -->
+    <section class="pane" data-pane="log">
+      <div class="log-controls">
+        <label class="lvl">Level
+          <select id="log-level">
+            <option value="info" selected>info</option>
+            <option value="debug">debug</option>
+          </select>
+        </label>
+        <button class="btn ghost" id="log-copy" type="button">Copy</button>
+      </div>
+      <div class="stream" id="log-stream"></div>
+    </section>
+
+    <!-- Terminal: reserved for the Season-8 tools terminal (placeholder). -->
+    <section class="pane" data-pane="term">
+      <div class="reserved">
+        <div class="reserved-glyph">&gt;_</div>
+        <div class="reserved-title">Terminal</div>
+        <div class="reserved-sub">An interactive terminal is reserved for a later release
+          (Season&nbsp;8 tools). This tab holds its place.</div>
+      </div>
+    </section>
+  </main>
+<script>
+/*__JS__*/
+</script>
+</body>
+</html>
