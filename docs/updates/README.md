@@ -22,6 +22,11 @@ A single JSON file matching the schema below. A ready sample is in this folder:
       "recommended": "150.0.1+chromium-150.0.7900.100",
       "reason": "security",
       "notes_url": "https://carvilon.com/updates/notes/cef-150.html"
+    },
+    "tor": {
+      "recommended": "0.45.0",
+      "reason": "security",
+      "notes_url": "https://carvilon.com/updates/notes/tor-0.45.html"
     }
   }
 }
@@ -34,6 +39,10 @@ A single JSON file matching the schema below. A ready sample is in this folder:
 - `components.cef.recommended` — the CEF version you recommend (the
   `major.minor.patch+chromium-…` string). `reason` is a short word; `security`
   shows the item with the amber security accent. `notes_url` is optional.
+- `components.tor.recommended` — the embedded Tor engine (arti-client) version you
+  recommend (plain semver, e.g. `0.45.0` — no `+chromium` tail). `reason` and
+  `notes_url` behave exactly as for `cef`. An outdated Tor client is
+  security-critical, so keep this current.
 
 An item only appears when the published version is **newer** than what the user is
 running. Set the versions to what you have actually released.
@@ -73,5 +82,5 @@ cargo run --release
 ```
 
 The sample's versions are ahead of the current build, so the info glyph fills with
-a count and the panel lists both the CyberDesk and CEF items. Unset the variable to
+a count and the panel lists the CyberDesk, CEF and Tor items. Unset the variable to
 return to the real endpoint.

@@ -9,6 +9,11 @@
       "recommended": "150.0.1+chromium-150.0.7900.100",
       "reason": "security",
       "notes_url": "https://carvilon.com/updates/notes/cef-150.html"
+    },
+    "tor": {
+      "recommended": "0.45.0",
+      "reason": "security",
+      "notes_url": "https://carvilon.com/updates/notes/tor-0.45.html"
     }
   }
 }

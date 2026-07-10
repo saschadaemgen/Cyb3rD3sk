@@ -76,8 +76,9 @@ feathered compositing, and an isolated in-shell settings surface.
 * **Update awareness — the info area (CD-13, D-0023/D-0024):** a small status light
   top-right, beside the gear. Idle it is a faint ring; when an update is available
   it fills with the brand color, a subtle pulse, and a count. Click it for a
-  **floating panel** listing what is out of date — CyberDesk itself and its CEF core
-  — with release-notes links (open in a column) and a Dismiss (it re-appears only if
+  **floating panel** listing what is out of date — CyberDesk itself, its CEF core,
+  and the embedded Tor (arti) engine — with release-notes links (open in a column)
+  and a Dismiss (it re-appears only if
   a newer version ships). The panel is honest and calm when you are current. This is
   the host's **one and only** outbound connection: a single pinned CARVILON update
   manifest over HTTPS (the NetGuard exception, D-0023) — it queries nobody else, a

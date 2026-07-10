@@ -301,7 +301,7 @@ this channel opens no network of its own.
 
 - Request: `{"cmd":"get_info_items"}`
 - Success: the info snapshot —
-  `{"have_feed":<bool>,"checked_ago":<str|null>,"items":[…],"cyberdesk":{…},"cef":{…}}`
+  `{"have_feed":<bool>,"checked_ago":<str|null>,"items":[…],"cyberdesk":{…},"cef":{…},"tor":{…}}`
   - `items` — the NEW (non-dismissed) update items, each
     `{"id":<str>,"severity":"info"|"recommended"|"security","title":<str>,"body":<str>,"action":{"label":<str>,"url":<str>}|null}`.
     Empty when up to date, all dismissed, or there is no feed data.
@@ -311,6 +311,9 @@ this channel opens no network of its own.
     (`version` = this build's `CARGO_PKG_VERSION`).
   - `cef` — `{"version":<str>,"chromium":<str>,"recommended":<str|null>,"up_to_date":<bool>}`
     (from the pinned crate's compile-time version constants).
+  - `tor` — `{"version":<str>,"recommended":<str|null>,"up_to_date":<bool>}`
+    (the embedded arti-client version, injected from `Cargo.lock` by `build.rs`;
+    no `chromium` field).
 - Failure: code 1 (malformed request JSON).
 
 ### `dismiss_item` (view -> host)
@@ -343,7 +346,8 @@ URL over HTTPS (`CYBERDESK_UPDATE_FEED` overrides it for testing). Sample:
   "schema": 1,
   "cyberdesk": { "latest": "0.9.0", "notes_url": "https://carvilon.com/updates/notes/0.9.0.html" },
   "components": {
-    "cef": { "recommended": "150.0.1+chromium-150.0.7900.100", "reason": "security", "notes_url": "https://carvilon.com/updates/notes/cef-150.html" }
+    "cef": { "recommended": "150.0.1+chromium-150.0.7900.100", "reason": "security", "notes_url": "https://carvilon.com/updates/notes/cef-150.html" },
+    "tor": { "recommended": "0.45.0", "reason": "security", "notes_url": "https://carvilon.com/updates/notes/tor-0.45.html" }
   }
 }
 ```
@@ -352,9 +356,12 @@ URL over HTTPS (`CYBERDESK_UPDATE_FEED` overrides it for testing). Sample:
   best-effort: unknown fields are ignored, so adding fields is backward-compatible.
 - `cyberdesk.latest` (str) — the newest published CyberDesk version (semver).
   `cyberdesk.notes_url` (str, optional) — release notes URL.
-- `components` (map, optional) — keyed by component id. V1 reads **`cef`**:
-  `recommended` (str, CEF `major.minor.patch+chromium-…`), `reason` (str, optional
-  — `security` maps to the security severity), `notes_url` (str, optional).
+- `components` (map, optional) — keyed by component id. Reads **`cef`** (the CEF
+  core, `recommended` in CEF `major.minor.patch+chromium-…` form) and **`tor`** (the
+  embedded arti / Tor engine, `recommended` in plain semver). Each has `recommended`
+  (str), `reason` (str, optional — `security` maps to the security severity), and
+  `notes_url` (str, optional). Unknown component ids are ignored; an absent id is
+  simply not tracked (no item, no error).
 - Version comparison is tolerant of both semver and the CEF `+chromium-…` form
   (only the head before `+` matters). A 404 / unreachable / malformed feed is
   silent — the last-known cached manifest is kept, the glyph stays quiet, startup

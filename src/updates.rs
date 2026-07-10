@@ -149,6 +149,7 @@ pub fn build_items(
     m: &Manifest,
     cur_cyberdesk: &str,
     cur_cef: &str,
+    cur_tor: &str,
     dismissed: &HashMap<String, String>,
 ) -> Vec<InfoItem> {
     let mut out = Vec::new();
@@ -198,6 +199,32 @@ pub fn build_items(
         }
     }
 
+    // The Tor engine component (arti-client, CD-15). An outdated Tor client is
+    // security-critical (arti can even declare itself obsolete), so it is tracked
+    // exactly like CEF. Absent `tor` key (older manifest / no feed) → skipped.
+    if let Some(tor) = m.components.get("tor") {
+        let rec = Version::parse(&tor.recommended);
+        if Version::parse(cur_tor).is_older_than(&rec)
+            && !is_dismissed(dismissed, "tor-update", &rec)
+        {
+            let reason = tor.reason.as_deref().unwrap_or("recommended");
+            out.push(InfoItem {
+                id: "tor-update".to_string(),
+                severity: normalize_severity(tor.reason.as_deref()),
+                title: "Tor engine update recommended".to_string(),
+                body: format!(
+                    "The embedded Tor engine (arti) is {cur_tor}. {} is recommended ({reason}).",
+                    tor.recommended
+                ),
+                target_version: tor.recommended.clone(),
+                action: tor.notes_url.clone().map(|url| Action {
+                    label: "Release notes".to_string(),
+                    url,
+                }),
+            });
+        }
+    }
+
     out
 }
 
@@ -240,6 +267,18 @@ pub fn current_chromium_version() -> String {
     )
 }
 
+/// The embedded Tor engine (arti-client) version. Unlike CEF, arti-client exposes
+/// NO compile-time version constant (verified against the pinned crate), so
+/// `build.rs` reads the resolved version from the committed `Cargo.lock` and injects
+/// it as `ARTI_CLIENT_VERSION` (D-0029) — the authoritative running version, not a
+/// hand-restated literal that would drift on `cargo update`. This is the
+/// arti-client CRATE version (the engine CyberDesk links), not the standalone
+/// `arti` CLI nor the Tor network protocol version. `"unknown"` if the build script
+/// could not read the lockfile.
+pub fn current_tor_version() -> &'static str {
+    env!("ARTI_CLIENT_VERSION")
+}
+
 // --- Shared runtime state (read by the glyph + the info panel IPC) ----------
 
 /// Number of NEW (non-dismissed) update items — the glyph reads this lock-free.
@@ -252,6 +291,7 @@ struct State {
     last_check: Option<i64>,
     cyberdesk_latest: Option<String>,
     cef_recommended: Option<String>,
+    tor_recommended: Option<String>,
 }
 
 fn state() -> &'static Mutex<State> {
@@ -403,17 +443,19 @@ fn rebuild_from_cache() {
 fn rebuild_state(manifest: Option<Manifest>, last_check: Option<i64>) {
     let cur_cd = current_cyberdesk_version();
     let cur_cef = current_cef_version();
+    let cur_tor = current_tor_version();
     let dismissed = dismissed_map();
 
     let new_state = match &manifest {
         Some(m) => {
-            let items = build_items(m, cur_cd, &cur_cef, &dismissed);
+            let items = build_items(m, cur_cd, &cur_cef, cur_tor, &dismissed);
             State {
                 items,
                 have_feed: true,
                 last_check,
                 cyberdesk_latest: Some(m.cyberdesk.latest.clone()),
                 cef_recommended: m.components.get("cef").map(|c| c.recommended.clone()),
+                tor_recommended: m.components.get("tor").map(|c| c.recommended.clone()),
             }
         }
         None => State {
@@ -422,9 +464,18 @@ fn rebuild_state(manifest: Option<Manifest>, last_check: Option<i64>) {
             last_check,
             cyberdesk_latest: None,
             cef_recommended: None,
+            tor_recommended: None,
         },
     };
 
+    let ids: Vec<&str> = new_state.items.iter().map(|i| i.id.as_str()).collect();
+    tracing::info!(
+        count = new_state.items.len(),
+        items = ?ids,
+        have_feed = new_state.have_feed,
+        cur_tor,
+        "update state rebuilt"
+    );
     COUNT.store(new_state.items.len(), Ordering::Relaxed);
     *state().lock().unwrap() = new_state;
 }
@@ -453,6 +504,7 @@ pub fn info_snapshot_json() -> String {
     let st = state().lock().unwrap();
     let cur_cd = current_cyberdesk_version();
     let cur_cef = current_cef_version();
+    let cur_tor = current_tor_version();
 
     let items: Vec<serde_json::Value> = st
         .items
@@ -478,6 +530,11 @@ pub fn info_snapshot_json() -> String {
         .as_ref()
         .map(|r| !Version::parse(&cur_cef).is_older_than(&Version::parse(r)))
         .unwrap_or(true);
+    let tor_up_to_date = st
+        .tor_recommended
+        .as_ref()
+        .map(|r| !Version::parse(cur_tor).is_older_than(&Version::parse(r)))
+        .unwrap_or(true);
 
     let checked_ago = st.last_check.map(|t| relative_ago(now_secs() - t));
 
@@ -495,6 +552,11 @@ pub fn info_snapshot_json() -> String {
             "chromium": current_chromium_version(),
             "recommended": st.cef_recommended,
             "up_to_date": cef_up_to_date,
+        },
+        "tor": {
+            "version": cur_tor,
+            "recommended": st.tor_recommended,
+            "up_to_date": tor_up_to_date,
         },
     })
     .to_string()
@@ -550,7 +612,8 @@ mod tests {
         "schema": 1,
         "cyberdesk": { "latest": "0.9.0", "notes_url": "https://carvilon.example/notes/0.9.0.html" },
         "components": {
-            "cef": { "recommended": "150.0.1+chromium-150.0.7900.100", "reason": "security", "notes_url": "https://carvilon.example/notes/cef-150.html" }
+            "cef": { "recommended": "150.0.1+chromium-150.0.7900.100", "reason": "security", "notes_url": "https://carvilon.example/notes/cef-150.html" },
+            "tor": { "recommended": "0.45.0", "reason": "security", "notes_url": "https://carvilon.example/notes/tor-0.45.html" }
         }
     }"#;
 
@@ -565,15 +628,18 @@ mod tests {
     }"#;
 
     #[test]
-    fn good_manifest_parses_and_yields_both_items() {
+    fn good_manifest_parses_and_yields_all_items() {
         let m = Manifest::parse(GOOD).expect("good manifest parses");
         assert_eq!(m.schema, 1);
-        let items = build_items(&m, "0.1.0", "149.0.6", &dismissed(&[]));
-        assert_eq!(items.len(), 2);
+        let items = build_items(&m, "0.1.0", "149.0.6", "0.44.0", &dismissed(&[]));
+        assert_eq!(items.len(), 3);
         assert_eq!(items[0].id, "cyberdesk-update");
         assert_eq!(items[1].id, "cef-update");
         assert_eq!(items[1].severity, "security");
         assert!(items[1].action.is_some());
+        assert_eq!(items[2].id, "tor-update");
+        assert_eq!(items[2].severity, "security");
+        assert!(items[2].action.is_some());
     }
 
     #[test]
@@ -585,17 +651,19 @@ mod tests {
     fn future_schema_still_reads_known_fields() {
         let m = Manifest::parse(FUTURE_SCHEMA).expect("future schema is read best-effort");
         assert!(m.schema > SCHEMA_SUPPORTED);
-        let items = build_items(&m, "0.1.0", "149.0.6", &dismissed(&[]));
-        // The CEF item has no notes_url in this fixture → no action.
+        let items = build_items(&m, "0.1.0", "149.0.6", "0.44.0", &dismissed(&[]));
+        // The CEF item has no notes_url in this fixture → no action. No `tor` key
+        // here either, so no tor item (absent-component safety).
         assert_eq!(items.len(), 2);
         assert!(items[1].action.is_none());
+        assert!(!items.iter().any(|i| i.id == "tor-update"));
     }
 
     #[test]
     fn up_to_date_yields_no_items() {
         let m = Manifest::parse(GOOD).unwrap();
-        // Running exactly the latest / recommended → nothing to show.
-        let items = build_items(&m, "0.9.0", "150.0.1", &dismissed(&[]));
+        // Running exactly the latest / recommended (incl. arti) → nothing to show.
+        let items = build_items(&m, "0.9.0", "150.0.1", "0.45.0", &dismissed(&[]));
         assert!(items.is_empty());
     }
 
@@ -603,11 +671,40 @@ mod tests {
     fn dismissal_hides_until_the_manifest_advances_past_it() {
         let m = Manifest::parse(GOOD).unwrap();
         // Dismissed at exactly the offered version → hidden.
-        let hidden = build_items(&m, "0.1.0", "149.0.6", &dismissed(&[("cyberdesk-update", "0.9.0")]));
+        let hidden = build_items(&m, "0.1.0", "149.0.6", "0.44.0", &dismissed(&[("cyberdesk-update", "0.9.0")]));
         assert!(!hidden.iter().any(|i| i.id == "cyberdesk-update"));
         // Dismissed at an OLDER version than now offered → re-appears.
-        let shown = build_items(&m, "0.1.0", "149.0.6", &dismissed(&[("cyberdesk-update", "0.8.0")]));
+        let shown = build_items(&m, "0.1.0", "149.0.6", "0.44.0", &dismissed(&[("cyberdesk-update", "0.8.0")]));
         assert!(shown.iter().any(|i| i.id == "cyberdesk-update"));
+    }
+
+    #[test]
+    fn tor_component_tracked_like_cef() {
+        let m = Manifest::parse(GOOD).unwrap();
+        // Running arti older than recommended → a security tor item with a link.
+        let items = build_items(&m, "0.9.0", "150.0.1", "0.44.0", &dismissed(&[]));
+        let tor = items
+            .iter()
+            .find(|i| i.id == "tor-update")
+            .expect("tor item present when arti is behind");
+        assert_eq!(tor.severity, "security");
+        assert_eq!(tor.target_version, "0.45.0");
+        assert!(tor.action.is_some());
+        // Running exactly the recommended arti → no tor item.
+        let none = build_items(&m, "0.9.0", "150.0.1", "0.45.0", &dismissed(&[]));
+        assert!(!none.iter().any(|i| i.id == "tor-update"));
+        // Dismissed at the offered version → hidden until the manifest advances.
+        let hidden = build_items(&m, "0.9.0", "150.0.1", "0.44.0", &dismissed(&[("tor-update", "0.45.0")]));
+        assert!(!hidden.iter().any(|i| i.id == "tor-update"));
+    }
+
+    #[test]
+    fn manifest_without_tor_component_yields_no_tor_item() {
+        // An older manifest with no `tor` key must produce no tor item, no panic
+        // (offline / pre-tor cached manifest safety).
+        let m = Manifest::parse(FUTURE_SCHEMA).unwrap(); // only a `cef` component
+        let items = build_items(&m, "0.1.0", "149.0.6", "0.44.0", &dismissed(&[]));
+        assert!(!items.iter().any(|i| i.id == "tor-update"));
     }
 
     #[test]

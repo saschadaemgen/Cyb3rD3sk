@@ -2,6 +2,51 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0029 - 2026-07-10 - CD-15-HOTFIX addendum: track the embedded Tor (arti) engine as an update component; derive its version from Cargo.lock
+
+Sascha's call-out: the CD-13 update info area tracked CyberDesk and the CEF core but
+NOT the embedded Tor engine — and an outdated Tor client is security-critical (arti
+can even declare itself obsolete). So the arti-client package is now a tracked
+update component, surfaced exactly like CEF.
+
+**Manifest — no schema change.** The CD-13 `components` object is already a generic
+`{<id>: {recommended, reason?, notes_url?}}` map (D-0023), so a `"tor"` key needs no
+struct/schema change; `schema` stays `1`. `build_items` gained a `m.components.get
+("tor")` branch mirroring `cef` (id `tor-update`, title "Tor engine update
+recommended", the same `security`/`recommended` severity, the same versioned-dismiss
+watermark and glyph-count contribution). Absent `tor` (older manifest / offline
+cached manifest) → skipped, no item, no error — the same fail-safe as cef.
+
+**The one genuinely new decision — the RUNNING arti version source.** CEF exposes
+compile-time constants (`cef::sys::CEF_VERSION_*`), so `current_cef_version()` reads
+the truth for free. arti-client 0.44.0 exposes **no** equivalent public version
+constant (verified against the pinned crate source — its only `pub const`s are
+unrelated, and it does not re-export its `CARGO_PKG_VERSION`). And `env!("CARGO_PKG_
+VERSION")` in our crate yields CyberDesk's own version, not the dependency's; Cargo
+provides no `env!`-accessible dependency-version var for a normal (non-`links`) dep.
+
+Rather than hand-restate the version in a `const` (which silently drifts on `cargo
+update`), a **`build.rs`** — the repo's first build script — reads the RESOLVED
+`arti-client` version from the committed `Cargo.lock` (a small dependency-free line
+scan of the `[[package]]` blocks) and injects it via `cargo:rustc-env=
+ARTI_CLIENT_VERSION`; `current_tor_version()` reads it with `env!`. This derives the
+authoritative running version and auto-syncs to the lockfile — the same "derive,
+don't restate" spirit as CD-13's CEF constants (the harder, correct path, D-0006).
+If the lockfile can't be read the script emits `"unknown"` and never fails the build.
+`rerun-if-changed=Cargo.lock` keeps it cheap. Currently resolves `0.44.0`.
+
+**Honesty.** The reported version is the arti-client **crate** version (the engine
+CyberDesk links) — not the standalone `arti` CLI nor the Tor network protocol
+version. The info panel labels the row "Tor engine (arti)".
+
+**Verified (no network):** unit tests for the tor parse/compare + absent-component
+safety; an offline run against a local manifest with a higher `tor.recommended`
+showed the glyph count include the item (`count=1 items=["tor-update"]`, `cur_tor=
+0.44.0` from `build.rs`); and a headless render of the real `info.js` showed the
+"Tor engine (arti)" status row ("0.45.0 available" when behind, "up to date" when
+matched, omitted when the `tor` object is absent). Amends the D-0023 schema note:
+`components` now carries `cef` AND `tor`.
+
 ## D-0028 - 2026-07-10 - CD-15-HOTFIX: file logging, never-block-UI, async proxy on context init, bootstrap timeout + Failed state (amends D-0027)
 
 CD-15 was built but FAILED on Sascha's live machine: the admin Tor status sat on

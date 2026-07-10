@@ -89,6 +89,10 @@
     var cef = snap.cef || {};
     var cefVer = (cef.version || "?") + (cef.chromium ? " · Chromium " + cef.chromium : "");
     statusEl.appendChild(statusRow("CEF core", cefVer, !!cef.up_to_date, cef.recommended));
+    var tor = snap.tor || {};
+    if (tor.version) {
+      statusEl.appendChild(statusRow("Tor engine (arti)", tor.version, !!tor.up_to_date, tor.recommended));
+    }
 
     if (!snap.have_feed && (!snap.items || snap.items.length === 0)) {
       statusEl.appendChild(el("p", "empty", "No feed data yet — the update manifest could not be reached."));
