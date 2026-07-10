@@ -270,8 +270,13 @@ pub fn log_snapshot_json(v: &serde_json::Value) -> String {
 fn default_filter() -> String {
     let arti = match std::env::var("CYBERDESK_TOR_TRACE").ok().as_deref() {
         None | Some("") | Some("0") => "info",
-        Some("trace") | Some("2") => "trace",
-        _ => "debug", // any other truthy value → debug
+        // `debug` is DELIBERATELY not the default when set: the consensus-fetch
+        // lifecycle (`tor_dirclient::get_resource`, the `FirstHopClockSkew` reactor
+        // ctrl message, the `BEGIN_DIR` cell) is logged at TRACE, so debug is
+        // insufficient to see the silent 15% stall (HOTFIX 3). Any truthy value maps
+        // to trace; pass `=debug` explicitly only if the lower verbosity is wanted.
+        Some("debug") => "debug",
+        _ => "trace",
     };
     // The arti/tor crate targets that carry the bootstrap detail. `tor_dirmgr` covers
     // its `::state` / `::bootstrap` submodules by prefix. `tor_dirclient` is the
