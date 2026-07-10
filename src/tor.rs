@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use arti_client::config::CfgPath;
 use arti_client::{TorAddr, TorClient, TorClientConfig};
+use futures::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
@@ -85,6 +86,14 @@ fn set_failed(reason: &str) {
     tracing::error!(reason, "tor engine FAILED");
     *failed_reason().lock().unwrap() = reason.to_string();
     STATUS.store(STATUS_FAILED, Ordering::SeqCst);
+}
+
+/// The last arti bootstrap status line we saw (CD-15 HOTFIX 2), so a timeout reports
+/// arti's REAL last progress instead of blaming the network. Empty until the first
+/// status event.
+fn last_status() -> &'static Mutex<String> {
+    static S: OnceLock<Mutex<String>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(String::new()))
 }
 
 /// The current failure reason (empty unless `status() == STATUS_FAILED`).
@@ -179,14 +188,29 @@ fn run() {
     tracing::info!("tor-engine: runtime built, entering block_on");
 
     rt.block_on(async {
+        // Confirm the runtime arti will actually run on (CD-15 HOTFIX 2): the SAME
+        // multi-thread, io+time-enabled runtime we are blocking on. `builder()` (below)
+        // grabs `PreferredRuntime::current()` == this runtime. The type is opaque here
+        // (rustls vs native-tls is a compile-time cfg; our lock pins rustls).
+        tracing::info!(
+            flavour = "multi_thread",
+            enable_all = true,
+            worker_threads = 2,
+            arti_runtime = std::any::type_name::<tor_rtcompat::PreferredRuntime>(),
+            "tor-engine: runtime + arti runtime type"
+        );
+
         // Bind the per-slot SOCKS listeners up front (ports live during bootstrap);
         // each waits for the base client to be ready before it will relay.
         for id in 0..MAX_SLOTS {
             tokio::spawn(socks_listener(socks_port(id)));
         }
 
-        // Bootstrap off the shell thread, with a hard timeout so a Tor-blocking
-        // network / bad cache dir surfaces as FAILED instead of infinite connecting.
+        // Bootstrap off the shell thread, with a hard timeout so a stall surfaces as
+        // FAILED instead of infinite connecting. Deep instrumentation (HOTFIX 2): we
+        // split `create_bootstrapped` into create-unbootstrapped + `bootstrap()` so we
+        // can subscribe to arti's live progress BEFORE any network I/O, and log every
+        // phase / blockage — the exact hang point (channel connect / guard / TLS).
         let config = match tor_config() {
             Ok(c) => c,
             Err(e) => {
@@ -195,20 +219,66 @@ fn run() {
                 return;
             }
         };
+
+        let client: Arc<Client> = match TorClient::builder()
+            .config(config)
+            .create_unbootstrapped_async()
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                set_failed(&format!("client construction error: {e}"));
+                std::future::pending::<()>().await;
+                return;
+            }
+        };
+
+        // Live progress logger: BootstrapStatus is a Stream, seeded immediately then on
+        // every change. Its Display is "<pct>%: <conn>; <dir>" (or "Stuck at …" / clock
+        // skew). We also stash the last line so a timeout reports arti's REAL state.
+        let mut events = client.bootstrap_events();
+        tokio::spawn(async move {
+            while let Some(st) = events.next().await {
+                let pct = (st.as_frac() * 100.0).round() as u32;
+                let line = format!("{st}");
+                *last_status().lock().unwrap() = line.clone();
+                match st.blocked() {
+                    Some(b) => {
+                        tracing::warn!(pct, kind = %b.kind(), "tor bootstrap: BLOCKED — {line}")
+                    }
+                    None => {
+                        tracing::info!(pct, ready = st.ready_for_traffic(), "tor bootstrap: {line}")
+                    }
+                }
+            }
+            tracing::debug!("tor bootstrap: status stream closed");
+        });
+
         let timeout = bootstrap_timeout();
-        tracing::info!(timeout_s = timeout.as_secs(), "tor bootstrap: begin");
-        let boot = tokio::time::timeout(timeout, TorClient::create_bootstrapped(config));
-        match boot.await {
-            Ok(Ok(client)) => {
+        tracing::info!(timeout_s = timeout.as_secs(), "tor bootstrap: begin (driving arti bootstrap)");
+        match tokio::time::timeout(timeout, client.bootstrap()).await {
+            Ok(Ok(())) => {
+                // The SAME bootstrapped client serves traffic: stored as the base; each
+                // per-slot SOCKS listener rides its isolated_client().
                 *base_client().lock().unwrap() = Some(client);
                 STATUS.store(STATUS_READY, Ordering::SeqCst);
                 tracing::info!("tor bootstrap: READY");
             }
             Ok(Err(e)) => set_failed(&format!("bootstrap error: {e}")),
-            Err(_elapsed) => set_failed(&format!(
-                "bootstrap timed out after {}s (network blocking Tor?)",
-                timeout.as_secs()
-            )),
+            Err(_elapsed) => {
+                // Honest reason (HOTFIX 2): report arti's real last status, do NOT blame
+                // the network (a blocked network makes arti RETRY + log; a stall does not).
+                let last = last_status().lock().unwrap().clone();
+                let last = if last.is_empty() {
+                    "no status received from arti".to_string()
+                } else {
+                    last
+                };
+                set_failed(&format!(
+                    "bootstrap timed out after {}s — arti did not finish bootstrapping; last status: {last}",
+                    timeout.as_secs()
+                ));
+            }
         }
 
         // Keep the runtime (and the SOCKS listeners) alive for the process life.

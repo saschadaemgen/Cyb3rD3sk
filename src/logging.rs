@@ -260,6 +260,56 @@ pub fn log_snapshot_json(v: &serde_json::Value) -> String {
 
 // --- Subscriber install -----------------------------------------------------
 
+/// The default env-filter (used when `RUST_LOG` is unset). Our lifecycle at debug;
+/// arti's crates normally at info (bootstrap milestones + errors). `CYBERDESK_TOR_TRACE`
+/// raises the arti/tor crates to **debug** (or **trace** if it is `trace`/`2`) so a
+/// stalled bootstrap shows the exact hang point — the channel connect, the guard
+/// pick, the TLS handshake — which live below info (CD-15 HOTFIX 2).
+fn default_filter() -> String {
+    let arti = match std::env::var("CYBERDESK_TOR_TRACE").ok().as_deref() {
+        None | Some("") | Some("0") => "info",
+        Some("trace") | Some("2") => "trace",
+        _ => "debug", // any other truthy value → debug
+    };
+    // The arti/tor crate targets that carry the bootstrap detail.
+    let tor_targets = [
+        "arti_client",
+        "tor_dirmgr",
+        "tor_guardmgr",
+        "tor_chanmgr",
+        "tor_proto",
+        "tor_circmgr",
+        "tor_netdir",
+        "tor_netdoc",
+    ];
+    let mut f = String::from("info,cyberdesk=debug");
+    for t in tor_targets {
+        f.push_str(&format!(",{t}={arti}"));
+    }
+    f
+}
+
+/// Route panics through `tracing` so a swallowed panic (e.g. inside a tokio-spawned
+/// arti task, which tokio catches and would otherwise print only to a non-existent
+/// console) is captured in the log file (CD-15 HOTFIX 2). Installed once.
+fn install_panic_hook() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("<non-string panic payload>");
+        tracing::error!(location = %loc, "PANIC: {msg}");
+        prev(info);
+    }));
+}
+
 /// Install the file + ring subscriber once (browser process only, before anything
 /// logs). The non-blocking writer's `WorkerGuard` is kept for the process lifetime so
 /// buffered lines are flushed.
@@ -272,13 +322,7 @@ pub fn init() {
     let appender = tracing_appender::rolling::daily(&dir, "cyberdesk.log");
     let (writer, guard) = tracing_appender::non_blocking(appender);
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        // Our lifecycle at debug; arti's bootstrap / dir / guard / channel managers
-        // at info (bootstrap milestones + errors); everything else quiet.
-        EnvFilter::new(
-            "info,cyberdesk=debug,arti_client=info,tor_dirmgr=info,tor_guardmgr=info,tor_chanmgr=info,tor_proto=info",
-        )
-    });
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter()));
 
     // Ensure the ring exists before the subscriber starts feeding it.
     let _ = ring();
@@ -299,7 +343,12 @@ pub fn init() {
 
     if installed {
         let _ = GUARD.set(guard);
-        tracing::info!(location = %log_location(), "logging initialised (rolling daily cyberdesk.log + ring buffer)");
+        install_panic_hook();
+        tracing::info!(
+            location = %log_location(),
+            tor_trace = std::env::var("CYBERDESK_TOR_TRACE").is_ok(),
+            "logging initialised (rolling daily cyberdesk.log + ring buffer)"
+        );
     }
 }
 
