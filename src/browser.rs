@@ -1120,6 +1120,10 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
             "reason": crate::tor::fail_reason(),
         })
         .to_string()),
+        // The MF-zone viewer's log stream (CD-18): the last ring-buffer lines matching
+        // an optional {filter:{target_prefix,level_min}, since_seq}. Pull-based +
+        // incremental — the page sends back the highest seq it has seen.
+        "get_log_lines" => Ok(crate::logging::log_snapshot_json(&v)),
         other => Err((4, format!("unknown cmd: {other}"))),
     }
 }
