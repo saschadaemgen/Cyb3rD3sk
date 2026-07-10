@@ -316,8 +316,9 @@ ring buffer via one command.
 ### `get_log_lines` (view -> host)
 
 - Request: `{"cmd":"get_log_lines"[,"since_seq":<int>][,"filter":{"target_prefix":<str>,"level_min":<str>}]}`.
-  `since_seq` returns only records with a higher sequence (incremental polling — the
-  page sends back the highest seq it has seen; omit / `0` for the whole buffer).
+  `since_seq` returns only records with a **strictly higher** `seq` (incremental
+  polling — the page sends back the highest seq it has seen). **Omit** `since_seq`
+  for the whole buffer (sending `0` would drop the record with `seq` 0).
   `filter.target_prefix` keeps records whose `tracing` target starts with the prefix
   (e.g. `tor_`, `cyberdesk::tor`); `filter.level_min` is a min severity word
   (`trace`/`debug`/`info`/`warn`/`error`).

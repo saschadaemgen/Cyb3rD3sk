@@ -286,10 +286,11 @@ shadow, index glyphs — can be eyeballed headlessly (e.g. `=3` on the ultrawide
 `CYBERDESK_CAPTURE_UNITS=2,1,…` overrides it with an explicit per-column
 width-unit sequence (CD-10 double slots), and `CYBERDESK_CAPTURE_PENDING=N` marks
 the first N columns as restored-pending (the scheme-colored placeholder dot).
-`CYBERDESK_CAPTURE_CLOSE=1` overlays a per-column **close orb** (ring + cross) and
-`CYBERDESK_CAPTURE_DRAG=1` a **favorite-drag** sample (gutter drop zones + ghost) so
-the CD-12 overlays can be eyeballed headlessly. `CYBERDESK_CAPTURE_INFO=idle|active`
-draws the CD-13 **info glyph** (idle ring / filled disc + pulse + count).
+`CYBERDESK_CAPTURE_DRAG=1` overlays a **favorite-drag** sample (gutter drop zones +
+ghost) so the CD-12 overlay can be eyeballed headlessly. `CYBERDESK_CAPTURE_INFO=idle|active`
+draws the CD-13 **info glyph** (idle ring / filled disc + pulse + count). (The
+`CYBERDESK_CAPTURE_CLOSE` knob was retired with the shell-drawn close orb in CD-18 —
+closing is now an in-page icon.)
 
 ---
 

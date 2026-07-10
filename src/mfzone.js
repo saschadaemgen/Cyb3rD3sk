@@ -135,7 +135,11 @@
 
   // --- Polling ------------------------------------------------------------
   function pollLog() {
-    return query({ cmd: "get_log_lines", since_seq: lastSeq < 0 ? 0 : lastSeq }).then(function (r) {
+    // First poll: OMIT since_seq to get the whole buffer (the ring filters strictly
+    // `seq > since_seq`, so sending 0 would drop record seq 0). Later polls are
+    // incremental from the highest seq seen.
+    var req = lastSeq < 0 ? { cmd: "get_log_lines" } : { cmd: "get_log_lines", since_seq: lastSeq };
+    return query(req).then(function (r) {
       var fresh; try { fresh = JSON.parse(r); } catch (x) { return; }
       if (!fresh || !fresh.length) return;
       for (var i = 0; i < fresh.length; i++) {
