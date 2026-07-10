@@ -116,6 +116,14 @@ html, body {
   background: color-mix(in srgb, var(--brand) 20%, transparent);
   box-shadow: 0 0 12px color-mix(in srgb, var(--brand) 35%, transparent);
 }
+/* Ready: connected to Tor — a distinct accent-lit shield so "protected" reads
+   apart from a merely-toggled-on shield that is still bootstrapping (CD-18). */
+.tor-orb.ready {
+  color: color-mix(in srgb, var(--accent) 85%, var(--text));
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 35%, transparent);
+}
 .tor-orb.connecting { animation: tor-pulse 1.4s ease-in-out infinite; }
 @keyframes tor-pulse {
   0%, 100% { opacity: 0.55; }
@@ -130,6 +138,30 @@ html, body {
   border-color: var(--warn);
   background: color-mix(in srgb, var(--warn) 18%, transparent);
   box-shadow: 0 0 10px color-mix(in srgb, var(--warn) 30%, transparent);
+}
+
+/* Per-window close icon (CD-18): an orb-sized X to the right of the Tor icon —
+   closes THIS window. Warn-tinted on hover; dimmed + disabled on the last window
+   (the host refuses to close it). Replaces the retired CD-12 corner-hover orb. */
+.close-btn {
+  flex: none;
+  width: var(--cmd-orb-size);
+  height: var(--cmd-orb-size);
+  border-radius: 50%;
+  border: 1px solid var(--panel-border);
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+  color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.close-btn:hover { color: var(--warn); border-color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
+.close-btn:active { background: color-mix(in srgb, var(--warn) 26%, transparent); }
+.close-btn.disabled, .close-btn:disabled {
+  opacity: 0.3; cursor: default; color: var(--text-dim);
+  border-color: var(--panel-border); background: color-mix(in srgb, var(--panel) 80%, transparent);
 }
 
 .capsule {

@@ -457,6 +457,19 @@ pub fn take_pending_tor_toggles() -> Vec<usize> {
     std::mem::take(&mut pending_tor_toggle().lock().unwrap())
 }
 
+/// Per-window close requests from the page's close icon (CD-18, CEF UI thread),
+/// drained by the main thread which owns the slot lifecycle (and enforces
+/// last-slot-refuses). Holds the slot ids to close.
+fn pending_close() -> &'static Mutex<Vec<usize>> {
+    static P: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Drain queued window closes (main thread).
+pub fn take_pending_closes() -> Vec<usize> {
+    std::mem::take(&mut pending_close().lock().unwrap())
+}
+
 wrap_task! {
     struct TorSpawnTask {
         slot: usize,
@@ -1135,6 +1148,13 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
         "toggle_tor" => {
             let slot = target_slot(&v);
             pending_tor_toggle().lock().unwrap().push(slot);
+            Ok(serde_json::json!({ "ok": true }).to_string())
+        }
+        // Per-window close (CD-18): the ensemble's close icon. Queued for the main
+        // thread; it enforces last-slot-refuses + neighbor promotion.
+        "close_slot" => {
+            let slot = target_slot(&v);
+            pending_close().lock().unwrap().push(slot);
             Ok(serde_json::json!({ "ok": true }).to_string())
         }
         // The Tor engine's bootstrap status + (on failure) the reason, for the

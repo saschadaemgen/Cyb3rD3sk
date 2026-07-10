@@ -2367,31 +2367,11 @@ pub fn capture(path: &str, width: u32, height: u32, theme: &crate::theme::Theme)
     queue.write_buffer(&slotlines.instance_buf, 0, bytemuck::cast_slice(&line_insts));
 
     // CYBERDESK_CAPTURE_DRAG=1 renders a sample favorite-drag overlay (CD-12): the
-    // gutter drop zones (the middle one hot) + a ghost; CYBERDESK_CAPTURE_CLOSE=1
-    // renders a per-slot close orb on each slot's top-right corner. Headless checks.
+    // gutter drop zones (the middle one hot) + a ghost. Headless check.
+    // (CD-18: the CYBERDESK_CAPTURE_CLOSE knob was retired with the shell-drawn
+    // close orb — closing is now an in-page icon, not a shell overlay.)
     let drag = DragOverlay::new(&device, format, MAX_SLOTS as u32 * 2 + 4);
     let mut drag_insts: Vec<DragInstance> = Vec::new();
-    if std::env::var("CYBERDESK_CAPTURE_CLOSE").is_ok() {
-        let d = theme.command.close_size;
-        let rad = d * 0.5;
-        let m = 8.0 + rad;
-        for r in &rects {
-            let ox = r.x + r.w - m;
-            let oy = r.y + m;
-            let rect = [ox - rad, oy - rad, d, d];
-            // Backing disc (kind 0) + ring/cross (kind 1).
-            drag_insts.push(DragInstance {
-                rect,
-                color: [0.02, 0.03, 0.05, 0.55],
-                shape: [rad, 2.0, 0.0, 0.0],
-            });
-            drag_insts.push(DragInstance {
-                rect,
-                color: [brand[0], brand[1], brand[2], 0.92],
-                shape: [rad, 1.2, 1.0, 0.0],
-            });
-        }
-    }
     if std::env::var("CYBERDESK_CAPTURE_DRAG").is_ok() {
         let g = (theme.slots.gutter).round();
         let (sy, sh) = rects.first().map(|r| (r.y, r.h)).unwrap_or((0.0, 0.0));

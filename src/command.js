@@ -32,7 +32,9 @@
     lock: '<svg viewBox="0 0 24 24" width="14" height="14"><rect x="5" y="11" width="14" height="9" rx="1.5" fill="currentColor"/><path d="M8 11V8a4 4 0 018 0v3" fill="none" stroke="currentColor" stroke-width="2"/></svg>',
     star: '<svg viewBox="0 0 24 24" width="17" height="17"><path class="star-path" d="' + STAR_PATH + '" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>',
     // A shield (privacy motif) for the per-window Tor toggle (CD-15).
-    tor: '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 3l7 3v5c0 4.6-3 7.6-7 9-4-1.4-7-4.4-7-9V6l7-3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>'
+    tor: '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 3l7 3v5c0 4.6-3 7.6-7 9-4-1.4-7-4.4-7-9V6l7-3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>',
+    // An X for the per-window close icon (CD-18).
+    close: '<svg viewBox="0 0 24 24" width="15" height="15"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
   };
 
   var band = document.getElementById("band");
@@ -45,17 +47,23 @@
   function makeEnsemble(id) {
     var el = document.createElement("div");
     el.className = "ensemble";
+    // CD-18: the anonymity (Tor) icon and the close icon are two ALWAYS-PRESENT
+    // controls sitting immediately to the RIGHT of the address capsule (the capsule
+    // is the sole flex-grow child, so they pin to its right edge). They drive THIS
+    // window only. This consolidates the CD-15 Tor glyph (moved here from the left
+    // of the capsule) and the retired CD-12 corner-hover close orb.
     el.innerHTML =
       '<div class="ens-row">' +
         '<button class="orb" data-act="go_back" title="Back" aria-label="Back">' + SVG.back + '</button>' +
         '<button class="orb" data-act="go_forward" title="Forward" aria-label="Forward">' + SVG.fwd + '</button>' +
         '<button class="orb" data-act="reload" title="Reload" aria-label="Reload">' + SVG.reload + '</button>' +
-        '<button class="tor-orb" title="Route this window through Tor" aria-label="Toggle Tor for this window" aria-pressed="false">' + SVG.tor + '</button>' +
         '<div class="capsule">' +
           '<span class="scheme neutral" aria-hidden="true">' + SVG.lock + '</span>' +
           '<input class="url" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="Search or enter address">' +
           '<button class="star" title="Favorite (Ctrl+D)" aria-label="Favorite" aria-pressed="false">' + SVG.star + '</button>' +
         '</div>' +
+        '<button class="tor-orb" title="Route this window through Tor" aria-label="Toggle Tor for this window" aria-pressed="false">' + SVG.tor + '</button>' +
+        '<button class="close-btn" title="Close this window (Ctrl+W)" aria-label="Close this window">' + SVG.close + '</button>' +
       '</div>' +
       '<div class="suggestions" role="listbox" aria-label="Suggestions"></div>';
     band.appendChild(el);
@@ -66,6 +74,7 @@
       scheme: el.querySelector(".scheme"),
       star: el.querySelector(".star"),
       tor: el.querySelector(".tor-orb"),
+      close: el.querySelector(".close-btn"),
       capsule: el.querySelector(".capsule"),
       list: el.querySelector(".suggestions"),
       currentUrl: "", currentTitle: "", pristine: "",
@@ -196,6 +205,11 @@
     e.tor.addEventListener("click", function () {
       query({ cmd: "toggle_tor", slot: e.id }).catch(function () {});
     });
+    // Per-window close (CD-18): closes THIS column. The host enforces
+    // last-slot-refuses, so the final window can't be closed away.
+    e.close.addEventListener("click", function () {
+      query({ cmd: "close_slot", slot: e.id }).catch(function () {});
+    });
     var orbs = e.el.querySelectorAll(".orb");
     for (var i = 0; i < orbs.length; i++) {
       (function (b) {
@@ -280,13 +294,20 @@
       e.el.style.left = sl.x + "px";
       e.el.style.width = sl.w + "px";
       // Tor glyph: lit when this column is on Tor; a pulse while the engine is
-      // still bootstrapping (its stream can't route until READY); a warn state if
-      // the engine failed to bootstrap (fail-closed — it can't fetch, so a plain
-      // lit shield would falsely imply working protection). CD-15 HOTFIX.
+      // still bootstrapping (its stream can't route until READY); a distinct lit
+      // "ready" state once connected; a warn state if the engine failed to bootstrap
+      // (fail-closed — it can't fetch, so a plain lit shield would falsely imply
+      // working protection). CD-15 HOTFIX / CD-18.
       e.tor.classList.toggle("on", !!sl.tor);
       e.tor.classList.toggle("connecting", !!sl.tor && torStatus === 1);
+      e.tor.classList.toggle("ready", !!sl.tor && torStatus === 2);
       e.tor.classList.toggle("failed", !!sl.tor && torStatus === 3);
       e.tor.setAttribute("aria-pressed", sl.tor ? "true" : "false");
+      // Close icon: the last window can't be closed (host refuses); dim + disable
+      // it there so the UI matches the host behavior (CD-18).
+      var lastOne = (f.slots || []).length <= 1;
+      e.close.classList.toggle("disabled", lastOne);
+      e.close.disabled = lastOne;
     }
     // Drop ensembles for slots that no longer exist.
     for (var id in ensembles) {
