@@ -1113,8 +1113,13 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
             pending_tor_toggle().lock().unwrap().push(slot);
             Ok(serde_json::json!({ "ok": true }).to_string())
         }
-        // The Tor engine's bootstrap status, for the settings readout (CD-15 Stage C).
-        "tor_status" => Ok(serde_json::json!({ "status": crate::tor::status() }).to_string()),
+        // The Tor engine's bootstrap status + (on failure) the reason, for the
+        // settings readout (CD-15 Stage C / HOTFIX). `reason` is empty unless failed.
+        "tor_status" => Ok(serde_json::json!({
+            "status": crate::tor::status(),
+            "reason": crate::tor::fail_reason(),
+        })
+        .to_string()),
         other => Err((4, format!("unknown cmd: {other}"))),
     }
 }

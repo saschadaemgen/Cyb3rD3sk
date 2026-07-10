@@ -45,8 +45,17 @@ pub const STATUS_FAILED: u8 = 3;
 static STATUS: AtomicU8 = AtomicU8::new(STATUS_IDLE);
 
 /// Hard cap on the first bootstrap (CD-15 HOTFIX): a Tor-blocking network or a bad
-/// cache dir surfaces as `Failed` instead of infinite "connecting".
-const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// cache dir surfaces as `Failed` instead of infinite "connecting". Overridable via
+/// `CYBERDESK_TOR_BOOTSTRAP_SECS` (a very slow Tor network may need longer; tests
+/// use a small value to exercise the failure path). Default 90 s.
+fn bootstrap_timeout() -> std::time::Duration {
+    let secs = std::env::var("CYBERDESK_TOR_BOOTSTRAP_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(90);
+    std::time::Duration::from_secs(secs)
+}
 
 /// The reason for `STATUS_FAILED`, surfaced in the UI. Empty unless failed.
 fn failed_reason() -> &'static Mutex<String> {
@@ -169,8 +178,9 @@ fn run() {
                 return;
             }
         };
-        tracing::info!(timeout_s = BOOTSTRAP_TIMEOUT.as_secs(), "tor bootstrap: begin");
-        let boot = tokio::time::timeout(BOOTSTRAP_TIMEOUT, TorClient::create_bootstrapped(config));
+        let timeout = bootstrap_timeout();
+        tracing::info!(timeout_s = timeout.as_secs(), "tor bootstrap: begin");
+        let boot = tokio::time::timeout(timeout, TorClient::create_bootstrapped(config));
         match boot.await {
             Ok(Ok(client)) => {
                 *base_client().lock().unwrap() = Some(client);
@@ -180,7 +190,7 @@ fn run() {
             Ok(Err(e)) => set_failed(&format!("bootstrap error: {e}")),
             Err(_elapsed) => set_failed(&format!(
                 "bootstrap timed out after {}s (network blocking Tor?)",
-                BOOTSTRAP_TIMEOUT.as_secs()
+                timeout.as_secs()
             )),
         }
 

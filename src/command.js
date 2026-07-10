@@ -280,9 +280,12 @@
       e.el.style.left = sl.x + "px";
       e.el.style.width = sl.w + "px";
       // Tor glyph: lit when this column is on Tor; a pulse while the engine is
-      // still bootstrapping (its stream can't route until READY).
+      // still bootstrapping (its stream can't route until READY); a warn state if
+      // the engine failed to bootstrap (fail-closed — it can't fetch, so a plain
+      // lit shield would falsely imply working protection). CD-15 HOTFIX.
       e.tor.classList.toggle("on", !!sl.tor);
       e.tor.classList.toggle("connecting", !!sl.tor && torStatus === 1);
+      e.tor.classList.toggle("failed", !!sl.tor && torStatus === 3);
       e.tor.setAttribute("aria-pressed", sl.tor ? "true" : "false");
     }
     // Drop ensembles for slots that no longer exist.

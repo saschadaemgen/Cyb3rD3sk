@@ -143,14 +143,27 @@
     .catch(function (err) { setStatus(String(err), true); });
 
   // Tor engine status readout (CD-15): polled while the settings page is open.
+  // On failure the engine reports a concrete reason (timeout, bad dir, …) —
+  // shown so "failed" is never a dead end (CD-15 HOTFIX Stage C).
   var torStatusEl = document.getElementById("tor-status");
+  var torReasonEl = document.getElementById("tor-reason");
   var TOR_LABELS = ["off", "connecting…", "ready", "failed"];
   function pollTorStatus() {
     query({ cmd: "tor_status" }).then(function (r) {
-      var st = 0; try { st = JSON.parse(r).status | 0; } catch (x) {}
+      var st = 0, reason = "";
+      try { var j = JSON.parse(r); st = j.status | 0; reason = j.reason || ""; } catch (x) {}
       if (torStatusEl) {
         torStatusEl.textContent = TOR_LABELS[st] || "off";
         torStatusEl.className = "tor-status s" + st;
+      }
+      if (torReasonEl) {
+        if (st === 3 && reason) {
+          torReasonEl.textContent = reason;
+          torReasonEl.hidden = false;
+        } else {
+          torReasonEl.textContent = "";
+          torReasonEl.hidden = true;
+        }
       }
     }).catch(function () {});
   }
