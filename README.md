@@ -181,10 +181,12 @@ feathered compositing, and an isolated in-shell settings surface.
   and the full Tor bootstrap (including arti's internal progress). Set `RUST_LOG` for
   more detail. Never contains secrets. **You rarely need the file:** the MF-zone
   viewer's **Tor** and **Log** tabs (below) stream the same records live in the UI.
-  For a stalled Tor bootstrap, set **`CYBERDESK_TOR_TRACE=1`** (or `=trace`) to raise
-  arti's own crates to debug/trace — the log (and the Tor tab) then show the exact
-  phase-by-phase progress (`<pct>%: connecting; fetching a consensus …`), the guard
-  pick, the TLS handshake, and any blockage reason, so a stall is never silent.
+  For a stalled Tor bootstrap, set **`CYBERDESK_TOR_TRACE=1`** to raise arti's own
+  crates to **trace** (incl. the directory-fetch layer `tor_dirclient`) — the log
+  then shows the exact phase-by-phase progress (`<pct>%: connecting; fetching a
+  consensus …`), the guard pick, the TLS handshake, the circuit build, the consensus
+  request lifecycle, and any blockage reason, so a stall is never silent. (`=1` is
+  trace because the dir-fetch detail lives there; pass `=debug` for less verbosity.)
 * **The Multifunctional (MF) zone viewer (CD-18):** the permanent right zone holds a
   tabbed live viewer — **Tor** (a Connecting/Ready/Failed+reason status header over
   the streaming Tor/arti log, so bootstrap progress is visible live and a blocked

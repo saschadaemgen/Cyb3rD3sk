@@ -2,6 +2,58 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0032 - 2026-07-10 - CD-15-HOTFIX-3: trace the directory-fetch layer; stall pinned to the "circuit built → consensus request" handoff (never issued); no arti bump possible
+
+HOTFIX 2 narrowed the Tor stall to the consensus fetch (arti reaches "15%:
+connecting successfully; directory is fetching a consensus" then stalls). HOTFIX 3
+made that step observable and audited arti's dir-fetch path crate-source-first.
+
+**The silent step, now traced.** The crate that actually issues the HTTP-over-Tor
+directory request — `tor_dirclient` — was not in our trace filter, and its whole
+lifecycle logs at TRACE (`get_resource` is `#[instrument(level="trace")]`). Added
+`tor_dirclient` + `tor_memquota` to the `CYBERDESK_TOR_TRACE` target set, and — the
+key fix — `CYBERDESK_TOR_TRACE=1` now maps to **trace** (debug was insufficient to
+see the silent step; pass `=debug` explicitly for the lower verbosity). `tor_dirmgr`
+already covers its `::state`/`::bootstrap` submodules by prefix.
+
+**The exact arti call chain after circuits build** (all in the pinned 0.44.0
+sources): `tor_dirmgr::bootstrap::fetch_single` → `tor_dirclient::get_resource`
+(lib.rs:159, the sole request issuer) → `circ_mgr.get_or_launch_dir()` (get the
+one-hop dir circuit) → `req.check_circuit()` → `tunnel.first_hop_clock_skew()`
+(tor_proto circuit.rs:512, a reactor ctrl message + `rx.await`) →
+`begin_dir_stream()` (5 s, optimistic) → `send_request` (writes the GET) → read
+(10 s). There are exactly four awaits between "circuit built" and "request on the
+wire"; only ONE is unbounded and silent: `first_hop_clock_skew()`.
+
+**What the trace showed (reproduced locally, same signature as Sascha's log).**
+Channels open to 3 fallback dir relays, Tor link handshakes complete, the one-hop
+dir circuits BUILD ("received CREATED_FAST" → "Handshake complete; circuit
+created") — then `tor_dirclient` never advances to `begin_dir_stream`, so the
+consensus request is NEVER issued and the built circuit is reaped unused at ~60 s
+("DESTROY: too dirty or old"). Discriminated to **H2**: `get_resource` reaches
+`check_circuit → first_hop_clock_skew()`; the circuit reactor RECEIVES the
+`FirstHopClockSkew { answer }` ctrl message but never completes the `answer` sender,
+and no `BEGIN_DIR` cell is ever sent (0 markers). The H1 signature (a
+`tor_circmgr` ~60 s "All tunnel attempts failed due to timeout" warn) was ABSENT —
+consistent with the silent, no-retry character.
+
+**Honest scope — no root-cause code fix shipped, deliberately (do-not-guess rule).**
+(a) No version bump is possible: arti-client 0.44.0 is the LATEST published release
+(Arti 2.5.0, 2026-06-30 — no 0.45.0/0.44.1), verified on crates.io + the arti
+CHANGELOG mirror; no changelog documents a matching dir-fetch/bootstrap fix (none
+can — nothing newer exists). (b) No config gate: our `tor_config()` sets only the
+state/cache dirs (D-0028); everything else is `TorClientConfig` defaults;
+`tor_memquota` is disabled by default; the fallback-dir ORPorts (:8443/:9001) are
+not restricted; the RW store lock is owned (reaching "fetching a consensus" proves
+it). (c) The hang is inside arti's reactor, and since arti 0.44.0 bootstraps
+normally for the general population, the local H2 repro is very likely CONFOUNDED by
+the sandbox (future clock / restricted network) — so it is NOT asserted as Sascha's
+cause. Sascha's `CYBERDESK_TOR_TRACE=1` (now trace) log will pin his exact case
+(H1 vs H2 vs request-sent-no-response), which decides the fix; if it is the arti
+`first_hop_clock_skew` reactor hang, that is an arti issue to file (no fix our side,
+no newer arti). **arti runtime/TLS/version requirements (D-0031) stand; the pin is
+0.44.0 = latest.** Fail-closed intact throughout.
+
 ## D-0031 - 2026-07-10 - CD-15-HOTFIX-2: deep arti bootstrap instrumentation; runtime/TLS proven correct, stall narrowed to the consensus fetch; runtime hard-pinned to rustls
 
 Tor never reached Ready on Sascha's machine, yet official Tor Browser connects and
