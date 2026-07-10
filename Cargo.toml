@@ -33,7 +33,12 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 # Embedded Tor engine (CD-15, D-0026) — pure-Rust Tor via arti-client, rustls
 # (no OpenSSL), on a background tokio runtime. Heavy but justified by the
 # per-window Tor feature; the reasoned dependency exception is recorded in D-0026.
-arti-client = { version = "0.44", default-features = false, features = ["tokio", "rustls"] }
+# `compression` is a DEFAULT arti-client feature and is REQUIRED for bootstrap: Tor
+# directory caches serve the consensus compressed (zstd/lzma/zlib), and without it
+# arti cannot inflate the response — the fetch silently stalls at 15% (D-0033). Do
+# NOT drop it. (Needs a C toolchain for the zstd/xz codecs — MSVC, already present
+# for CEF.)
+arti-client = { version = "0.44", default-features = false, features = ["tokio", "rustls", "compression"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "io-util", "sync", "time"] }
 # File logging (CD-15 HOTFIX): a windowed app has no visible stderr. `tracing` is
 # chosen over `log`+fern because arti/tokio already emit `tracing` events, so one
