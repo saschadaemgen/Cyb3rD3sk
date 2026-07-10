@@ -2,6 +2,85 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0028 - 2026-07-10 - CD-15-HOTFIX: file logging, never-block-UI, async proxy on context init, bootstrap timeout + Failed state (amends D-0027)
+
+CD-15 was built but FAILED on Sascha's live machine: the admin Tor status sat on
+"connecting" forever, the whole front-end froze (no browser could be opened), and
+there was no log to diagnose with. This hotfix makes CD-15 actually work. It
+precedes CD-15 acceptance (Sascha re-runs the leak checklist afterwards).
+
+**File logging first (measure, don't guess).** A windowed release build has no
+visible stderr, so every failure was silent. Added a rolling-daily file log via
+`tracing` at `%LOCALAPPDATA%\CyberDesk\logs\cyberdesk.log` (dated, non-blocking, no
+ANSI; `RUST_LOG` overrides the default `info,cyberdesk=debug,arti…=info` filter).
+`tracing` is the deliberate pick: arti and tokio already emit `tracing`, so ONE
+subscriber captures our lifecycle logs AND arti's internal bootstrap/dirmgr
+progress. The whole Tor lifecycle is logged verbosely (runtime build, SOCKS bind,
+state/cache dirs, bootstrap begin/ready/failed+reason, context create, proxy
+applied, browser create). This log is what found the root cause below. Never logs
+secrets. General debugging infrastructure for all future work.
+
+**ROOT CAUSE of the freeze — a NULL error out-param.** CEF's
+`RequestContext::SetPreference` returns false when handed a NULL `error` pointer,
+and cef-rs's `CefString::default()` is `Borrowed(None)` which marshals to null. So
+EVERY per-context pref set silently failed (returned 0 with an empty error string).
+The `proxy` pref never applied; the fail-closed guard (D-0027) then destroyed the
+Tor browser — and with Tor as the new-window default that killed every column,
+i.e. "frozen, nothing opens." Fix: pass a REAL error buffer (a `BorrowedMut` over a
+stack `cef_string_t`) to every `set_preference`, through one `apply_pref` helper;
+the set now succeeds and any genuine error is captured and logged instead of lost.
+Confirmed offline across repeated runs: `proxy_ok=true`.
+
+**Proxy applied ASYNC, in the context-init callback.** A freshly created
+`CefRequestContext` initializes asynchronously; `SetPreference` no-ops until it is
+ready. The prefs moved out of the synchronous create path into a
+`RequestContextHandler::on_request_context_initialized` (`TorContextHandler`). This
+is also exactly the right fail-closed moment: the browser's network requests wait
+for context initialization, so the proxy is on the context BEFORE any traffic. If
+the proxy set ever fails there (must not, on an initialized context), the handler
+closes the slot rather than let it reach the network directly.
+
+**Never block the UI thread; create the browser immediately.** Reaffirmed and
+verified: `tor::init` spawns the background `tor-engine` thread; `run()` does
+`block_on` on THAT thread; `toggle_tor` returns immediately and posts browser
+creation to the CEF UI thread. The Tor browser is created IMMEDIATELY under its
+proxied context, NOT gated on arti bootstrap — its first URL is the local
+`cyberdesk://start` page (no network), and a real fetch simply cannot complete
+until arti is READY (safe — fail-closed, never a direct fetch). "Fail-closed" here
+means *the proxy is applied to the context*, not *wait for bootstrap*.
+
+**Never "connecting" forever — timeout + terminal Failed{reason}.** Arti bootstrap
+now runs under a `tokio::time::timeout` (default 90 s, overridable via
+`CYBERDESK_TOR_BOOTSTRAP_SECS` for very slow Tor networks / tests); a timeout or
+error sets a terminal `Failed{reason}` state, never infinite `Bootstrapping`. Arti
+is given an explicit, known-writable state + cache dir under the app data dir via
+`CfgPath::new_literal` — the default config's `${ARTI_*}` path variables must
+resolve at runtime and were a likely Windows stall. Verified offline: a 4 s cap on
+a Tor-blocked network yields `Failed{"bootstrap timed out after 4s…"}`.
+
+**WebRTC leak checklist — corrected (amends D-0027).** D-0027 listed three WebRTC
+prefs and left "do `webrtc.*` apply per request-context in CEF 149?" as an open
+question for the live run. Now answered from the readable error strings:
+`webrtc.ip_handling_policy = "disable_non_proxied_udp"` **does** apply per-context
+(confirmed `webrtc_ok=true`) — that single policy blocks any non-proxied UDP path,
+which is the WebRTC leak guard. The other two (`webrtc.multiple_routes_enabled`,
+`webrtc.nonproxied_udp_enabled`) are **unregistered preferences in CEF 149** — they
+only logged "Trying to modify an unregistered preference" and did nothing, so they
+were removed. The proxy pref remains the fail-closed guarantee.
+
+**Status display reflects reality.** The `tor_status` IPC gained a `reason` field
+(empty unless failed). Settings shows the concrete failure reason under the status
+pill (so "failed" is never a dead end) and re-polls every 2 s. The per-window Tor
+glyph shows a distinct warn state when the engine FAILED — a lit shield must never
+imply protection that isn't there (it is fail-closed and cannot fetch). Wire-format
+change: `tor_status` response is now `{status, reason}`.
+
+**Honesty (unchanged, restated).** This is still not Tor-Browser-grade: it hides the
+IP but does not add anti-fingerprinting or change the TLS-layer fingerprint. The
+routing/WebRTC/DNS/two-circuit checklist is still verified live on Sascha's
+networked machine — the offline work here proves the UI never freezes and status
+reaches Ready or Failed, not that traffic actually exits via Tor.
+
 ## D-0027 - 2026-07-10 - CD-15: per-window Tor via per-CefRequestContext proxy + the leak checklist + honest scope
 
 The per-window switching, the leak checklist, and the honest-scope UI on top of

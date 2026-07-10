@@ -44,13 +44,20 @@ feathered compositing, and an isolated in-shell settings surface.
   routes **that window** through the Tor network (embedded **arti**, pure-Rust Tor, on
   a background runtime) via its own local SOCKS circuit — the glyph lights and pulses
   while the engine bootstraps, and other windows are unaffected (per-`CefRequestContext`
-  proxy, so no "proxy changes all windows" bug). Each Tor window is on its **own
-  circuit** (two Tor windows are unlinkable), a leak checklist is enforced per context
-  (SOCKS proxy, WebRTC constrained, QUIC off, remote DNS), and the wiring is
-  **fail-closed** (a slot never silently falls back to a direct connection — verified
-  by an adversarial security review that caught three real leaks). Settings expose the
-  engine switch, a "route new windows through Tor by default" toggle, and a live status
-  readout. **Honest scope:** Tor mode hides your IP but is **not** Tor-Browser-grade —
+  proxy, so no "proxy changes all windows" bug). The browser opens **immediately**
+  under its proxied context (the proxy is applied to the context before any request,
+  so it never falls back to a direct connection); it just can't fetch a real page
+  until bootstrap is **ready**. Bootstrap has a **timeout** (default 90 s, override
+  with `CYBERDESK_TOR_BOOTSTRAP_SECS`): if the network blocks Tor the status becomes
+  **failed** with a reason — never an endless "connecting", and the glyph turns to a
+  warn state so a lit shield never implies protection that isn't there. Each Tor
+  window is on its **own circuit** (two Tor windows are unlinkable), a leak checklist
+  is enforced per context (SOCKS proxy, WebRTC `ip_handling_policy` constrained, QUIC
+  off, remote DNS), and the wiring is **fail-closed** (a slot never silently falls
+  back to a direct connection — verified by an adversarial security review that caught
+  three real leaks). Settings expose the engine switch, a "route new windows through
+  Tor by default" toggle, and a live status readout (with the failure reason).
+  **Honest scope:** Tor mode hides your IP but is **not** Tor-Browser-grade —
   it does not provide anti-fingerprinting or change the TLS-layer fingerprint (browser
   hardening is a separate upcoming feature). *This is the host's second sanctioned
   outbound path (D-0004 → D-0027); the live routing/leak checks run on the maintainer's
@@ -166,6 +173,11 @@ feathered compositing, and an isolated in-shell settings surface.
   lives in a schema-versioned SQLite store under `%LOCALAPPDATA%\CyberDesk\` —
   settings, local history and favorites (D-0014); open websites are **not** saved
   (CD-14, D-0025). All local, no sync.
+* **Diagnostics log:** a windowed release build has no console, so a rolling-daily
+  log is written to `%LOCALAPPDATA%\CyberDesk\logs\cyberdesk.log` (dated suffix). It
+  captures the app lifecycle and the full Tor bootstrap (including arti's internal
+  progress) — the place to look if Tor won't connect. Set `RUST_LOG` for more
+  detail. Never contains secrets.
 
 The accelerated (zero-copy GPU) OSR path was researched; CyberDesk stays on the
 CPU path for now — see `docs/cyberdesk-decisions.md` (D-0009).
