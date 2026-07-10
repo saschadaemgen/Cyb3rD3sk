@@ -34,8 +34,12 @@ use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 use crate::slots::MAX_SLOTS;
 
-/// A bootstrapped Tor client on arti's preferred (tokio) runtime.
-type Client = TorClient<tor_rtcompat::PreferredRuntime>;
+/// A bootstrapped Tor client on the tokio + **rustls** runtime. Named explicitly
+/// (not `PreferredRuntime`) so a future dependency that enables tor-rtcompat's
+/// `native-tls` feature can't SILENTLY flip our TLS backend via Cargo's global
+/// feature unification (`PreferredRuntime` prefers native-tls when both are present).
+/// This also makes the concrete runtime `Debug`-loggable (HOTFIX 2).
+type Client = TorClient<tor_rtcompat::tokio::TokioRustlsRuntime>;
 
 /// Engine status (lock-free, read by the UI / Tor glyph).
 pub const STATUS_IDLE: u8 = 0; // never started (Tor engine off / not yet used)
@@ -188,18 +192,6 @@ fn run() {
     tracing::info!("tor-engine: runtime built, entering block_on");
 
     rt.block_on(async {
-        // Confirm the runtime arti will actually run on (CD-15 HOTFIX 2): the SAME
-        // multi-thread, io+time-enabled runtime we are blocking on. `builder()` (below)
-        // grabs `PreferredRuntime::current()` == this runtime. The type is opaque here
-        // (rustls vs native-tls is a compile-time cfg; our lock pins rustls).
-        tracing::info!(
-            flavour = "multi_thread",
-            enable_all = true,
-            worker_threads = 2,
-            arti_runtime = std::any::type_name::<tor_rtcompat::PreferredRuntime>(),
-            "tor-engine: runtime + arti runtime type"
-        );
-
         // Bind the per-slot SOCKS listeners up front (ports live during bootstrap);
         // each waits for the base client to be ready before it will relay.
         for id in 0..MAX_SLOTS {
@@ -220,7 +212,26 @@ fn run() {
             }
         };
 
-        let client: Arc<Client> = match TorClient::builder()
+        // Build the TorClient on an EXPLICIT tokio+rustls runtime handle taken from the
+        // runtime we are blocking on — the SAME driven runtime that runs the SOCKS
+        // listeners above. This proves (and logs) exactly which runtime + TLS backend
+        // arti uses, and rules out any handle mismatch (HOTFIX 2 suspect 1).
+        let arti_rt = match tor_rtcompat::tokio::TokioRustlsRuntime::current() {
+            Ok(r) => r,
+            Err(e) => {
+                set_failed(&format!("arti runtime handle error: {e}"));
+                std::future::pending::<()>().await;
+                return;
+            }
+        };
+        tracing::info!(
+            runtime = ?arti_rt,
+            runtime_type = std::any::type_name::<tor_rtcompat::tokio::TokioRustlsRuntime>(),
+            worker_threads = 2,
+            enable_all = true,
+            "tor-engine: arti runtime (tokio + rustls), same handle as the driven block_on"
+        );
+        let client: Arc<Client> = match TorClient::with_runtime(arti_rt)
             .config(config)
             .create_unbootstrapped_async()
             .await
