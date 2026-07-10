@@ -11,6 +11,7 @@
 
 mod app;
 mod browser;
+mod logging;
 mod memory;
 mod pulsegrid;
 mod renderer;
@@ -44,6 +45,12 @@ fn main() -> ExitCode {
     // MUST run first: handle CEF sub-processes (renderer/GPU/utility). For a
     // sub-process this never returns; for the browser process it returns here.
     browser::run_subprocess_if_needed();
+
+    // File logging for the browser process (CD-15 HOTFIX) — before anything else so
+    // the whole lifecycle (incl. arti bootstrap) is captured. Sub-processes returned
+    // above, so only the main process writes the log.
+    logging::init();
+    tracing::info!("cyberdesk starting");
 
     let mut windowed = false;
     let mut capture: Option<String> = None;

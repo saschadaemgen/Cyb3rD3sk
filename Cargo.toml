@@ -35,6 +35,13 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 # per-window Tor feature; the reasoned dependency exception is recorded in D-0026.
 arti-client = { version = "0.44", default-features = false, features = ["tokio", "rustls"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "io-util", "sync", "time"] }
+# File logging (CD-15 HOTFIX): a windowed app has no visible stderr. `tracing` is
+# chosen over `log`+fern because arti/tokio already emit `tracing` events, so one
+# subscriber captures BOTH our lifecycle logs AND arti's internal bootstrap/dirmgr
+# progress — the exact diagnostic the Tor stall needs. General infra, not Tor-only.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 # Bridges arti's futures-based DataStream to tokio's AsyncRead/Write for the SOCKS relay.
 tokio-util = { version = "0.7", default-features = false, features = ["compat"] }
 # Names arti's PreferredRuntime (already in the tree via arti-client) for the client type.
