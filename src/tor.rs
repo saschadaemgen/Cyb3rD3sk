@@ -25,6 +25,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use arti_client::config::CfgPath;
 use arti_client::{TorAddr, TorClient, TorClientConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -42,6 +43,49 @@ pub const STATUS_READY: u8 = 2;
 pub const STATUS_FAILED: u8 = 3;
 
 static STATUS: AtomicU8 = AtomicU8::new(STATUS_IDLE);
+
+/// Hard cap on the first bootstrap (CD-15 HOTFIX): a Tor-blocking network or a bad
+/// cache dir surfaces as `Failed` instead of infinite "connecting".
+const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// The reason for `STATUS_FAILED`, surfaced in the UI. Empty unless failed.
+fn failed_reason() -> &'static Mutex<String> {
+    static R: OnceLock<Mutex<String>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(String::new()))
+}
+
+/// Record a failure: set `STATUS_FAILED` + the reason, and log it.
+fn set_failed(reason: &str) {
+    tracing::error!(reason, "tor engine FAILED");
+    *failed_reason().lock().unwrap() = reason.to_string();
+    STATUS.store(STATUS_FAILED, Ordering::SeqCst);
+}
+
+/// The current failure reason (empty unless `status() == STATUS_FAILED`).
+pub fn fail_reason() -> String {
+    failed_reason().lock().unwrap().clone()
+}
+
+/// Build the arti config with an **explicit, known-writable** state + cache dir
+/// under our app data dir (CD-15 HOTFIX). The default config uses `${ARTI_*}` path
+/// variables that must resolve at runtime; if they don't (or the dir isn't
+/// writable) bootstrap stalls — a literal path we create ourselves avoids that.
+fn tor_config() -> Result<TorClientConfig, String> {
+    let base = std::env::var("LOCALAPPDATA")
+        .or_else(|_| std::env::var("APPDATA"))
+        .unwrap_or_else(|_| ".".to_string());
+    let root = std::path::PathBuf::from(base).join("CyberDesk").join("tor");
+    let state = root.join("state");
+    let cache = root.join("cache");
+    std::fs::create_dir_all(&state).map_err(|e| format!("mkdir {}: {e}", state.display()))?;
+    std::fs::create_dir_all(&cache).map_err(|e| format!("mkdir {}: {e}", cache.display()))?;
+    tracing::info!(state = %state.display(), cache = %cache.display(), "tor state/cache dirs ready");
+    let mut b = TorClientConfig::builder();
+    b.storage()
+        .state_dir(CfgPath::new_literal(state))
+        .cache_dir(CfgPath::new_literal(cache));
+    b.build().map_err(|e| format!("config build: {e}"))
+}
 
 /// The base loopback SOCKS port; slot id `i` listens on `SOCKS_BASE_PORT + i`.
 /// Loopback only (127.0.0.1) — never a public bind.
@@ -78,26 +122,35 @@ pub fn init() {
         )
         .is_err()
     {
+        tracing::debug!("tor::init called but engine already started");
         return;
     }
-    std::thread::Builder::new()
+    tracing::info!("tor::init — spawning the Tor engine thread");
+    match std::thread::Builder::new()
         .name("tor-engine".to_string())
         .spawn(run)
-        .ok();
+    {
+        Ok(_) => {}
+        Err(e) => {
+            set_failed(&format!("could not spawn tor thread: {e}"));
+        }
+    }
 }
 
 fn run() {
+    tracing::info!("tor-engine thread: building the tokio runtime");
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(2)
         .build()
     {
         Ok(rt) => rt,
-        Err(_) => {
-            STATUS.store(STATUS_FAILED, Ordering::SeqCst);
+        Err(e) => {
+            set_failed(&format!("tokio runtime build failed: {e}"));
             return;
         }
     };
+    tracing::info!("tor-engine: runtime built, entering block_on");
 
     rt.block_on(async {
         // Bind the per-slot SOCKS listeners up front (ports live during bootstrap);
@@ -106,15 +159,29 @@ fn run() {
             tokio::spawn(socks_listener(socks_port(id)));
         }
 
-        // Bootstrap off the shell thread. A failure (e.g. offline) just sets FAILED
-        // — never a hang, never a frozen UI.
-        let config = TorClientConfig::default();
-        match TorClient::create_bootstrapped(config).await {
-            Ok(client) => {
+        // Bootstrap off the shell thread, with a hard timeout so a Tor-blocking
+        // network / bad cache dir surfaces as FAILED instead of infinite connecting.
+        let config = match tor_config() {
+            Ok(c) => c,
+            Err(e) => {
+                set_failed(&format!("config/state-dir error: {e}"));
+                std::future::pending::<()>().await;
+                return;
+            }
+        };
+        tracing::info!(timeout_s = BOOTSTRAP_TIMEOUT.as_secs(), "tor bootstrap: begin");
+        let boot = tokio::time::timeout(BOOTSTRAP_TIMEOUT, TorClient::create_bootstrapped(config));
+        match boot.await {
+            Ok(Ok(client)) => {
                 *base_client().lock().unwrap() = Some(client);
                 STATUS.store(STATUS_READY, Ordering::SeqCst);
+                tracing::info!("tor bootstrap: READY");
             }
-            Err(_) => STATUS.store(STATUS_FAILED, Ordering::SeqCst),
+            Ok(Err(e)) => set_failed(&format!("bootstrap error: {e}")),
+            Err(_elapsed) => set_failed(&format!(
+                "bootstrap timed out after {}s (network blocking Tor?)",
+                BOOTSTRAP_TIMEOUT.as_secs()
+            )),
         }
 
         // Keep the runtime (and the SOCKS listeners) alive for the process life.
@@ -126,8 +193,14 @@ fn run() {
 /// base is ready) puts this slot's streams on their own circuit family.
 async fn socks_listener(port: u16) {
     let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await {
-        Ok(l) => l,
-        Err(_) => return,
+        Ok(l) => {
+            tracing::info!(port, "tor SOCKS listener bound (127.0.0.1)");
+            l
+        }
+        Err(e) => {
+            tracing::error!(port, error = %e, "tor SOCKS bind FAILED");
+            return;
+        }
     };
     // The isolated client for THIS slot, created once the base client is ready and
     // reused for every connection (stable per-slot circuit isolation).

@@ -518,16 +518,21 @@ impl Shell {
             return;
         }
         let now_tor = !browser::slot_is_tor(id);
+        tracing::info!(slot = id, to_tor = now_tor, "toggle_tor: begin");
         // The engine master switch (CD-15 Stage C) gates turning Tor ON; a slot can
         // always be reverted to clearnet even if the engine is disabled.
         if now_tor && !settings::tor_enabled() {
+            tracing::info!(slot = id, "toggle_tor: engine disabled in settings — no-op");
             return;
         }
         if now_tor {
             crate::tor::init(); // idempotent — ensure the engine is bootstrapping
         }
         browser::set_slot_tor(id, now_tor);
-        // Respawn the slot's browser under the new context (read from the mode).
+        // Respawn the slot's browser under the new context (read from the mode). This
+        // is NON-blocking: a Tor slot's browser is created immediately (posted to the
+        // CEF UI thread), NOT gated on bootstrap — it just cannot fetch until arti is
+        // ready. The UI never waits on Tor (CD-15 HOTFIX).
         if let Some(window) = self.window.clone() {
             browser::close_slot(id);
             if let Some(r) = self.renderer.as_mut() {
@@ -540,6 +545,7 @@ impl Shell {
         }
         // Reflect the new mode/status on the glyph.
         self.push_frame(false);
+        tracing::info!(slot = id, "toggle_tor: end (respawn requested, returned immediately)");
     }
 
     /// Open `url` in a new slot beside the source slot — a user-gesture popup or

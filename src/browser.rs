@@ -462,14 +462,24 @@ wrap_task! {
 }
 
 /// Create slot `slot`'s browser under a Tor request context (runs on the CEF UI
-/// thread). FAIL-CLOSED: if the proxy pref does not apply, NO browser is created —
-/// a "Tor" browser must never fall back to a direct connection and leak the real IP.
+/// thread). FAIL-CLOSED: the browser is bound to a proxied request context and only
+/// that context; the proxy is applied on the context before it serves any request
+/// (TorContextHandler), and if context creation fails NO browser is created — a
+/// "Tor" browser must never fall back to a direct connection and leak the real IP.
+///
+/// The browser is created IMMEDIATELY (CD-15-HOTFIX Stage B): it does NOT wait on
+/// arti's bootstrap. Its first URL is the local `cyberdesk://start` page (no
+/// network); real navigation happens long after the context is initialized and the
+/// proxy applied, and until arti is ready a real fetch simply cannot complete
+/// (safe — fail-closed), never a direct one.
 fn spawn_tor_browser(slot: usize, url: &str, hwnd: isize) {
     let port = crate::tor::socks_port(slot);
-    let Some(mut ctx) = build_tor_context(port) else {
-        eprintln!("[tor] proxy pref failed for slot {slot}; browser not created (fail-closed)");
+    tracing::info!(slot, port, "spawn_tor_browser: begin (CEF UI thread)");
+    let Some(mut ctx) = build_tor_context(slot, port) else {
+        tracing::error!(slot, "request context creation failed; Tor browser NOT created (fail-closed)");
         return;
     };
+    tracing::info!(slot, "tor context created; calling CreateBrowser");
     let window_info = WindowInfo::default().set_as_windowless(sys::HWND(hwnd as *mut sys::HWND__));
     let mut client = CyberClient::new(Role::Slot(slot), true); // built for Tor
     let url = CefString::from(url);
@@ -486,28 +496,104 @@ fn spawn_tor_browser(slot: usize, url: &str, hwnd: isize) {
         None,
         Some(&mut ctx),
     );
-    if created != 1 {
-        eprintln!("[tor] CreateBrowser failed for slot {slot}");
+    tracing::info!(slot, created, "spawn_tor_browser: CreateBrowser returned");
+}
+
+wrap_request_context_handler! {
+    struct TorContextHandler {
+        slot: usize,
+        port: u16,
+    }
+
+    impl RequestContextHandler {
+        /// Apply the proxy + WebRTC leak prefs the moment the context is ready.
+        ///
+        /// A freshly created `CefRequestContext` initializes ASYNCHRONOUSLY:
+        /// `SetPreference` fails silently (empty error string) until this callback
+        /// fires (the CD-15-HOTFIX root cause — the old synchronous set never
+        /// applied, so every Tor slot fell to the fail-closed exit and looked
+        /// frozen). Setting the prefs here is also exactly on time for fail-closed:
+        /// the browser's network requests wait for context initialization, so the
+        /// proxy is on the context BEFORE any traffic can leave.
+        fn on_request_context_initialized(&self, request_context: Option<&mut RequestContext>) {
+            let Some(ctx) = request_context else {
+                tracing::error!(slot = self.slot, "tor context init: no context in callback");
+                return;
+            };
+            let proxy_ok = set_proxy_pref(ctx, self.port);
+            // WebRTC forced through the proxy so it can't surface the real IP:
+            // `disable_non_proxied_udp` blocks any UDP path that bypasses the proxy.
+            // (The legacy `webrtc.multiple_routes_enabled` / `nonproxied_udp_enabled`
+            // prefs are unregistered in CEF 149 — this single policy supersedes them.)
+            let webrtc_ok = set_pref_string(ctx, "webrtc.ip_handling_policy", "disable_non_proxied_udp");
+            tracing::info!(
+                slot = self.slot,
+                port = self.port,
+                proxy_ok,
+                webrtc_ok,
+                "tor context initialized; prefs applied"
+            );
+            if !proxy_ok {
+                // Must not happen on an initialized context (proxy is a settable
+                // pref), but if it ever did the slot would NOT be protected — close
+                // it rather than let it reach the network directly (fail-closed).
+                tracing::error!(
+                    slot = self.slot,
+                    "tor proxy pref failed on initialized context; closing slot (fail-closed)"
+                );
+                close_slot(self.slot);
+            }
+        }
     }
 }
 
-/// Build a Tor request context: a fresh context with the `proxy` pref (fail-closed)
-/// and the WebRTC leak prefs. Returns `None` if the proxy pref did not apply.
+/// Build a Tor request context: a fresh context whose `proxy` + WebRTC leak prefs
+/// are applied asynchronously by `TorContextHandler` once CEF finishes
+/// initializing it (see the callback above). Returns `None` only if context
+/// CREATION itself fails — that synchronous null is the fail-closed gate here; the
+/// proxy application is deferred (and self-closes the slot if it ever fails).
 ///
-/// Leak checklist (D-0027): `proxy` = fixed SOCKS5 to the slot's Tor port; WebRTC
-/// IP handling constrained so it can't leak the real IP past the proxy; QUIC is
-/// off globally (App::on_before_command_line_processing). Whether the `webrtc.*`
-/// prefs apply *per request context* in CEF 149 needs an empirical WebRTC leak
-/// test (Sascha's live machine) — the proxy pref is the fail-closed guarantee.
-fn build_tor_context(port: u16) -> Option<RequestContext> {
-    let ctx = request_context_create_context(None, None)?;
-    if !set_proxy_pref(&ctx, port) {
-        return None; // fail-closed: no proxy, no browser
+/// Leak checklist (D-0027): `proxy` = fixed SOCKS5 to the slot's Tor port; QUIC is
+/// off globally (App::on_before_command_line_processing).
+fn build_tor_context(slot: usize, port: u16) -> Option<RequestContext> {
+    let on_ui = currently_on(ThreadId::UI);
+    tracing::info!(
+        slot,
+        port,
+        on_ui,
+        "build_tor_context: creating request context (proxy applied on init)"
+    );
+    let settings = RequestContextSettings::default();
+    let mut handler = TorContextHandler::new(slot, port);
+    match request_context_create_context(Some(&settings), Some(&mut handler)) {
+        Some(ctx) => {
+            tracing::debug!(slot, "tor request context created; prefs will apply on init");
+            Some(ctx)
+        }
+        None => {
+            tracing::error!(slot, "request_context_create_context returned None");
+            None
+        }
     }
-    set_pref_string(&ctx, "webrtc.ip_handling_policy", "disable_non_proxied_udp");
-    set_pref_bool(&ctx, "webrtc.multiple_routes_enabled", false);
-    set_pref_bool(&ctx, "webrtc.nonproxied_udp_enabled", false);
-    Some(ctx)
+}
+
+/// Apply one preference on `ctx`, passing a REAL (non-null) error out-param.
+///
+/// CD-15-HOTFIX ROOT CAUSE: CEF's `SetPreference` returns false (0) when handed a
+/// NULL `error` pointer, and `CefString::default()` is `Borrowed(None)` which
+/// marshals to null — so EVERY pref set silently failed. The proxy never applied,
+/// so the fail-closed guard destroyed the Tor browser: that is the "front-end
+/// frozen, no browser opens" symptom Sascha saw. A `BorrowedMut` over a stack
+/// `cef_string_t` gives CEF a place to write, and the set succeeds; on genuine
+/// failure the message is now captured and logged instead of lost.
+fn apply_pref(ctx: &RequestContext, key: &str, val: &mut Value) -> bool {
+    let mut raw: sys::_cef_string_utf16_t = unsafe { std::mem::zeroed() };
+    let mut err = CefString::from(&mut raw as *mut sys::_cef_string_utf16_t);
+    let ok = ctx.set_preference(Some(&CefString::from(key)), Some(val), Some(&mut err)) == 1;
+    if !ok {
+        tracing::error!(key, error = %err.to_string(), "set_preference failed");
+    }
+    ok
 }
 
 /// Set the `proxy` preference to a fixed SOCKS5 server on the slot's loopback port.
@@ -522,8 +608,7 @@ fn set_proxy_pref(ctx: &RequestContext, port: u16) -> bool {
         return false;
     };
     val.set_dictionary(Some(&mut dict));
-    let mut err = CefString::default();
-    ctx.set_preference(Some(&CefString::from("proxy")), Some(&mut val), Some(&mut err)) == 1
+    apply_pref(ctx, "proxy", &mut val)
 }
 
 fn set_pref_string(ctx: &RequestContext, key: &str, value: &str) -> bool {
@@ -531,17 +616,7 @@ fn set_pref_string(ctx: &RequestContext, key: &str, value: &str) -> bool {
         return false;
     };
     val.set_string(Some(&CefString::from(value)));
-    let mut err = CefString::default();
-    ctx.set_preference(Some(&CefString::from(key)), Some(&mut val), Some(&mut err)) == 1
-}
-
-fn set_pref_bool(ctx: &RequestContext, key: &str, value: bool) -> bool {
-    let Some(mut val) = value_create() else {
-        return false;
-    };
-    val.set_bool(value as c_int);
-    let mut err = CefString::default();
-    ctx.set_preference(Some(&CefString::from(key)), Some(&mut val), Some(&mut err)) == 1
+    apply_pref(ctx, key, &mut val)
 }
 
 /// Close slot `i`'s browser cleanly (Ctrl+W, or a resize that drops columns).
