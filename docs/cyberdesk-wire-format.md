@@ -341,19 +341,36 @@ this channel opens no network of its own.
 
 - Request: `{"cmd":"get_info_items"}`
 - Success: the info snapshot —
-  `{"have_feed":<bool>,"checked_ago":<str|null>,"items":[…],"cyberdesk":{…},"cef":{…},"tor":{…}}`
+  `{"have_feed":<bool>,"feed_ok":<bool|null>,"checked_ago":<str|null>,"items":[…],"components":[…]}`
   - `items` — the NEW (non-dismissed) update items, each
     `{"id":<str>,"severity":"info"|"recommended"|"security","title":<str>,"body":<str>,"action":{"label":<str>,"url":<str>}|null}`.
-    Empty when up to date, all dismissed, or there is no feed data.
+    Empty when up to date, all dismissed, or there is no feed data. An item is
+    **never** emitted toward a held-back version (CD-20) — the host would not push
+    the user onto a known-bad release.
+  - `feed_ok` (CD-20) — whether the **last live fetch this run** succeeded
+    (`true`/`false`), or `null` if no live fetch has run yet (startup / cache-only).
+    The panel says "Last check failed · showing last known data" on `false` rather
+    than dressing up stale cache as a clean check.
   - `checked_ago` — an honest relative "3 minutes"/"1 hour"/… of the last check
     attempt (success or failure), or `null` if never checked.
-  - `cyberdesk` — `{"version":<str>,"latest":<str|null>,"up_to_date":<bool>}`
-    (`version` = this build's `CARGO_PKG_VERSION`).
-  - `cef` — `{"version":<str>,"chromium":<str>,"recommended":<str|null>,"up_to_date":<bool>}`
-    (from the pinned crate's compile-time version constants).
-  - `tor` — `{"version":<str>,"recommended":<str|null>,"up_to_date":<bool>}`
-    (the embedded arti-client version, injected from `Cargo.lock` by `build.rs`;
-    no `chromium` field).
+  - `components` (CD-20) — the detailed component list, one object per tracked
+    component (`cyberdesk`, `cef`, `tor`), each
+    `{"id":<str>,"name":<str>,"version":<str>,"latest":<str|null>,"status":<str>,"detail":<str|null>,"reason":<str?>,"note":<str?>}`:
+    - `version` — the installed/running version (CyberDesk: `CARGO_PKG_VERSION`;
+      CEF: the pinned crate's compile-time constants; Tor: the arti-client version
+      injected from `Cargo.lock` by `build.rs`, D-0029).
+    - `status` — one of **`current`** (feed present, installed ≥ recommended),
+      **`update`** (feed recommends a newer version; `latest` is it),
+      **`held_back`** (a newer version exists upstream but is deliberately NOT
+      installed — a client-side `KNOWN_ISSUES` match; `latest` is the held-back
+      upstream version, plus `reason` and `note`), or **`informational`** (no
+      upstream feed for the component and nothing held back — the version is shown
+      with **no** up-to-date claim we cannot substantiate, e.g. CEF here).
+    - `detail` — an optional secondary line (e.g. `"Chromium 149.0.7301.0"` for CEF),
+      or `null`.
+    - `reason` / `note` — present only on `held_back`: why it is held back, and what
+      unpins it. The held-back annotation's source of truth is the client table, not
+      the manifest (the pin is a build-time `Cargo.toml` decision, D-0034).
 - Failure: code 1 (malformed request JSON).
 
 ### `dismiss_item` (view -> host)

@@ -86,23 +86,79 @@ h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.3px; }
 .btn.ghost { border-color: var(--panel-border); color: var(--text-dim); }
 .btn.ghost:hover { background: color-mix(in srgb, var(--panel-border) 40%, transparent); color: var(--text); }
 
-/* --- Calm component status ------------------------------------------------ */
-.status-list { display: flex; flex-direction: column; gap: 2px; }
-
-.status-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 11px 2px;
-  border-bottom: 1px solid color-mix(in srgb, var(--panel-border) 55%, transparent);
+/* --- Detailed component list (CD-20) -------------------------------------- */
+.section-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-top: 2px;
 }
-.status-row:last-child { border-bottom: none; }
-.status-name { font-size: 14px; font-weight: 500; }
-.status-ver { font-size: 12px; color: var(--text-dim); }
-.status-state { font-size: 12px; font-weight: 600; flex: none; }
-.status-state.ok { color: color-mix(in srgb, var(--accent) 85%, var(--text)); }
-.status-state.update { color: var(--brand); }
+
+.components { display: flex; flex-direction: column; gap: 10px; }
+
+/* One card per component. The left accent bar carries the state at a glance;
+   held-back uses a dashed bar so it reads as "intentionally pinned", distinct
+   from both the calm "up to date" and the actionable "update available". */
+.comp {
+  border: 1px solid color-mix(in srgb, var(--panel-border) 70%, transparent);
+  border-left: 3px solid var(--panel-border);
+  border-radius: calc(var(--corner-radius) * 0.6);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.comp-current   { border-left-color: color-mix(in srgb, var(--accent) 70%, var(--text)); }
+.comp-update    { border-left-color: var(--brand); background: color-mix(in srgb, var(--brand) 5%, transparent); }
+.comp-held_back { border-left-style: dashed; border-left-color: var(--text-dim); background: color-mix(in srgb, var(--text-dim) 6%, transparent); }
+.comp-informational { border-left-color: var(--panel-border); }
+
+.comp-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.comp-name { font-size: 14px; font-weight: 600; }
+.comp-ver { font-size: 12px; color: var(--text-dim); }
+
+/* State pill — three visually-distinct states + the neutral informational one. */
+.comp-state {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  flex: none;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+.comp-state.ok {
+  color: color-mix(in srgb, var(--accent) 85%, var(--text));
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.comp-state.update {
+  color: var(--brand);
+  border-color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 10%, transparent);
+}
+/* Held back: a calm, dashed, dim chip — a deliberate hold, NOT an error (never
+   amber/red) and NOT a call to action. */
+.comp-state.held {
+  color: var(--text-dim);
+  border-style: dashed;
+  border-color: var(--text-dim);
+}
+.comp-state.info {
+  color: var(--text-dim);
+  border-color: color-mix(in srgb, var(--panel-border) 80%, transparent);
+}
+
+/* Upstream sub-line: what's newest, and (for held-back) that it is not installed. */
+.comp-upstream { font-size: 12px; }
+.comp-upstream.update { color: var(--brand); }
+.comp-upstream.held { color: var(--text-dim); }
+
+/* Held-back explanation. Reason is plain; the note (what unpins it) is quieter. */
+.comp-reason { font-size: 12.5px; color: var(--text); line-height: 1.45; margin-top: 3px; }
+.comp-note { font-size: 12px; color: var(--text-dim); line-height: 1.4; font-style: italic; }
 
 .empty { font-size: 12.5px; color: var(--text-dim); padding: 4px 2px; }
 
@@ -117,3 +173,5 @@ h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.3px; }
   margin-top: auto;
 }
 .checked { font-size: 12px; color: var(--text-dim); }
+/* A failed live fetch is a soft warning (amber), never dressed up as success. */
+.checked.failed { color: var(--warn); }

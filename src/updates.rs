@@ -74,6 +74,12 @@ impl Version {
     pub fn is_older_than(&self, other: &Version) -> bool {
         self.cmp(other) == std::cmp::Ordering::Less
     }
+
+    /// True when the two versions are numerically equal under zero-padding, so
+    /// `0.44` and `0.44.0` match (derived `PartialEq` would not — different lengths).
+    fn is_same(&self, other: &Version) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
 }
 
 // --- Manifest ---------------------------------------------------------------
@@ -142,6 +148,66 @@ fn normalize_severity(reason: Option<&str>) -> String {
     }
 }
 
+// --- Held-back versions (client-side known-issues table, CD-20) --------------
+
+/// A deliberately-held-back component version: a newer upstream release we are NOT
+/// shipping because it is known-bad. The pin itself is a build-time decision (it
+/// lives in `Cargo.toml`), so the honest source for the *annotation* is the client,
+/// not the live manifest — this table. The info area renders any matching component
+/// in the distinct `held_back` state, so the surface never (a) claims we are current
+/// while a newer version exists, nor (b) nudges the user toward the broken release.
+///
+/// Self-cleaning: when a component is bumped past its regression, delete its entry
+/// here in the SAME commit as the bump (D-0034 revisit trigger) and it returns to a
+/// normal `current` / `update` state with no other change — the `held_back_for`
+/// lookup only fires while the installed version is *below* the held-back one.
+#[derive(Debug, Clone, Copy)]
+pub struct KnownIssue {
+    /// Component id, matching the snapshot component ids (`tor`, `cef`, `cyberdesk`).
+    pub component: &'static str,
+    /// The newest upstream version we are deliberately NOT on.
+    pub held_back_version: &'static str,
+    /// Short, plain reason shown to the user (why it is held back).
+    pub reason: &'static str,
+    /// Short tracking note — what unpins it.
+    pub note: &'static str,
+}
+
+/// The known-issues table. Trivially editable: one entry per held-back component.
+/// Seeded for CD-20 with the single arti 0.44.0 bootstrap regression (D-0034).
+pub static KNOWN_ISSUES: &[KnownIssue] = &[KnownIssue {
+    component: "tor",
+    held_back_version: "0.44.0",
+    reason: "arti 0.44.0 has a bootstrap regression: the Tor consensus is fetched but never accepted, so bootstrap stalls at 15%.",
+    note: "Pinned to 0.43.x until a later arti is verified to bootstrap on Windows (D-0034).",
+}];
+
+/// The active held-back entry for `component` given the `installed` version: the
+/// newest listed known-bad version that is strictly newer than what's installed (so
+/// a bump past the regression clears it automatically). `None` when nothing is held
+/// back — installed is already at/above every listed bad version, or none is listed.
+fn held_back_for(component: &str, installed: &str) -> Option<&'static KnownIssue> {
+    let cur = Version::parse(installed);
+    KNOWN_ISSUES
+        .iter()
+        .filter(|k| {
+            k.component == component && cur.is_older_than(&Version::parse(k.held_back_version))
+        })
+        .max_by(|a, b| Version::parse(a.held_back_version).cmp(&Version::parse(b.held_back_version)))
+}
+
+/// True when `version` (e.g. a manifest `recommended`) is a currently-held-back
+/// version for `component` — used to suppress an "update available" item that would
+/// otherwise push the user onto a known-bad release.
+fn is_held_back(component: &str, installed: &str, version: &Version) -> bool {
+    let cur = Version::parse(installed);
+    KNOWN_ISSUES.iter().any(|k| {
+        k.component == component
+            && cur.is_older_than(&Version::parse(k.held_back_version))
+            && Version::parse(k.held_back_version).is_same(version)
+    })
+}
+
 /// Build the NEW (non-dismissed) info items from a manifest and the running
 /// versions. Pure and unit-tested — no network, no store. An item is suppressed
 /// when it was dismissed at a version the manifest has not advanced past.
@@ -157,6 +223,7 @@ pub fn build_items(
     // CyberDesk (the product itself).
     let latest = Version::parse(&m.cyberdesk.latest);
     if Version::parse(cur_cyberdesk).is_older_than(&latest)
+        && !is_held_back("cyberdesk", cur_cyberdesk, &latest)
         && !is_dismissed(dismissed, "cyberdesk-update", &latest)
     {
         out.push(InfoItem {
@@ -179,6 +246,7 @@ pub fn build_items(
     if let Some(cef) = m.components.get("cef") {
         let rec = Version::parse(&cef.recommended);
         if Version::parse(cur_cef).is_older_than(&rec)
+            && !is_held_back("cef", cur_cef, &rec)
             && !is_dismissed(dismissed, "cef-update", &rec)
         {
             let reason = cef.reason.as_deref().unwrap_or("recommended");
@@ -205,6 +273,7 @@ pub fn build_items(
     if let Some(tor) = m.components.get("tor") {
         let rec = Version::parse(&tor.recommended);
         if Version::parse(cur_tor).is_older_than(&rec)
+            && !is_held_back("tor", cur_tor, &rec)
             && !is_dismissed(dismissed, "tor-update", &rec)
         {
             let reason = tor.reason.as_deref().unwrap_or("recommended");
@@ -289,6 +358,11 @@ struct State {
     items: Vec<InfoItem>,
     have_feed: bool,
     last_check: Option<i64>,
+    /// Whether the LAST live fetch this run succeeded (`Some(true/false)`), or
+    /// `None` if no live fetch has run yet (startup, cache-only). Drives the honest
+    /// "last check failed" footer — we never dress up stale cached data as a fresh
+    /// clean check (CD-20).
+    last_fetch_ok: Option<bool>,
     cyberdesk_latest: Option<String>,
     cef_recommended: Option<String>,
     tor_recommended: Option<String>,
@@ -412,9 +486,12 @@ fn run_check() {
     let now = now_secs();
     store().lock().unwrap().set_last_update_check(now);
 
-    // Fall back to the last-known cached manifest if the live fetch gave nothing.
+    // Fall back to the last-known cached manifest if the live fetch gave nothing —
+    // but remember whether THIS live fetch actually succeeded, so the panel can be
+    // honest ("last check failed") instead of dressing up stale cache as fresh.
+    let fetch_ok = live.is_some();
     let manifest = live.or_else(cached_manifest);
-    rebuild_state(manifest, Some(now));
+    rebuild_state(manifest, Some(now), Some(fetch_ok));
 }
 
 fn store() -> &'static Mutex<crate::store::Store> {
@@ -437,10 +514,11 @@ fn dismissed_map() -> HashMap<String, String> {
 /// the persisted last-check time — used at startup before the first live check.
 fn rebuild_from_cache() {
     let last = store().lock().unwrap().last_update_check();
-    rebuild_state(cached_manifest(), last);
+    // Cache-only rebuild: no live fetch happened this run, so `last_fetch_ok` is None.
+    rebuild_state(cached_manifest(), last, None);
 }
 
-fn rebuild_state(manifest: Option<Manifest>, last_check: Option<i64>) {
+fn rebuild_state(manifest: Option<Manifest>, last_check: Option<i64>, fetch_ok: Option<bool>) {
     let cur_cd = current_cyberdesk_version();
     let cur_cef = current_cef_version();
     let cur_tor = current_tor_version();
@@ -453,6 +531,7 @@ fn rebuild_state(manifest: Option<Manifest>, last_check: Option<i64>) {
                 items,
                 have_feed: true,
                 last_check,
+                last_fetch_ok: fetch_ok,
                 cyberdesk_latest: Some(m.cyberdesk.latest.clone()),
                 cef_recommended: m.components.get("cef").map(|c| c.recommended.clone()),
                 tor_recommended: m.components.get("tor").map(|c| c.recommended.clone()),
@@ -462,6 +541,7 @@ fn rebuild_state(manifest: Option<Manifest>, last_check: Option<i64>) {
             items: Vec::new(),
             have_feed: false,
             last_check,
+            last_fetch_ok: fetch_ok,
             cyberdesk_latest: None,
             cef_recommended: None,
             tor_recommended: None,
@@ -498,8 +578,53 @@ pub fn dismiss(id: &str) {
 
 // --- Info panel IPC payload -------------------------------------------------
 
-/// The `get_info_items` reply: the NEW items, the calm component status, and an
-/// honest "checked X ago". Built from the shared state + the running versions.
+/// Build one component's status object for the info snapshot (CD-20). The three
+/// honest states, in priority order:
+///   - `held_back`  — a newer version exists upstream but is deliberately NOT
+///     installed (a `KNOWN_ISSUES` match). Takes precedence over everything and
+///     carries the `reason` + `note`; `latest` is the held-back upstream version.
+///   - `update`     — the feed recommends a version newer than installed.
+///   - `current`    — the feed is present and installed is at/above recommended.
+/// With no upstream feed for the component and nothing held back, the state is
+/// `informational`: we show the installed version and make NO up-to-date claim we
+/// cannot substantiate (e.g. CEF, which has no upstream feed here).
+fn component_json(
+    id: &str,
+    name: &str,
+    installed: &str,
+    recommended: Option<&str>,
+    detail: Option<String>,
+) -> serde_json::Value {
+    if let Some(k) = held_back_for(id, installed) {
+        return serde_json::json!({
+            "id": id,
+            "name": name,
+            "version": installed,
+            "latest": k.held_back_version,
+            "status": "held_back",
+            "reason": k.reason,
+            "note": k.note,
+            "detail": detail,
+        });
+    }
+    let status = match recommended {
+        Some(rec) if Version::parse(installed).is_older_than(&Version::parse(rec)) => "update",
+        Some(_) => "current",
+        None => "informational",
+    };
+    serde_json::json!({
+        "id": id,
+        "name": name,
+        "version": installed,
+        "latest": recommended,
+        "status": status,
+        "detail": detail,
+    })
+}
+
+/// The `get_info_items` reply: the NEW items, the honest per-component status list
+/// (CD-20), whether the last live fetch succeeded, and an honest "checked X ago".
+/// Built from the shared state + the running (compile-time) versions.
 pub fn info_snapshot_json() -> String {
     let st = state().lock().unwrap();
     let cur_cd = current_cyberdesk_version();
@@ -520,44 +645,29 @@ pub fn info_snapshot_json() -> String {
         })
         .collect();
 
-    let cd_up_to_date = st
-        .cyberdesk_latest
-        .as_ref()
-        .map(|l| !Version::parse(cur_cd).is_older_than(&Version::parse(l)))
-        .unwrap_or(true);
-    let cef_up_to_date = st
-        .cef_recommended
-        .as_ref()
-        .map(|r| !Version::parse(&cur_cef).is_older_than(&Version::parse(r)))
-        .unwrap_or(true);
-    let tor_up_to_date = st
-        .tor_recommended
-        .as_ref()
-        .map(|r| !Version::parse(cur_tor).is_older_than(&Version::parse(r)))
-        .unwrap_or(true);
+    // The detailed component list (CD-20): the app itself, the CEF/Chromium core,
+    // and the embedded Tor engine — each with a truthful status. CEF has no upstream
+    // feed here (`None` recommended) → `informational`, never an invented "update".
+    let components = vec![
+        component_json("cyberdesk", "CyberDesk", cur_cd, st.cyberdesk_latest.as_deref(), None),
+        component_json(
+            "cef",
+            "CEF core",
+            &cur_cef,
+            st.cef_recommended.as_deref(),
+            Some(format!("Chromium {}", current_chromium_version())),
+        ),
+        component_json("tor", "Tor engine (arti)", cur_tor, st.tor_recommended.as_deref(), None),
+    ];
 
     let checked_ago = st.last_check.map(|t| relative_ago(now_secs() - t));
 
     serde_json::json!({
         "have_feed": st.have_feed,
+        "feed_ok": st.last_fetch_ok,
         "checked_ago": checked_ago,
         "items": items,
-        "cyberdesk": {
-            "version": cur_cd,
-            "latest": st.cyberdesk_latest,
-            "up_to_date": cd_up_to_date,
-        },
-        "cef": {
-            "version": cur_cef,
-            "chromium": current_chromium_version(),
-            "recommended": st.cef_recommended,
-            "up_to_date": cef_up_to_date,
-        },
-        "tor": {
-            "version": cur_tor,
-            "recommended": st.tor_recommended,
-            "up_to_date": tor_up_to_date,
-        },
+        "components": components,
     })
     .to_string()
 }
@@ -715,5 +825,71 @@ mod tests {
         assert_eq!(relative_ago(180), "3 minutes ago");
         assert_eq!(relative_ago(3600), "1 hour ago");
         assert_eq!(relative_ago(90000), "1 day ago");
+    }
+
+    // --- Held-back version state (CD-20) ------------------------------------
+
+    #[test]
+    fn version_is_same_is_zero_padded() {
+        assert!(Version::parse("0.44").is_same(&Version::parse("0.44.0")));
+        assert!(Version::parse("0.44.0").is_same(&Version::parse("0.44")));
+        assert!(!Version::parse("0.44.1").is_same(&Version::parse("0.44.0")));
+    }
+
+    #[test]
+    fn held_back_detects_the_pinned_arti() {
+        // Installed below the seeded held-back version → the entry is active.
+        let k = held_back_for("tor", "0.43.0").expect("arti 0.43 is below the held-back 0.44");
+        assert_eq!(k.held_back_version, "0.44.0");
+        assert!(k.reason.contains("15%"));
+        // Bumped to / past the held-back version → the entry clears automatically
+        // (self-cleaning: the info area returns arti to a normal state with no code
+        // change, matching the D-0034 revisit trigger).
+        assert!(held_back_for("tor", "0.44.0").is_none());
+        assert!(held_back_for("tor", "0.45.0").is_none());
+        // A component with no table entry is never held back.
+        assert!(held_back_for("cef", "149.0.0").is_none());
+        assert!(held_back_for("cyberdesk", "0.1.0").is_none());
+    }
+
+    #[test]
+    fn held_back_suppresses_an_update_item_toward_the_bad_version() {
+        // A manifest that (wrongly) recommends the held-back arti must NOT yield an
+        // update item pushing the user onto the known-broken release.
+        let bad = r#"{ "schema":1, "cyberdesk":{"latest":"0.1.0"},
+            "components": { "tor": { "recommended": "0.44.0", "reason": "security" } } }"#;
+        let m = Manifest::parse(bad).unwrap();
+        let items = build_items(&m, "0.1.0", "149.0.6", "0.43.0", &dismissed(&[]));
+        assert!(!items.iter().any(|i| i.id == "tor-update"));
+        // A GOOD newer version (0.45.0, not held back) is still surfaced normally.
+        let good = r#"{ "schema":1, "cyberdesk":{"latest":"0.1.0"},
+            "components": { "tor": { "recommended": "0.45.0", "reason": "security" } } }"#;
+        let m2 = Manifest::parse(good).unwrap();
+        let items2 = build_items(&m2, "0.1.0", "149.0.6", "0.43.0", &dismissed(&[]));
+        assert!(items2.iter().any(|i| i.id == "tor-update"));
+    }
+
+    #[test]
+    fn component_json_reports_the_three_states_plus_informational() {
+        // Held-back: the seeded arti entry, installed below it.
+        let hb = component_json("tor", "Tor engine (arti)", "0.43.0", None, None);
+        assert_eq!(hb["status"], "held_back");
+        assert_eq!(hb["version"], "0.43.0");
+        assert_eq!(hb["latest"], "0.44.0");
+        assert!(hb["reason"].as_str().unwrap().contains("15%"));
+        assert!(hb["note"].as_str().unwrap().contains("0.43"));
+        // No feed + nothing held back → informational, NOT a false "current".
+        let info = component_json("cef", "CEF core", "149.0.0", None, None);
+        assert_eq!(info["status"], "informational");
+        // Feed recommends a newer good version → update.
+        let upd = component_json("cef", "CEF core", "149.0.0", Some("150.0.1"), None);
+        assert_eq!(upd["status"], "update");
+        assert_eq!(upd["latest"], "150.0.1");
+        // Installed at/above recommended → current.
+        let cur = component_json("cyberdesk", "CyberDesk", "0.9.0", Some("0.9.0"), None);
+        assert_eq!(cur["status"], "current");
+        // Once arti is bumped past the regression, the same call is a normal state.
+        let bumped = component_json("tor", "Tor engine (arti)", "0.45.0", Some("0.45.0"), None);
+        assert_eq!(bumped["status"], "current");
     }
 }
