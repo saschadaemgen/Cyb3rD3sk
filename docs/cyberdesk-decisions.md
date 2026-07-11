@@ -2,6 +2,69 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0035 - 2026-07-11 - Shell session lifecycle: default two-slot startup, two quit modes, session captures per-slot mode (CD-21)
+
+*Decision.* CyberDesk's session lifecycle is now defined end to end.
+- **Default startup** (empty session, first run, or after a plain quit): two browser
+  slots side by side — clearnet (**left**) + Tor (**right**), both loading the own
+  start page `cyberdesk://start/`. Clamped to what the frame can hold (big-monitor
+  focus): two where they fit, else a single clearnet slot on a narrow monitor. The
+  right slot is Tor only when the engine master switch (`tor_enabled`) is on;
+  otherwise both are clearnet (an honest fallback — a disabled engine cannot open a
+  Tor window). Side assignment left-clearnet / right-Tor is the planning-chat choice.
+- **Own start page renders in a Tor slot** (the CD-14 asset existed and `//start`
+  was already dispatched, so this was NOT a missing page). Root cause: the internal
+  `cyberdesk://` scheme-handler-factory was registered only on the GLOBAL request
+  context; a Tor slot runs under its OWN per-slot `CefRequestContext`, which does not
+  inherit it, so `cyberdesk://start/` returned `ERR_UNKNOWN_URL_SCHEME` there ("no
+  usable start page in the Tor window"). Fix: register the same in-process factory on
+  each per-slot Tor context in `build_tor_context`. The page is served in-process with
+  ZERO network egress, so it renders before/without arti being bootstrapped, and
+  fail-closed still holds (nothing leaves the machine).
+- **Two application-quit controls**, labelled **"Quit"** and **"Quit & Save"**, live
+  as persistent chrome in the permanent top-right **MF-zone** view (`cyberdesk://
+  mfzone/`), shown under every tab. They are deliberately distinct from the CD-18
+  per-slot close icon (which closes one window). **Quit** = no save (default layout
+  next launch); **Quit & Save** = persist the full state, restored exactly next
+  launch. Escape-in-settings and the OS window-close remain as silent accelerators
+  (they quit without saving); they are no longer the only quit path.
+- **Session (schema v6, session_slots RETURNS)** captures per slot: mode (Tor /
+  clearnet), URL, width, active, and display order. Restore is exact and is a
+  **one-shot, opt-in** flow: `save_session` writes the rows and sets a `meta`
+  `session_savequit` flag ONLY on "Quit & Save"; `take_saved_session` restores once
+  and CONSUMES the flag, so a subsequent plain quit or a crash boots the default
+  layout. A restored Tor slot returns as a REAL Tor slot (its mode set before the
+  browser is created, so it is spawned under its proxied context). Unknown/old
+  schemas migrate to an empty table → default layout, never a crash.
+
+*Placement note (flagged for vision-law).* The shell has **no text-rendering engine**
+(only SDF shapes + a 7-segment digit, `info_glyph.wgsl`), so the German/English quit
+labels cannot be shell-drawn — they must live in an HTML internal view. The permanent
+MF-zone view is the least-invasive home (always composited, text-capable, input-routed
+as `Role::MfZone` with no focus-steal, top-right region, zero new view/geometry/render
+plumbing). This is a minimal new pattern (persistent chrome inside the MF zone rather
+than a free-floating glyph); it should be checked against `docs/cyberdesk-vision-law.md`
+once that file lands (still uncommitted, Season-1 open item).
+
+*Language note (deviation from the ticket, honoring the binding repo rule).* The ticket
+requested German labels ("Beenden" / "Beenden & sichern"). `CLAUDE.md` sets a permanent
+rule — "English everywhere in the repo… Admin UI language is English." On Sascha's
+explicit instruction the buttons ship in **English** ("Quit" / "Quit & Save"), keeping
+the permanent rule intact.
+
+*Privacy (reconciles with D-0025).* CD-14/D-0025 removed website persistence entirely.
+CD-21 reintroduces it **opt-in only**: nothing is written unless the user chooses
+"Quit & Save". Even then, a **Tor slot's URL is never written to disk** (it restores on
+the start page, still as a Tor slot), and internal/blank slots persist an empty URL
+(`memory::is_recordable`) — only real clearnet site URLs reach `state.db`, and only on
+that explicit opt-in. On Sascha's instruction Tor slots restore to the start page
+rather than their exact URL, so nothing browsed under Tor touches the local disk.
+
+*Why.* The prior behaviour lost window mode and arrangement on restart, the start page
+did not render (worst in the Tor window), and the only way to quit was Escape inside
+settings. This defines an intuitive, honest lifecycle with explicit user control over
+whether an arrangement is kept.
+
 ## D-0034 - 2026-07-11 - arti pinned to 0.43.x; arti 0.44 has a bootstrap regression; arti/`tor-*` crates must be versioned in lockstep (supersedes the D-0033 "compression fixed it" conclusion)
 
 **Decision.** Pin all arti and `tor-*` crates to `0.43.x`. Do not move to `0.44.x`

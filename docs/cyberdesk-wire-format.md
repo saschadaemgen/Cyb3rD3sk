@@ -276,6 +276,22 @@ hit-tested host-side, like the gear button.
   shared with `Ctrl+W`). Replaces the retired CD-12 shell-drawn corner close orb.
 - Success: `{"ok":true}`. Failure: code 1 (malformed request JSON).
 
+### `quit` / `quit_save` (view -> host, CD-21)
+
+- Request: `{"cmd":"quit"}` or `{"cmd":"quit_save"}` — the two floating quit buttons
+  in the MF-zone view (`cyberdesk://mfzone/`). **Application-level** quit (they end
+  the whole shell), deliberately distinct from `close_slot` (one window).
+- Effect: sets a `pending_quit` flag `Some(false)` (`quit`) / `Some(true)`
+  (`quit_save`) for the main thread; the drain in `about_to_wait` calls
+  `event_loop.exit()` (so `shutdown_cef` runs after `run_app` returns). `quit_save`
+  first persists the session (schema v6 `session_slots` + the `session_savequit`
+  restore flag): per slot the mode (Tor/clearnet), width, active, order, and — for
+  clearnet slots only — the URL (Tor-slot and internal/blank URLs are stored empty
+  for privacy, D-0035). Plain `quit` writes nothing → the next launch is the default
+  two-slot layout. The IPC handler runs on the CEF UI thread and never touches the
+  event loop directly.
+- Success: `{"ok":true}`. Failure: code 1 (malformed request JSON).
+
 The **frame-state push** (`cdFrame`, CD-12) gained a per-slot `"tor":<bool>` field
 and a top-level `"tor_status":<int>` (0 off / 1 connecting / 2 ready / 3 failed), so
 the per-window Tor icon lights when the column is on Tor, pulses while the engine
