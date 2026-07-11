@@ -161,4 +161,17 @@
   function tick() { pollLog(); pollTor(); }
   tick();
   setInterval(tick, 1000);
+
+  // --- Application quit (CD-21) -------------------------------------------
+  // Two host commands: `quit` (no save) and `quit_save` (persist the session, then
+  // quit). The host queues the request and the main thread exits the loop. Distinct
+  // from the per-slot `close_slot` (CD-18).
+  var quitBtn = document.getElementById("quit");
+  var quitSaveBtn = document.getElementById("quit-save");
+  if (quitBtn) {
+    quitBtn.addEventListener("click", function () { query({ cmd: "quit" }).catch(function () {}); });
+  }
+  if (quitSaveBtn) {
+    quitSaveBtn.addEventListener("click", function () { query({ cmd: "quit_save" }).catch(function () {}); });
+  }
 })();

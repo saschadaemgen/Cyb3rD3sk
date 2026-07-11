@@ -470,6 +470,26 @@ pub fn take_pending_closes() -> Vec<usize> {
     std::mem::take(&mut pending_close().lock().unwrap())
 }
 
+/// An APPLICATION-level quit requested by the MF-zone quit buttons (CD-21, CEF UI
+/// thread). `Some(true)` = "Quit & Save" (persist the session first), `Some(false)`
+/// = plain "Quit" (default layout next launch). Drained on the main thread, which
+/// owns the winit event loop — the IPC handler must never touch it directly. This
+/// is distinct from `pending_close` (which closes ONE slot).
+fn pending_quit() -> &'static Mutex<Option<bool>> {
+    static P: OnceLock<Mutex<Option<bool>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(None))
+}
+
+/// Request an application quit (`save` = persist the session before exiting).
+fn request_quit(save: bool) {
+    *pending_quit().lock().unwrap() = Some(save);
+}
+
+/// Take a pending application-quit request `Some(save)`, if any (main thread).
+pub fn take_pending_quit() -> Option<bool> {
+    pending_quit().lock().unwrap().take()
+}
+
 wrap_task! {
     struct TorSpawnTask {
         slot: usize,
@@ -590,7 +610,25 @@ fn build_tor_context(slot: usize, port: u16) -> Option<RequestContext> {
     let mut handler = TorContextHandler::new(slot, port);
     match request_context_create_context(Some(&settings), Some(&mut handler)) {
         Some(ctx) => {
-            tracing::debug!(slot, "tor request context created; prefs will apply on init");
+            // CD-21 Task A: a per-slot Tor context is a PRIVATE `CefRequestContext`
+            // and does NOT inherit the global scheme-handler-factory (registered on
+            // the global context in `on_context_initialized`). Without this, the
+            // slot's very first page — `cyberdesk://start/` — returns
+            // ERR_UNKNOWN_URL_SCHEME in a Tor slot (the "no usable start page in the
+            // Tor window" bug). Register the same in-process factory on THIS context
+            // so the own start page renders with ZERO network egress, before/without
+            // arti being bootstrapped. Fail-closed still holds: the page is served
+            // in-process, so nothing leaves the machine.
+            let mut factory = InternalSchemeFactory::new();
+            ctx.register_scheme_handler_factory(
+                Some(&CefString::from(SCHEME)),
+                Some(&CefString::from("")),
+                Some(&mut factory),
+            );
+            tracing::debug!(
+                slot,
+                "tor request context created; internal scheme factory registered; prefs apply on init"
+            );
             Some(ctx)
         }
         None => {
@@ -1157,6 +1195,19 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
             pending_close().lock().unwrap().push(slot);
             Ok(serde_json::json!({ "ok": true }).to_string())
         }
+        // APPLICATION-level quit (CD-21): the two floating MF-zone quit buttons.
+        // Distinct from `close_slot` (one window) — these end the whole shell.
+        // `quit` = no save (default layout next launch); `quit_save` = persist the
+        // full session first, then quit (restored exactly next launch). Queued for
+        // the main thread, which owns the winit event loop.
+        "quit" => {
+            request_quit(false);
+            Ok(serde_json::json!({ "ok": true }).to_string())
+        }
+        "quit_save" => {
+            request_quit(true);
+            Ok(serde_json::json!({ "ok": true }).to_string())
+        }
         // The Tor engine's bootstrap status + (on failure) the reason, for the
         // settings readout (CD-15 Stage C / HOTFIX). `reason` is empty unless failed.
         "tor_status" => Ok(serde_json::json!({
@@ -1527,13 +1578,23 @@ wrap_life_span_handler! {
                     }
                     return;
                 }
-                // Give the OSR browser keyboard focus so the page accepts input —
-                // EXCEPT the MF-zone view (CD-18): it is eagerly created like the
-                // slots, and focusing it would steal keyboard focus from Slot(0). It
-                // is mouse-driven (tab clicks) and never wants the keyboard.
-                if !matches!(self.role, Role::MfZone)
-                    && let Some(host) = browser.host()
-                {
+                // Give the OSR browser keyboard focus so the page accepts input, but
+                // for a SLOT only when it is the ACTIVE slot (CD-21). The multi-slot
+                // boot/restore creates several slots — each start page autofocuses its
+                // search box — and browsers are created ASYNCHRONOUSLY (a Tor slot even
+                // later, via TorSpawnTask), so an unconditional focus here would leave
+                // the last-created slot, not the active one, holding the caret (two
+                // carets at a 2-slot boot). Every creation path sets the slot active
+                // BEFORE create, so the active slot still focuses on spawn. The MF-zone
+                // view is mouse-driven and never wants the keyboard; the shared Internal
+                // overlay focuses on create (harmless — it is not composited until an
+                // overlay opens, which re-asserts its focus).
+                let want_focus = match self.role {
+                    Role::Slot(i) => i == active_slot(),
+                    Role::Internal => true,
+                    Role::MfZone => false,
+                };
+                if want_focus && let Some(host) = browser.host() {
                     host.set_focus(1);
                 }
                 *view(self.role).browser.lock().unwrap() = Some(browser.clone());

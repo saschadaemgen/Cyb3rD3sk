@@ -199,6 +199,15 @@ struct Shell {
     drag: Option<(String, String)>,
 }
 
+/// One slot to spawn during boot/restore (CD-21): its id, and the URL to open —
+/// `None` = the own start page (a Tor slot, or a clearnet slot with no saved URL),
+/// `Some(url)` = reload that clearnet URL. The slot's mode/width/order are applied
+/// to the `Shell` during the plan phase; this carries only what the spawn phase needs.
+struct SlotPlan {
+    id: usize,
+    url: Option<String>,
+}
+
 fn window_hwnd(window: &Window) -> isize {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     match window
@@ -1220,27 +1229,163 @@ impl Shell {
         }
     }
 
-    // --- Default workspace (CD-14) ------------------------------------------
+    // --- Session lifecycle (CD-21, D-0035) ----------------------------------
 
-    /// Boot the default workspace (called once at startup): one slot at the own
-    /// start page, plus the internal overlay view. Websites are **never** restored
-    /// (the privacy reversal of CD-10, D-0025) — every launch starts fresh at the
-    /// start page. History and favorites (separate features) are untouched.
+    /// Boot the workspace once the CEF context is ready. A saved "Quit & Save"
+    /// session (schema v6) is restored exactly as left (per-slot mode / URL / width /
+    /// layout); otherwise — a plain quit, first run, or an old/unknown schema — the
+    /// default two-slot layout opens.
+    ///
+    /// Two phases so the invariants hold: (1) *plan* — decide `order`, per-slot mode
+    /// (set BEFORE any browser exists, so a Tor slot is created under its proxied
+    /// context and a reused id never inherits a stale `SLOT_TOR`), width and target
+    /// URL; (2) *spawn* — push geometry for every view, then create the shared
+    /// internal overlay + permanent MF-zone views FIRST and the slots LAST (so a
+    /// slot, not the overlay, holds keyboard focus after startup — matching the
+    /// pre-CD-21 order). `create_browser` needs geometry set first, hence the split.
     fn restore_session(&mut self, window: &Window) {
         let hwnd = window_hwnd(window);
-        self.order = vec![0];
-        self.active_slot = 0;
-        browser::set_active_slot(0);
-        // The first window honours the "Tor for new windows" default (CD-15).
-        let tor = settings::tor_default();
-        if tor {
-            crate::tor::init();
-        }
-        browser::set_slot_tor(0, tor);
+
+        let plan = match crate::store::shared().lock().unwrap().take_saved_session() {
+            Some(rows) => self.plan_restore(rows),
+            None => self.plan_default(),
+        };
+
         self.push_geometry();
         browser::create_browser(Role::Internal, hwnd);
         browser::create_browser(Role::MfZone, hwnd); // → cyberdesk://mfzone/ (permanent)
-        browser::create_browser(Role::Slot(0), hwnd); // → cyberdesk://start/
+        for p in &plan {
+            match &p.url {
+                // A saved clearnet URL reloads it; `None` opens the own start page.
+                // Both paths route a Tor slot through its per-slot proxied context
+                // via `slot_is_tor` (set in the plan phase).
+                Some(u) => browser::create_browser_url(Role::Slot(p.id), hwnd, u),
+                None => browser::create_browser(Role::Slot(p.id), hwnd), // → start page
+            }
+        }
+    }
+
+    /// Plan the default layout (fresh start / after a plain quit, D-0035): two slots
+    /// side by side — clearnet (left) + Tor (right), both on the own start page
+    /// `cyberdesk://start/`. Clamped to what the frame can hold (big-monitor focus):
+    /// two where they fit, else a single clearnet slot on a narrow monitor. The right
+    /// slot is Tor only when the engine's master switch is enabled; otherwise both
+    /// are clearnet (honest — a disabled engine cannot open a Tor window). Sets slot
+    /// state; returns the spawn plan (both slots open the start page → `url: None`).
+    fn plan_default(&mut self) -> Vec<SlotPlan> {
+        let cap = self.capacity().max(1);
+        let want = self.slot_max().min(cap).min(2); // two side by side where they fit
+        let right_tor = settings::tor_enabled();
+
+        self.order = if want >= 2 { vec![0, 1] } else { vec![0] };
+        self.active_slot = 0;
+        browser::set_active_slot(0);
+
+        let ids = self.order.clone();
+        for &id in &ids {
+            self.width_units[id] = 1;
+            self.loading[id] = 0.0;
+            self.disp_rects[id] = None;
+        }
+        // Left slot 0: clearnet. Right slot 1 (only if it fits): Tor.
+        browser::set_slot_tor(0, false);
+        if ids.len() >= 2 {
+            if right_tor {
+                crate::tor::init();
+            }
+            browser::set_slot_tor(1, right_tor);
+        }
+
+        ids.iter().map(|&id| SlotPlan { id, url: None }).collect()
+    }
+
+    /// Plan a restored "Quit & Save" session (D-0035). Slots are re-created with
+    /// fresh contiguous ids `0..n` (ids index fixed per-slot arrays, so a persisted
+    /// raw id is never reused), clamped to the product cap AND the width the frame
+    /// can hold. Each restored slot's mode is set EXPLICITLY here — before any
+    /// browser is spawned — so a reused id never inherits a stale `SLOT_TOR` (the
+    /// CD-15 leak trap) and a Tor slot is created under its proxied context. A Tor
+    /// slot comes back as a REAL Tor slot on the start page (its URL was never
+    /// persisted); a clearnet slot reloads its saved URL (empty → start page). If
+    /// nothing fits, falls back to the default plan.
+    fn plan_restore(&mut self, rows: Vec<crate::store::SessionSlot>) -> Vec<SlotPlan> {
+        let cap = self.capacity().max(1) as u32;
+        let max_n = self.slot_max().min(cap as usize);
+
+        let mut plan: Vec<SlotPlan> = Vec::new();
+        let mut any_tor = false;
+        let mut units = 0u32;
+        self.active_slot = 0; // fallback until a row marked active is placed
+        for row in &rows {
+            if plan.len() >= max_n {
+                break;
+            }
+            let mut w = (row.width_units as u32).clamp(1, 2);
+            if units + w > cap {
+                w = 1; // shrink a double that no longer fits; stop if even one won't
+                if units + w > cap {
+                    break;
+                }
+            }
+            let id = plan.len(); // fresh contiguous id (never the persisted raw id)
+            // Reset per-slot state for the reused id, then set its mode BEFORE spawn.
+            self.width_units[id] = w;
+            self.loading[id] = 0.0;
+            self.disp_rects[id] = None;
+            browser::set_slot_tor(id, row.tor);
+            any_tor |= row.tor;
+            if row.active {
+                self.active_slot = id;
+            }
+            let url = if row.tor || !crate::memory::is_recordable(&row.url) {
+                None // Tor slots + internal/blank → the own start page
+            } else {
+                Some(row.url.clone())
+            };
+            plan.push(SlotPlan { id, url });
+            units += w;
+        }
+
+        if plan.is_empty() {
+            // Unreachable in practice (a non-empty saved session always fits ≥1
+            // slot), but keeps the default as a hard floor rather than an empty frame.
+            return self.plan_default();
+        }
+        if any_tor {
+            crate::tor::init();
+        }
+        self.order = plan.iter().map(|p| p.id).collect();
+        browser::set_active_slot(self.active_slot);
+        plan
+    }
+
+    /// Build + persist the current session (the "Quit & Save" button, D-0035).
+    /// Privacy: a Tor slot's URL is NEVER written to disk (it restores on the start
+    /// page), and internal/blank slots persist an empty URL — only real clearnet site
+    /// URLs are saved, and only on this explicit opt-in.
+    fn save_session(&self) {
+        let rows: Vec<crate::store::SessionSlot> = self
+            .order
+            .iter()
+            .enumerate()
+            .map(|(pos, &id)| {
+                let tor = browser::slot_is_tor(id);
+                let raw = browser::slot_url(id);
+                let url = if tor || !crate::memory::is_recordable(&raw) {
+                    String::new()
+                } else {
+                    raw
+                };
+                crate::store::SessionSlot {
+                    position: pos as i64,
+                    url,
+                    width_units: self.width_units[id] as i64,
+                    active: id == self.active_slot,
+                    tor,
+                }
+            })
+            .collect();
+        crate::store::shared().lock().unwrap().save_session(&rows);
     }
 
     /// Foreground guard (tier 1): in fullscreen, keep the shell always-on-top
@@ -1680,9 +1825,10 @@ impl ApplicationHandler for Shell {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // Boot the default workspace once the CEF context is initialised (CD-14):
-        // one slot at the own start page (websites are never restored, D-0025).
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Boot the workspace once the CEF context is initialised (CD-21, D-0035): the
+        // default two-slot layout (clearnet + Tor at the own start page), or an opt-in
+        // "Quit & Save" session restored exactly once.
         if !self.views_started
             && browser::context_ready()
             && let Some(window) = self.window.clone()
@@ -1725,6 +1871,22 @@ impl ApplicationHandler for Shell {
                     self.close_slot_at(pos);
                 }
             }
+        }
+
+        // APPLICATION-level quit queued by the MF-zone quit buttons (CD-21, D-0035).
+        // Distinct from the per-slot closes above: this ends the whole shell.
+        // "Quit & Save" (save = true) persists the full session first — restored
+        // exactly next launch; plain "Quit" writes nothing (default layout next
+        // launch, since take_saved_session found no flag). Either way we exit the
+        // loop; browser::shutdown_cef() runs after run_app returns (app.rs run()).
+        if self.views_started
+            && let Some(save) = browser::take_pending_quit()
+        {
+            if save {
+                self.save_session();
+            }
+            event_loop.exit();
+            return;
         }
 
 

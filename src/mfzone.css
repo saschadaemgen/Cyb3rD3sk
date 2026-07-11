@@ -162,3 +162,35 @@ html, body {
 }
 .reserved-title { font-size: 15px; font-weight: 600; color: var(--text); letter-spacing: 0.5px; }
 .reserved-sub { font-size: 12px; max-width: 220px; line-height: 1.5; }
+
+/* --- Application quit (CD-21) --------------------------------------------- */
+/* Persistent chrome pinned below the tab panes (flex:none), so both buttons stay
+   visible on every tab. "Quit & Save" is the primary (brand) action. These end the
+   whole shell — the CD-18 per-slot close icon is a separate control. */
+.quit-bar {
+  flex: none;
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--panel-border);
+}
+.qbtn {
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  flex: 1 1 0;
+  padding: 9px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--panel-border);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.qbtn:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--text-dim) 50%, var(--panel-border));
+}
+.qbtn.primary { border-color: var(--brand); color: var(--brand); }
+.qbtn.primary:hover { background: var(--brand); color: var(--bg); }

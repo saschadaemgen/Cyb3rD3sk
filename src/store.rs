@@ -15,7 +15,7 @@ use std::sync::{Mutex, OnceLock};
 
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// History is capped at this many rows; the oldest are pruned on each insert
 /// (D-0014). Local only — no sync, no export.
@@ -26,6 +26,19 @@ pub struct Suggestion {
     pub url: String,
     pub title: String,
     pub favorite: bool,
+}
+
+/// One persisted session slot (CD-21, D-0035): a slot's display position, the URL
+/// it showed, its width in units, whether it was the active slot, and its Tor mode.
+/// Only an explicit "Quit & Save" writes these; a plain quit leaves the restore
+/// flag clear so the next launch is the default layout. Internal/blank URLs and
+/// Tor-slot URLs are stored empty (privacy, D-0025) — the caller filters them.
+pub struct SessionSlot {
+    pub position: i64,
+    pub url: String,
+    pub width_units: i64,
+    pub active: bool,
+    pub tor: bool,
 }
 
 pub struct Store {
@@ -158,6 +171,28 @@ impl Store {
                 .execute_batch("DROP TABLE IF EXISTS session_slots;")
                 .expect("failed to migrate to schema v5 (drop session_slots)");
         }
+        if version < 6 {
+            // CD-21 (D-0035): the session workspace RETURNS — now opt-in and
+            // mode-aware. Re-creates session_slots with a per-slot `tor` column (the
+            // mode CD-10 lacked). The v5 DROP above already removed the old
+            // 4-column table, so this is a clean CREATE (never an ALTER of a shape
+            // that no longer exists); a DB at v3/v4 runs both in this one pass.
+            // Restore is gated by a `meta` flag set ONLY by "Quit & Save"; a plain
+            // quit leaves it clear → default layout. Privacy is preserved: internal/
+            // blank slots and Tor slots persist an empty URL (the caller filters),
+            // so no browsed URL reaches disk unless the user opts in via Quit & Save.
+            self.conn
+                .execute_batch(
+                    "CREATE TABLE IF NOT EXISTS session_slots (
+                         position    INTEGER PRIMARY KEY,
+                         url         TEXT NOT NULL DEFAULT '',
+                         width_units INTEGER NOT NULL DEFAULT 1,
+                         active      INTEGER NOT NULL DEFAULT 0,
+                         tor         INTEGER NOT NULL DEFAULT 0
+                     );",
+                )
+                .expect("failed to migrate to schema v6 (session_slots + per-slot mode)");
+        }
         self.conn
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .ok();
@@ -241,6 +276,111 @@ impl Store {
             out.extend(rows.filter_map(Result::ok));
         }
         out
+    }
+
+    // --- Session workspace (CD-21, D-0035) ----------------------------------
+    //
+    // A single implicit session, mode-aware, opt-in. `save_session` writes it on an
+    // explicit "Quit & Save"; `take_saved_session` restores it ONCE at launch and
+    // consumes the flag, so a later plain quit / crash boots the default layout. The
+    // restore flag lives in the `meta` table (not `settings`, so it never surfaces in
+    // the settings-page all_settings IPC).
+
+    fn meta_get(&self, key: &str) -> Option<String> {
+        self.conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .ok()
+    }
+
+    fn meta_set(&self, key: &str, value: &str) {
+        self.conn
+            .execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            .ok();
+    }
+
+    fn session_save_flag(&self) -> bool {
+        self.meta_get("session_savequit").as_deref() == Some("1")
+    }
+
+    fn set_session_save_flag(&self, on: bool) {
+        self.meta_set("session_savequit", if on { "1" } else { "0" });
+    }
+
+    /// Persist the current session (an explicit "Quit & Save"). The restore flag is
+    /// cleared FIRST and only re-set after the rows commit, so a crash mid-write
+    /// falls back to the default layout rather than restoring a partial session.
+    pub fn save_session(&self, slots: &[SessionSlot]) {
+        self.set_session_save_flag(false);
+        if self.write_session_rows(slots) {
+            self.set_session_save_flag(true);
+        }
+    }
+
+    /// Replace all session rows in one transaction. Returns whether it committed.
+    fn write_session_rows(&self, slots: &[SessionSlot]) -> bool {
+        // Store methods hold `&self` (the connection is shared behind the store
+        // Mutex), so use `unchecked_transaction` — the Mutex already serialises access.
+        let Ok(tx) = self.conn.unchecked_transaction() else {
+            return false;
+        };
+        if tx.execute("DELETE FROM session_slots", []).is_err() {
+            return false;
+        }
+        for s in slots {
+            if tx
+                .execute(
+                    "INSERT INTO session_slots (position, url, width_units, active, tor)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    (s.position, &s.url, s.width_units, s.active as i64, s.tor as i64),
+                )
+                .is_err()
+            {
+                return false;
+            }
+        }
+        tx.commit().is_ok()
+    }
+
+    fn load_session_rows(&self) -> Vec<SessionSlot> {
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = self.conn.prepare(
+            "SELECT position, url, width_units, active, tor
+             FROM session_slots ORDER BY position ASC",
+        ) && let Ok(rows) = stmt.query_map([], |r| {
+            Ok(SessionSlot {
+                position: r.get(0)?,
+                url: r.get(1)?,
+                width_units: r.get(2)?,
+                active: r.get::<_, i64>(3)? != 0,
+                tor: r.get::<_, i64>(4)? != 0,
+            })
+        }) {
+            out.extend(rows.filter_map(Result::ok));
+        }
+        out
+    }
+
+    /// Take the saved session IFF the last quit was a "Quit & Save": returns the
+    /// slots (ordered by position) and CONSUMES the flag — a one-shot restore, so a
+    /// later plain quit or a crash boots the default layout (D-0035). `None` when
+    /// there is nothing to restore (plain quit, first run, or an old/unknown schema
+    /// whose migration left the table empty).
+    pub fn take_saved_session(&self) -> Option<Vec<SessionSlot>> {
+        if !self.session_save_flag() {
+            return None;
+        }
+        self.set_session_save_flag(false);
+        let rows = self.load_session_rows();
+        // One-shot: consume the ROWS too, not just the flag — so no saved URL lingers
+        // on disk past the restore. Otherwise the last Quit & Save URLs would sit in
+        // state.db until the next Quit & Save overwrote them, even after a plain quit
+        // (which means "don't keep this"). Matches the D-0025 purge doctrine.
+        let _ = self.conn.execute("DELETE FROM session_slots", []);
+        if rows.is_empty() { None } else { Some(rows) }
     }
 
     // --- History (D-0014) ---------------------------------------------------
@@ -519,5 +659,50 @@ mod tests {
         let only_b = s.query_suggestions("b.example", 6);
         assert_eq!(only_b.len(), 1);
         assert_eq!(only_b[0].url, "https://b.example/");
+    }
+
+    // --- Session save/restore (CD-21, D-0035) -------------------------------
+
+    /// A "Quit & Save" session restores exactly once (mode, url, width, active
+    /// preserved) and is then consumed — a second launch (or a plain quit) boots
+    /// the default layout.
+    #[test]
+    fn save_quit_session_restores_once_then_defaults() {
+        let s = Store::open_in_memory();
+        assert!(s.take_saved_session().is_none(), "nothing saved yet → default boot");
+
+        let rows = vec![
+            SessionSlot { position: 0, url: "https://a.example/".into(), width_units: 1, active: true, tor: false },
+            SessionSlot { position: 1, url: String::new(), width_units: 2, active: false, tor: true },
+        ];
+        s.save_session(&rows);
+
+        let got = s.take_saved_session().expect("a Quit & Save session restores");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].url, "https://a.example/");
+        assert!(got[0].active && !got[0].tor, "clearnet active slot round-trips");
+        assert_eq!(got[1].width_units, 2);
+        assert!(got[1].tor && got[1].url.is_empty(), "Tor slot stays Tor, no URL on disk");
+
+        // One-shot: consumed after the first restore.
+        assert!(s.take_saved_session().is_none(), "restore is consumed → default next time");
+        // And the rows are purged from disk — no saved URL lingers past the restore.
+        assert!(s.load_session_rows().is_empty(), "consumed rows are deleted, not left behind");
+    }
+
+    /// A second save wholesale-replaces the first (no stale rows leak across saves).
+    #[test]
+    fn latest_save_replaces_the_previous_session() {
+        let s = Store::open_in_memory();
+        s.save_session(&[SessionSlot {
+            position: 0, url: "https://old.example/".into(), width_units: 1, active: true, tor: false,
+        }]);
+        s.save_session(&[
+            SessionSlot { position: 0, url: String::new(), width_units: 1, active: false, tor: true },
+            SessionSlot { position: 1, url: "https://new.example/".into(), width_units: 1, active: true, tor: false },
+        ]);
+        let got = s.take_saved_session().expect("restorable");
+        assert_eq!(got.len(), 2, "DELETE+INSERT replaces — no leftover row from the old save");
+        assert_eq!(got[1].url, "https://new.example/");
     }
 }
