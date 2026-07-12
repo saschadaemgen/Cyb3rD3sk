@@ -2,6 +2,43 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0037 - 2026-07-12 - Tor UI status is derived from current engine state and refreshed on every change (CD-23)
+
+*Decision.* The Tor status shown in the UI (the MF Tor-tab status line and the
+per-window anonymity indicator) must reflect the engine's CURRENT state, refreshed
+whenever it changes and obtainable on demand from a query — it must not be driven solely
+by a one-shot push that fires only on user actions. Two concrete guarantees:
+- **Refresh on change.** `about_to_wait` compares `tor::status()` against the status
+  last carried in a frame push (`Shell.tor_status_pushed`) and re-pushes the frame on a
+  transition. The engine reaches READY on a BACKGROUND thread with no user action, so
+  without this the frame push (which carries `tor_status` to the per-window anonymity
+  indicator in `command.js`) only fires on user actions / while the command band is
+  engaged, leaving the indicator latched on "Connecting" while Tor is actually usable.
+- **Query returns the live value.** The `get_frame` pull re-stamps the current
+  `tor::status()` into the cached payload (`browser::current_frame_state` /
+  `restamp_tor_status`), so any (re)created / (re)subscribing consumer (a reloaded
+  command band, a new ensemble) gets the correct current state, never a stale
+  "Connecting".
+
+*Confirmed mechanism (code-first, per the ticket).* `tor::init()` never resets the
+`STATUS` atomic — its "engine already started" branch is a `compare_exchange` no-op that
+leaves `STATUS` at `READY`, and `tor::status()` reads that atomic directly. So the Rust
+status was already correct, and the MF Tor tab (which polls `tor_status` every second in
+`mfzone.js`) was already right. The stuck indicator was the per-window anonymity orb
+(`command.js` `.tor-orb`), which is driven by the `tor_status` field of the on-change
+frame push (`app.rs::push_frame`) plus the `get_frame` pull. `push_frame` only ran on
+user actions and per-frame while the band was engaged, so a `bootstrapping→ready`
+transition that happened with the band closed / no user action was never pushed — the
+orb and the cached `get_frame` payload kept the last-pushed value. The repeated
+`tor::init` calls in the log are legitimate, idempotent triggers (six call sites: slot
+creation + Tor toggle), NOT a loop, so no lifecycle change was made.
+
+*Why.* Deriving the status from current engine state (refresh-on-change + a live query)
+rather than a latched push makes every consumer — already-loaded and (re)created —
+agree with reality and with each other, for any variant of "the status was only
+refreshed by a one-shot event". The Tor engine/bootstrap stack (arti 0.43, D-0034) is
+untouched: this is purely a UI state-propagation fix.
+
 ## D-0036 - 2026-07-12 - External-component update status is client-side; app self-update deferred to demo data (CD-22)
 
 *Decision.* The info area shows a REAL up-to-date status for every external dependency

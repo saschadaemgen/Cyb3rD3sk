@@ -217,26 +217,37 @@ unknown `cmd`).
 ### `cdFrame(json)` (host -> view, push)
 
 Not a `cefQuery` — the host calls `window.cdFrame(<json-string>)` on the band view
-via `Frame::execute_java_script` whenever the frame state **changes** (engaged slot
-or any column's target x/width), never per frame (the CD-11 on-change cadence). The
-page positions/reveals its ensembles from it and glides via CSS (~220 ms).
+via `Frame::execute_java_script` whenever the frame state **changes** (engaged slot,
+any column's target x/width, per-column Tor mode, or the Tor engine status), never per
+frame (the CD-11 on-change cadence). The page positions/reveals its ensembles from it
+and glides via CSS (~220 ms).
 
-- Payload: `{"slots":[{"id":<int>,"x":<num>,"w":<num>}, …],"engaged":<int|null>,"autofocus":<bool>}`
+- Payload: `{"slots":[{"id":<int>,"x":<num>,"w":<num>,"tor":<bool>}, …],"engaged":<int|null>,"autofocus":<bool>,"tor_status":<int>}`
   - `slots` — one entry per live column in display order; `x`/`w` are **band-DIP**
     (the band's origin = the window origin), so the page places each ensemble above
     its column. `id` is the stable slot id (the same id the `slot` field carries back).
+    `tor` — whether this column is on Tor (lights its anonymity icon).
   - `engaged` — the id of the column whose ensemble is revealed, or `null` (all hidden).
   - `autofocus` — focus + select the engaged capsule's input on this reveal (Ctrl+L).
     A **transient**: it is excluded from the host's change-signature, so a routine
     position-only push cannot clear a pending focus.
+  - `tor_status` — the Tor engine status (0 off / 1 connecting / 2 ready / 3 failed),
+    driving the per-window anonymity indicator. **CD-23:** it is part of the host's
+    change-signature, and the host also re-pushes the frame when `tor::status()`
+    transitions on its background thread (e.g. bootstrapping→ready), so the indicator
+    is never latched on "Connecting" while Tor is actually ready.
 
 ### `get_frame` (view -> host, pull)
 
 - Request: `{"cmd":"get_frame"}`
-- Effect: the page pulls the last-pushed frame state once on load (the band view can
-  reload independently of the host's push), then relies on `cdFrame` pushes.
-- Success: the current frame-state JSON string (the same payload as `cdFrame`), or an
-  empty string if none has been pushed yet.
+- Effect: the page pulls the frame state once on load (the band view can reload
+  independently of the host's push), then relies on `cdFrame` pushes.
+- Success: the current frame-state JSON string (the same payload as `cdFrame`). The
+  host **re-stamps the live `tor_status`** into it at pull time (CD-23), so a
+  (re)created / reloaded consumer always gets the current engine state, never a stale
+  "connecting". Because of that stamp the reply always carries at least a `tor_status`
+  key — before the first real push it is the `{}` seed with the live status stamped in
+  (`{"tor_status":<0-3>}`), never a bare `{}` or an empty string.
 - Failure: code 1 (malformed request JSON).
 
 ### `drag_start` (view -> host)
