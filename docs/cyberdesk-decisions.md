@@ -2,6 +2,46 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0038 - 2026-07-12 - rustls CryptoProvider must be an explicit `ring` dependency, installed at startup — never left transitive (CD-24; amends D-0036)
+
+*Decision.* The rustls `CryptoProvider` for arti's TLS runtime is an EXPLICIT direct
+dependency (`ring`) and is installed at startup via `CryptoProvider::install_default()`
+in the Tor engine thread (`tor::run`, first statement, before any arti/TLS construction).
+It must never depend on being pulled in transitively by another crate. `Cargo.toml` gains
+`rustls = { version = "0.23", default-features = false, features = ["ring"] }` (which
+unifies with arti's runtime rustls 0.23.41, so `rustls::crypto::ring` compiles and `ring`
+enters the runtime graph), and `tor::install_crypto_provider()` runs
+`rustls::crypto::ring::default_provider().install_default()`, treating an
+already-installed provider (`Err`) as success. **Not** `aws-lc-rs` — it needs a
+C-toolchain path we do not want, and `ring` is the provider already proven working on
+this machine.
+
+*The regression (live, CD-22 build).* arti's `TokioRustlsRuntime` needs a process-level
+rustls provider. rustls 0.23.41 with **no** provider feature compiled in panics at
+provider auto-detection ("Could not automatically determine the process-level
+CryptoProvider from Rustls crate features", `rustls-0.23.41/src/crypto/mod.rs:249`). The
+provider was historically supplied by `ring`, pulled in transitively via `ureq` (the
+Season-1 manifest-fetch HTTP client) and auto-installed. CD-22 (D-0036) removed `ureq`
+to honor NetGuard — correct, and it stands — but that silently removed `ring` from the
+runtime graph, so the Tor engine thread panicked right after "tor state/cache dirs ready"
+and before any bootstrap, taking Tor completely down (SOCKS listeners still bound, but no
+arti client behind them).
+
+*Confirmed crate-source-first.* `cargo tree -i ring -e normal` showed `ring` had left the
+runtime graph (it remained only as a build-dependency of `download-cef`'s `ureq v3`, and
+edition-2024's resolver keeps build-dep and normal-dep features separate). `futures-rustls
+0.26` — the runtime path to rustls via `tor-rtcompat`/arti — declares its rustls dep
+`default-features = false, features = ["std"]`, i.e. **no provider**. rustls 0.23.41 gates
+`pub mod ring` behind `#[cfg(feature = "ring")]`, so the explicit provider install requires
+the `ring` feature. After the fix, `cargo tree -i ring -e normal` shows `ring → rustls
+0.23.41 → cyberdesk` (single rustls version, unified).
+
+*Amendment to D-0036.* The `ureq` removal STANDS — NetGuard is preserved: `ring` is a
+cryptography library, not an HTTP client, so the shipped binary still opens no HTTP client
+of its own. The end state is strictly better than before CD-22: the crypto provider is now
+explicit and self-installed instead of accidentally transitive, so this coupling can never
+regress on a future dependency change. (`aws-lc-rs` stays off — no C-toolchain TLS path.)
+
 ## D-0037 - 2026-07-12 - Tor UI status is derived from current engine state and refreshed on every change (CD-23)
 
 *Decision.* The Tor status shown in the UI (the MF Tor-tab status line and the
