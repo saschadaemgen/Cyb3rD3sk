@@ -52,6 +52,16 @@ tracing-appender = "0.2"
 tokio-util = { version = "0.7", default-features = false, features = ["compat"] }
 # Names arti's PreferredRuntime (already in the tree via arti-client) for the client type.
 tor-rtcompat = { version = "0.43", default-features = false, features = ["tokio", "rustls"] }
+# rustls CryptoProvider — EXPLICIT `ring` (CD-24, D-0038). arti's `TokioRustlsRuntime`
+# needs a process-level rustls provider. rustls 0.23 with no provider feature panics at
+# auto-detection ("Could not automatically determine the process-level CryptoProvider").
+# `ring` used to arrive TRANSITIVELY via `ureq`; CD-22 (D-0036) removed `ureq` and
+# silently removed `ring`, so the Tor engine thread panicked at startup — Tor completely
+# down. We now depend on `ring` directly (the SAME provider proven working here) and
+# install it ourselves in `tor::run` (never `aws-lc-rs`: it needs a C-toolchain path we
+# do not want; `ring` matches arti's runtime rustls, unifying to one rustls 0.23.41).
+# This is a crypto library, NOT an HTTP client — NetGuard (D-0004/D-0036) is preserved.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # `StreamExt` to consume arti's bootstrap-status Stream (deep bootstrap instrumentation,
 # CD-15 HOTFIX 2). Already in the tree transitively via arti.
 futures = { version = "0.3", default-features = false, features = ["std"] }

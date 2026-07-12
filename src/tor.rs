@@ -147,6 +147,25 @@ pub fn socks_port(id: usize) -> u16 {
     SOCKS_BASE_PORT + (id.min(MAX_SLOTS - 1) as u16)
 }
 
+/// Install the rustls process-level `CryptoProvider` EXPLICITLY (ring) before arti
+/// builds any TLS (CD-24, D-0038). arti's `TokioRustlsRuntime` needs a process-level
+/// rustls provider; rustls 0.23 with no provider feature compiled in PANICS at
+/// auto-detection. The `ring` provider historically arrived transitively via `ureq`;
+/// CD-22 (D-0036) removed `ureq` and silently removed `ring`, so the Tor engine thread
+/// panicked at startup and Tor went completely down. We now depend on `ring` directly
+/// and install it here, ending all reliance on ambient feature-flag luck.
+///
+/// `install_default` returns `Err` if a provider is ALREADY installed (this fn is
+/// called on the tor thread, which is spawned once, but a provider could also be set by
+/// some other path) — that is a success for our purposes: the postcondition is only
+/// that SOME provider is installed before arti runs.
+fn install_crypto_provider() {
+    match rustls::crypto::ring::default_provider().install_default() {
+        Ok(()) => tracing::info!("rustls crypto provider installed (ring, explicit — D-0038)"),
+        Err(_) => tracing::debug!("rustls crypto provider already installed (ok)"),
+    }
+}
+
 /// Start the Tor engine once: a background tokio runtime that binds the per-slot
 /// SOCKS listeners immediately, then bootstraps arti (so a slot toggled to Tor
 /// while still connecting has a live port to retry against). Idempotent — a second
@@ -177,6 +196,8 @@ pub fn init() {
 }
 
 fn run() {
+    // MUST be first: install the rustls provider before arti touches any TLS (D-0038).
+    install_crypto_provider();
     tracing::info!("tor-engine thread: building the tokio runtime");
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -439,4 +460,24 @@ async fn reply(sock: &mut TcpStream, status: u8) -> std::io::Result<()> {
 
 fn bad(msg: &str) -> std::io::Error {
     std::io::Error::other(msg.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rustls `CryptoProvider` must be COMPILED IN (the `ring` feature) and
+    /// installable without panicking — the exact regression CD-24 fixes (D-0038). Before
+    /// this, arti's TLS runtime panicked at provider auto-detection because `ring` left
+    /// the runtime graph with `ureq` (CD-22). This proves `rustls::crypto::ring` is
+    /// available (the feature is on) and that a process-level default ends up installed.
+    #[test]
+    fn ring_crypto_provider_installs_without_panic() {
+        // Idempotent: safe even if another test in this process already installed one.
+        install_crypto_provider();
+        assert!(
+            rustls::crypto::CryptoProvider::get_default().is_some(),
+            "a rustls CryptoProvider must be installed after install_crypto_provider()"
+        );
+    }
 }
