@@ -117,6 +117,7 @@ pub fn run(windowed: bool) {
         bar_hide_at: None,
         band_off_at: None,
         frame_sig: String::new(),
+        tor_status_pushed: u8::MAX,
         drag: None,
     };
     event_loop.run_app(&mut app).expect("event loop error");
@@ -194,6 +195,12 @@ struct Shell {
     /// The last frame state pushed to the page, so a push fires only on change
     /// (target rects + engaged slot) — not per frame (the CD-11 IPC cadence).
     frame_sig: String,
+    /// The Tor engine status last carried in a frame push (CD-23). The engine reaches
+    /// READY on a BACKGROUND thread with no user action, so `about_to_wait` compares
+    /// this against `tor::status()` and re-pushes the frame on a transition — otherwise
+    /// the per-window anonymity indicator (cdFrame-driven) stays latched on the last
+    /// pushed value ("Connecting") while Tor is actually Ready. `u8::MAX` = never pushed.
+    tor_status_pushed: u8,
     /// An in-progress favorite-tile drag `(url, title)` (CD-12): the host owns it
     /// (ghost + drop zones) and slot views receive no mouse until it ends.
     drag: Option<(String, String)>,
@@ -942,6 +949,11 @@ impl Shell {
         // The Tor engine status also drives the glyph, so it is part of the sig
         // (a bootstrapping→ready transition re-pushes while the band is up, CD-15).
         let tor_status = crate::tor::status();
+        // Record the status this push reflects (CD-23): whether we push now or
+        // early-return on an unchanged sig, consumers hold `tor_status` afterwards
+        // (it is part of the sig, so an unchanged sig means an unchanged status), so
+        // `about_to_wait` won't redundantly re-push for the same value.
+        self.tor_status_pushed = tor_status;
         let mut sig = format!("{:?}#{tor_status}", self.engaged_slot);
         for (p, &id) in self.order.iter().enumerate() {
             let _ = write!(
@@ -1898,8 +1910,23 @@ impl ApplicationHandler for Shell {
             self.drag = Some((url, title));
         }
 
-        // Drive the top bar's reveal/hide state machine and slide easing.
+        // Drive the top bar's reveal/hide state machine and slide easing. While the
+        // band is engaged this re-pushes the frame every tick (picking up a Tor
+        // status change live); the next block covers the band-CLOSED case.
         self.update_band();
+
+        // Refresh the frame when the Tor engine status changes (CD-23, D-0037). The
+        // engine reaches READY on a background thread with NO user action, and the
+        // frame push (which carries `tor_status` to the per-window anonymity
+        // indicator) otherwise only fires on user actions / while the band is engaged
+        // — so without this a bootstrapping→ready transition would leave the indicator
+        // latched on "Connecting" while Tor is actually usable. `push_frame` dedups on
+        // its own signature, so this pushes at most once per real transition and keeps
+        // the cached `get_frame` payload current for any (re)created consumer. The MF
+        // Tor tab was already correct (it polls `tor_status`); this makes the two agree.
+        if self.views_started && crate::tor::status() != self.tor_status_pushed {
+            self.push_frame(false);
+        }
 
         // A committed navigation closes whatever internal overlay is open: the
         // command band slides away (CD-12), or the info panel closes as its notes

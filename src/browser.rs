@@ -705,6 +705,29 @@ fn frame_state() -> &'static Mutex<String> {
     F.get_or_init(|| Mutex::new("{}".to_string()))
 }
 
+/// The frame state a page pulling `get_frame` receives, with the LIVE Tor engine
+/// status re-stamped (CD-23). The engine reaches READY on a background thread, so the
+/// cached payload's `tor_status` could be stale; re-stamping it here means any
+/// (re)created / (re)subscribing consumer (a reloaded command band, a new ensemble)
+/// gets the CURRENT state on demand — never a latched "connecting". Falls back to the
+/// raw cache if it is not a JSON object.
+fn current_frame_state() -> String {
+    restamp_tor_status(&frame_state().lock().unwrap(), crate::tor::status())
+}
+
+/// Re-stamp `tor_status` in a frame-state JSON object with `status` (pure, unit-tested).
+/// Falls back to the input unchanged if it is not a JSON object (e.g. the "{}" seed or
+/// malformed cache), so an odd cache can never wedge the pull.
+fn restamp_tor_status(cached: &str, status: u8) -> String {
+    match serde_json::from_str::<serde_json::Value>(cached) {
+        Ok(mut v) if v.is_object() => {
+            v["tor_status"] = serde_json::json!(status);
+            v.to_string()
+        }
+        _ => cached.to_string(),
+    }
+}
+
 /// Store the frame state and push it to the command band page: calls
 /// `window.cdFrame(json)` on the internal view (`json` = {slots, engaged,
 /// autofocus}, embedded as a JS string literal). Pushed on change (not per frame)
@@ -1098,7 +1121,7 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
         }
         // Command band frame state pull (CD-12): the page loads it on start, then
         // the host pushes updates via set_frame_state.
-        "get_frame" => Ok(frame_state().lock().unwrap().clone()),
+        "get_frame" => Ok(current_frame_state()),
         // Command / navigation (CD-04; CD-12 carries the ensemble's slot id).
         "get_nav_state" => Ok(nav_state_json(target_slot(&v))),
         "navigate" => {
@@ -1819,5 +1842,39 @@ wrap_render_process_handler! {
                 0
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restamp_tor_status;
+
+    /// The get_frame pull re-stamps the LIVE Tor status into the cached frame payload,
+    /// so a (re)created command-band consumer never reads a latched "connecting" (CD-23).
+    #[test]
+    fn restamp_overwrites_stale_tor_status() {
+        // A cached payload whose tor_status is stale (1 = bootstrapping)…
+        let cached = r#"{"slots":[{"id":0,"x":0,"w":800,"tor":true}],"engaged":null,"autofocus":false,"tor_status":1}"#;
+        // …is re-stamped with the current engine status (2 = ready).
+        let out = restamp_tor_status(cached, 2);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["tor_status"], 2, "live status replaces the cached one");
+        // The rest of the payload is preserved untouched.
+        assert_eq!(v["slots"][0]["tor"], true);
+        assert_eq!(v["engaged"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn restamp_adds_tor_status_when_absent_and_tolerates_non_objects() {
+        // An object with no tor_status gains it.
+        let added = restamp_tor_status(r#"{"slots":[]}"#, 3);
+        let v: serde_json::Value = serde_json::from_str(&added).unwrap();
+        assert_eq!(v["tor_status"], 3);
+        // The "{}" seed round-trips with the status stamped in.
+        let seed = restamp_tor_status("{}", 0);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&seed).unwrap()["tor_status"], 0);
+        // A non-object (malformed / unexpected) cache is returned unchanged, never a panic.
+        assert_eq!(restamp_tor_status("not json", 2), "not json");
+        assert_eq!(restamp_tor_status("[1,2,3]", 2), "[1,2,3]");
     }
 }
