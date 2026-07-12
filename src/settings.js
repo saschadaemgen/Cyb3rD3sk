@@ -52,7 +52,9 @@
       });
   }
 
-  var switches = document.querySelectorAll(".switch");
+  // Only the generic settings toggles (data-key). The per-vector hardening switches
+  // (data-fp) are wired separately (CD-25) because turning one off is gated.
+  var switches = document.querySelectorAll(".switch[data-key]");
   for (var i = 0; i < switches.length; i++) {
     (function (el) {
       el.addEventListener("click", function () { toggle(el); });
@@ -125,8 +127,185 @@
     })(engineOpts[i]);
   }
 
-  // Click anywhere else closes the menu.
-  document.addEventListener("click", function () { openEngine(false); });
+  // --- Fingerprinting-hardening controls (CD-25) ---------------------------
+  // Global preset (Off/Standard/Strict/Custom) + a per-vector detail view, with a
+  // two-confirmation gate on any WEAKENING. The weaken classification mirrors
+  // harden.rs::is_weakening; the host re-validates it, so the gate here is UX, not
+  // the trust boundary.
+  var fpSelect = document.getElementById("fp-select");
+  var fpBtn = document.getElementById("fp-btn");
+  var fpMenu = document.getElementById("fp-menu");
+  var fpVal = document.getElementById("fp-val");
+  var fpLevelPill = document.getElementById("fp-level");
+  var fpDetail = document.getElementById("fp-detail");
+  var FP_LABELS = { off: "Off", standard: "Standard", strict: "Strict", custom: "Custom" };
+  var VECTORS = ["canvas", "webgl", "audio", "metrics", "nav", "fonts"];
+  var VECTOR_LABELS = {
+    canvas: "canvas", webgl: "WebGL", audio: "audio",
+    metrics: "layout & text metrics", nav: "CPU & memory", fonts: "fonts"
+  };
+  var ALL_ON = { on: true, canvas: true, webgl: true, audio: true, metrics: true, nav: true, fonts: true };
+  var fpState = { preset: "standard", vectors: { canvas: true, webgl: true, audio: true, metrics: true, nav: true, fonts: true } };
+
+  // Resolve a (preset, vectors) into the effective 6-vector config for the weaken
+  // classification (mirror harden.rs::resolve).
+  function fpEffective(preset, vectors) {
+    if (preset === "off") {
+      return { on: false, canvas: false, webgl: false, audio: false, metrics: false, nav: false, fonts: false };
+    }
+    if (preset === "custom") {
+      var any = false;
+      VECTORS.forEach(function (k) { if (vectors[k]) any = true; });
+      return { on: any, canvas: vectors.canvas, webgl: vectors.webgl, audio: vectors.audio, metrics: vectors.metrics, nav: vectors.nav, fonts: vectors.fonts };
+    }
+    return { on: true, canvas: true, webgl: true, audio: true, metrics: true, nav: true, fonts: true }; // standard / strict
+  }
+  function isWeakening(cur, tgt) {
+    return (cur.on && !tgt.on) || (cur.canvas && !tgt.canvas) || (cur.webgl && !tgt.webgl) ||
+      (cur.audio && !tgt.audio) || (cur.metrics && !tgt.metrics) || (cur.nav && !tgt.nav) || (cur.fonts && !tgt.fonts);
+  }
+
+  function paintFp() {
+    var lvl = FP_LABELS[fpState.preset] ? fpState.preset : "standard";
+    fpVal.textContent = FP_LABELS[lvl];
+    var opts = fpMenu.querySelectorAll("li");
+    for (var i = 0; i < opts.length; i++) {
+      opts[i].setAttribute("aria-selected", opts[i].dataset.value === lvl ? "true" : "false");
+    }
+    var eff = fpEffective(fpState.preset, fpState.vectors);
+    var reduced = !eff.on || isWeakening(ALL_ON, eff);
+    fpLevelPill.textContent = lvl;
+    // s2 = accent (strict, strongest), s1 = brand (standard), s3 = warn (off/reduced).
+    fpLevelPill.className = "tor-status s" + (lvl === "off" || reduced ? 3 : lvl === "strict" ? 2 : 1);
+    fpDetail.hidden = fpState.preset !== "custom";
+    VECTORS.forEach(function (k) {
+      var el = document.querySelector('.switch[data-fp="' + k + '"]');
+      if (el) {
+        el.classList.toggle("on", !!fpState.vectors[k]);
+        el.setAttribute("aria-checked", fpState.vectors[k] ? "true" : "false");
+      }
+    });
+  }
+
+  function applyFp(level, vectors, confirm) {
+    var req = { cmd: "set_hardening", level: level, confirm: !!confirm };
+    if (vectors) req.vectors = vectors;
+    return query(req);
+  }
+
+  // --- the gate (two confirmations in one dialog) ---
+  var gate = document.getElementById("gate");
+  var gateTitle = document.getElementById("gate-title");
+  var gateBody = document.getElementById("gate-body");
+  var gateCancel = document.getElementById("gate-cancel");
+  var gateConfirm = document.getElementById("gate-confirm");
+  var gatePending = null, gateStep = 1;
+
+  function openGate(copy, onConfirm) {
+    gatePending = onConfirm; gateStep = 1;
+    gateTitle.textContent = copy.title;
+    gateBody.innerHTML = copy.body;
+    gateConfirm.textContent = "Weaken anyway";
+    gate.hidden = false;
+  }
+  function closeGate() { gate.hidden = true; gatePending = null; gateStep = 1; }
+  gateCancel.addEventListener("click", function () { closeGate(); });
+  gateConfirm.addEventListener("click", function () {
+    if (gateStep === 1) {
+      gateStep = 2;
+      gateBody.innerHTML = "This lowers <strong>your own</strong> protection. Continue anyway? " +
+        "For serious anti-fingerprinting anonymity, use <strong>Tor Browser</strong>.";
+      gateConfirm.textContent = "Yes, weaken protection";
+      return;
+    }
+    var fn = gatePending; closeGate(); if (fn) fn();
+  });
+
+  function presetGateCopy(level) {
+    if (level === "off") {
+      return {
+        title: "Turn off tracking protection?",
+        body: "With hardening <strong>off</strong>, every site gets a stable, distinctive " +
+          "fingerprint — your canvas, GPU, audio and text measurements read the same across " +
+          "sites and every session, so trackers can <strong>link your visits and recognise " +
+          "you when you return</strong>, even without cookies. This makes you easier to track, not harder."
+      };
+    }
+    return {
+      title: "Customise protection?",
+      body: "Custom mode lets you disable individual protections. A partial, unusual set can make " +
+        "you <strong>more</strong> identifiable, not less — a preset (Standard or Strict) hides you " +
+        "better. Only turn things off if you have a specific reason."
+    };
+  }
+
+  function selectPreset(level) {
+    if (level === fpState.preset && level !== "custom") return;
+    var cur = fpEffective(fpState.preset, fpState.vectors);
+    var tgt = fpEffective(level, fpState.vectors);
+    var weaken = isWeakening(cur, tgt);
+    var enteringCustom = level === "custom" && fpState.preset !== "custom";
+    function commit() {
+      fpState.preset = level;
+      paintFp();
+      applyFp(level, level === "custom" ? fpState.vectors : null, weaken)
+        .catch(function (err) { setStatus(String(err), true); });
+    }
+    if (weaken || enteringCustom) openGate(presetGateCopy(level), commit);
+    else commit();
+  }
+
+  function toggleVector(el) {
+    var k = el.dataset.fp;
+    var turningOff = !!fpState.vectors[k];
+    function commit() {
+      fpState.vectors[k] = !fpState.vectors[k];
+      fpState.preset = "custom";
+      paintFp();
+      applyFp("custom", fpState.vectors, turningOff)
+        .catch(function (err) { setStatus(String(err), true); });
+    }
+    if (turningOff) {
+      openGate({
+        title: "Disable " + VECTOR_LABELS[k] + " protection?",
+        body: "Leaving <strong>" + VECTOR_LABELS[k] + "</strong> unprotected lets sites read its " +
+          "real value and use it to recognise you across sites and sessions. Keep it protected " +
+          "unless you have a specific reason."
+      }, commit);
+    } else commit();
+  }
+
+  function openFp(open) {
+    fpSelect.classList.toggle("open", open);
+    fpBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    fpMenu.hidden = !open;
+  }
+  fpBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    openFp(!fpSelect.classList.contains("open"));
+  });
+  var fpOpts = fpMenu.querySelectorAll("li");
+  for (var fi = 0; fi < fpOpts.length; fi++) {
+    (function (li) {
+      li.addEventListener("click", function (e) {
+        e.stopPropagation();
+        openFp(false);
+        selectPreset(li.dataset.value);
+      });
+    })(fpOpts[fi]);
+  }
+  var fpSwitches = document.querySelectorAll(".switch[data-fp]");
+  for (var fj = 0; fj < fpSwitches.length; fj++) {
+    (function (el) {
+      el.addEventListener("click", function () { toggleVector(el); });
+      el.addEventListener("keydown", function (e) {
+        if (e.key === " " || e.key === "Enter") { e.preventDefault(); toggleVector(el); }
+      });
+    })(fpSwitches[fj]);
+  }
+
+  // Click anywhere else closes the menus.
+  document.addEventListener("click", function () { openEngine(false); openFp(false); });
 
   // Load current values on startup.
   query({ cmd: "get_settings" })
@@ -139,6 +318,11 @@
       paint("tor_enabled", s.tor_enabled);
       paintGlow(s.glow_intensity);
       paintEngine(s.search_engine);
+      fpState.preset = FP_LABELS[s.fp_preset] ? s.fp_preset : "standard";
+      if (s.fp_custom) {
+        VECTORS.forEach(function (k) { fpState.vectors[k] = s.fp_custom[k] !== false; });
+      }
+      paintFp();
     })
     .catch(function (err) { setStatus(String(err), true); });
 

@@ -140,6 +140,99 @@ html, body {
   box-shadow: 0 0 10px color-mix(in srgb, var(--warn) 30%, transparent);
 }
 
+/* Per-window tracking-resistance orb (CD-25): an orb-sized fingerprint glyph. The
+   Standard default reads NEUTRAL (like a nav orb) to avoid always-lit clutter on
+   every window; Strict is accent-lit; Off / reduced is warn-tinted (honesty: a
+   reduced state must LOOK reduced); a per-window override adds a small dot marker. */
+.fp-orb {
+  flex: none;
+  width: var(--cmd-orb-size);
+  height: var(--cmd-orb-size);
+  border-radius: 50%;
+  border: 1px solid var(--panel-border);
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+  color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: relative;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.fp-orb:hover { color: var(--text); border-color: var(--brand); }
+.fp-orb.strict {
+  color: color-mix(in srgb, var(--accent) 85%, var(--text));
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.fp-orb.reduced {
+  color: var(--warn);
+  border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--warn) 26%, transparent);
+}
+/* Override marker: a small dot telling this window differs from the global default. */
+.fp-orb.override::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--brand);
+  box-shadow: 0 0 0 1.5px var(--panel);
+}
+
+/* The per-window tracking-resistance menu + its inline two-step weakening gate. */
+.fp-pop {
+  position: fixed;
+  z-index: 40;
+  min-width: 220px;
+  max-width: 300px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px color-mix(in srgb, #000 55%, transparent);
+  font-size: 13px;
+  color: var(--text);
+}
+.fp-pop[hidden] { display: none; }
+.fp-pop-title { font-weight: 600; padding: 4px 8px 2px; }
+.fp-pop-sub { font-size: 11.5px; color: var(--text-dim); padding: 0 8px 6px; line-height: 1.4; }
+.fp-pop-opt {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.fp-pop-opt:hover { background: color-mix(in srgb, var(--brand) 16%, transparent); }
+.fp-pop-opt.active { color: var(--brand); font-weight: 600; }
+.fp-pop-warn { font-size: 12px; color: var(--text-dim); line-height: 1.5; padding: 6px 8px 8px; }
+.fp-pop-warn b { color: var(--text); font-weight: 600; }
+.fp-pop-actions { display: flex; gap: 8px; justify-content: flex-end; padding: 4px; }
+.fp-pop-btn {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  border: 1px solid var(--brand);
+  background: transparent;
+  color: var(--brand);
+}
+.fp-pop-btn.keep:hover { background: var(--brand); color: var(--bg); }
+.fp-pop-btn.weaken { border-color: var(--warn); color: color-mix(in srgb, var(--warn) 88%, var(--text)); }
+.fp-pop-btn.weaken:hover { background: var(--warn); color: var(--bg); }
+
 /* Per-window close icon (CD-18): an orb-sized X to the right of the Tor icon —
    closes THIS window. Warn-tinted on hover; dimmed + disabled on the last window
    (the host refuses to close it). Replaces the retired CD-12 corner-hover orb. */

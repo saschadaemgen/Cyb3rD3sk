@@ -34,6 +34,15 @@
 
   var SESSION_SEED = "__CYBERDESK_FP_SEED__";
 
+  // CD-25 (D-0040): the per-window EFFECTIVE config — which vectors run, and whether
+  // to use the tighter "strict" entropy buckets — substituted by the host per browser
+  // (per-window; the seed stays session-global). The mechanics below are unchanged
+  // from CD-16; each vector block is merely gated on its flag, and Standard resolves
+  // to every flag true / strict false, so an unchanged install behaves EXACTLY as
+  // CD-16. "Off" is never injected at all (the render process skips injection), so by
+  // the time this file runs at least one vector is on.
+  var FP_CONFIG = __CYBERDESK_FP_CONFIG__;
+
   // The page global. Referenced explicitly (and every DOM constructor is looked up
   // via `W.` and guarded) so a missing global degrades to a no-op instead of
   // throwing and aborting the rest of the hardening — and so the exact same file
@@ -147,7 +156,7 @@
   }
 
   // ============ Canvas 2D readback ===========================================
-  (function canvas() {
+  if (FP_CONFIG.canvas) (function canvas() {
     var HCE = W.HTMLCanvasElement, C2D = W.CanvasRenderingContext2D;
     var _getImageData = C2D && C2D.prototype.getImageData;
     var _toDataURL = HCE && HCE.prototype.toDataURL;
@@ -221,7 +230,7 @@
   })();
 
   // ============ WebGL readback + parameter standardization ===================
-  (function webgl() {
+  if (FP_CONFIG.webgl) (function webgl() {
     var SEED = vseed("webgl");
     var VENDOR = 0x9245, RENDERER = 0x9246; // UNMASKED_*_WEBGL (debug_renderer_info)
     // A common, Windows-COHERENT ANGLE/D3D11 Intel string (the single most common
@@ -258,7 +267,7 @@
   })();
 
   // ============ AudioContext readback ========================================
-  (function audio() {
+  if (FP_CONFIG.audio) (function audio() {
     // Inaudible, deterministic perturbation. Additive with a small floor so silent
     // samples (and dB-scale frequency bins) are still moved; magnitude ~1e-4
     // relative is far below the audible threshold but shifts the significant digits
@@ -327,7 +336,7 @@
   })();
 
   // ============ Client rects + text metrics ==================================
-  (function metrics() {
+  if (FP_CONFIG.metrics) (function metrics() {
     var DOMRectCtor = W.DOMRect;
     function jitterRect(r) {
       if (!r || !DOMRectCtor) return r;
@@ -380,7 +389,7 @@
   })();
 
   // ============ Entropy reduction on stable attributes =======================
-  (function navAttrs() {
+  if (FP_CONFIG.nav) (function navAttrs() {
     var Nav = W.Navigator, nav = W.navigator;
     // hardwareConcurrency → nearest common bucket AT OR BELOW the real value (never
     // over-report cores; floor 2). Collapses many machines onto {2,4,8,16}.
@@ -389,6 +398,9 @@
         var real = (nav && nav.hardwareConcurrency) || 4;
         var buckets = [2, 4, 8, 16], cores = 2;
         for (var i = 0; i < buckets.length; i++) if (buckets[i] <= real) cores = buckets[i];
+        // Strict collapses everyone toward a single common value (max anonymity set)
+        // — but never ABOVE the standard bucket, so it never over-reports cores.
+        if (FP_CONFIG.strict && cores > 4) cores = 4;
         Object.defineProperty(Nav.prototype, "hardwareConcurrency", {
           get: function () { return cores; }, configurable: true, enumerable: true
         });
@@ -399,6 +411,8 @@
     try {
       if (Nav && Nav.prototype && nav && ("deviceMemory" in nav)) {
         var mem = ((nav.deviceMemory || 8) >= 4) ? 8 : 4;
+        // Strict collapses to the single low common value (never over-reports RAM).
+        if (FP_CONFIG.strict) mem = 4;
         Object.defineProperty(Nav.prototype, "deviceMemory", {
           get: function () { return mem; }, configurable: true, enumerable: true
         });
@@ -407,7 +421,7 @@
   })();
 
   // ============ Font enumeration =============================================
-  (function fonts() {
+  if (FP_CONFIG.fonts) (function fonts() {
     // Neutralize the explicit Local Font Access enumeration API (a high-signal,
     // cleanly removable vector): report no locally-installed fonts. (Width-based
     // font PROBING via measureText/rects is only partially mitigated by the metric

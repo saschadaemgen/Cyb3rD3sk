@@ -24,9 +24,11 @@
 //! Sandbox note: the Windows CEF sandbox is still disabled here (`no_sandbox`);
 //! see docs/cyberdesk-decisions.md, D-0008, for the tracked deviation.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::os::raw::c_int;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use cef::wrapper::message_router::{
@@ -377,10 +379,17 @@ pub fn create_browser_url(role: Role, parent_hwnd: isize, url: &str) {
     // and `set_preference` is UI-thread-only (MTML) — so post the whole creation to
     // the CEF UI thread (CD-15 Stage B). Clearnet slots / the internal view use the
     // direct global context on the current thread, unchanged.
+    // Capture the slot generation now (CD-25): for a respawn, the preceding
+    // close_slot has already bumped it, so this create is stamped with the current
+    // generation and a later close/respawn will supersede it.
+    let generation = match role {
+        Role::Slot(i) => slot_gen(i),
+        Role::Internal | Role::MfZone => 0,
+    };
     if let Role::Slot(i) = role
         && slot_is_tor(i)
     {
-        let mut task = TorSpawnTask::new(i, url.to_string(), parent_hwnd);
+        let mut task = TorSpawnTask::new(i, url.to_string(), parent_hwnd, generation);
         post_task(ThreadId::UI, Some(&mut task));
         return;
     }
@@ -391,7 +400,7 @@ pub fn create_browser_url(role: Role, parent_hwnd: isize, url: &str) {
     // This path is clearnet (the global/direct context) — the Tor path is
     // spawn_tor_browser. Tag the browser clearnet so on_after_created can reject it
     // if the slot has since been toggled to Tor.
-    let mut client = CyberClient::new(role, false);
+    let mut client = CyberClient::new(role, false, generation);
     let url = CefString::from(url);
     let background_color = match role {
         // Slot: opaque white backing (the page paints its own background).
@@ -411,12 +420,19 @@ pub fn create_browser_url(role: Role, parent_hwnd: isize, url: &str) {
         ..Default::default()
     };
 
+    // CD-25: carry this slot's effective hardening config to its render process via
+    // extra_info. Internal / MF-zone views load cyberdesk:// (never hardened), so
+    // only slots get a config dict.
+    let mut extra = match role {
+        Role::Slot(i) => harden_extra_info(i),
+        Role::Internal | Role::MfZone => None,
+    };
     let created = browser_host_create_browser(
         Some(&window_info),
         Some(&mut client),
         Some(&url),
         Some(&browser_settings),
-        None,
+        extra.as_mut(),
         None,
     );
     assert_eq!(created, 1, "CefBrowserHost::CreateBrowser failed");
@@ -495,11 +511,15 @@ wrap_task! {
         slot: usize,
         url: String,
         hwnd: isize,
+        // The slot generation captured when the respawn was REQUESTED (CD-25), carried
+        // across the deferred UI-thread hop so the Tor browser is stamped with the
+        // request-time generation, not a fresher one read after a later close.
+        generation: u32,
     }
 
     impl Task {
         fn execute(&self) {
-            spawn_tor_browser(self.slot, &self.url, self.hwnd);
+            spawn_tor_browser(self.slot, &self.url, self.hwnd, self.generation);
         }
     }
 }
@@ -515,7 +535,7 @@ wrap_task! {
 /// network); real navigation happens long after the context is initialized and the
 /// proxy applied, and until arti is ready a real fetch simply cannot complete
 /// (safe — fail-closed), never a direct one.
-fn spawn_tor_browser(slot: usize, url: &str, hwnd: isize) {
+fn spawn_tor_browser(slot: usize, url: &str, hwnd: isize, generation: u32) {
     let port = crate::tor::socks_port(slot);
     tracing::info!(slot, port, "spawn_tor_browser: begin (CEF UI thread)");
     let Some(mut ctx) = build_tor_context(slot, port) else {
@@ -524,19 +544,22 @@ fn spawn_tor_browser(slot: usize, url: &str, hwnd: isize) {
     };
     tracing::info!(slot, "tor context created; calling CreateBrowser");
     let window_info = WindowInfo::default().set_as_windowless(sys::HWND(hwnd as *mut sys::HWND__));
-    let mut client = CyberClient::new(Role::Slot(slot), true); // built for Tor
+    let mut client = CyberClient::new(Role::Slot(slot), true, generation); // built for Tor
     let url = CefString::from(url);
     let browser_settings = BrowserSettings {
         windowless_frame_rate: 60,
         background_color: 0xFFFF_FFFFu32,
         ..Default::default()
     };
+    // CD-25: this slot's effective hardening config rides extra_info (5th arg),
+    // independent of the Tor proxy on the request context (6th arg) — they compose.
+    let mut extra = harden_extra_info(slot);
     let created = browser_host_create_browser(
         Some(&window_info),
         Some(&mut client),
         Some(&url),
         Some(&browser_settings),
-        None,
+        extra.as_mut(),
         Some(&mut ctx),
     );
     tracing::info!(slot, created, "spawn_tor_browser: CreateBrowser returned");
@@ -687,6 +710,9 @@ pub fn close_slot(i: usize) {
     if i >= MAX_SLOTS {
         return;
     }
+    // Bump the generation (CD-25): any browser whose creation for this slot is still
+    // in flight is now stale and closes itself on arrival (see on_after_created).
+    SLOT_GEN[i].fetch_add(1, Ordering::Relaxed);
     let browser = view(Role::Slot(i)).browser.lock().unwrap().take();
     if let Some(browser) = browser
         && let Some(host) = browser.host()
@@ -819,16 +845,21 @@ fn render_seed() -> &'static str {
     })
 }
 
-/// The full document-start injection payload for THIS render process: the embedded
-/// hardening script with the session-seed placeholder substituted, built once.
-fn hardening_payload() -> &'static str {
-    static P: OnceLock<String> = OnceLock::new();
-    P.get_or_init(|| include_str!("hardening.js").replace("__CYBERDESK_FP_SEED__", render_seed()))
+/// The document-start injection payload for a given per-window EFFECTIVE config
+/// (CD-25): the embedded hardening script with the session seed AND the config JSON
+/// substituted. Unlike CD-16's single cached string, this is per-config (the config
+/// varies per window), so it is rebuilt per injection — cheap next to a navigation.
+fn hardening_payload(config_json: &str) -> String {
+    include_str!("hardening.js")
+        .replace("__CYBERDESK_FP_SEED__", render_seed())
+        .replace("__CYBERDESK_FP_CONFIG__", config_json)
 }
 
 /// Whether a frame with this URL is a WEB frame that must be hardened. Our own
 /// `cyberdesk://` UI and the browser-internal schemes are left untouched (farbling
-/// them is pointless and could break the internal views).
+/// them is pointless and could break the internal views). Whether hardening is
+/// actually applied (or skipped for an Off config) is decided separately, per
+/// browser, in the render handler.
 fn should_harden(url: &str) -> bool {
     if url.is_empty() {
         return false;
@@ -843,11 +874,146 @@ fn should_harden(url: &str) -> bool {
     !SKIP.iter().any(|p| url.starts_with(p))
 }
 
-/// Run the hardening script in `frame`'s freshly-created V8 context. Called from
-/// the render-side `on_context_created`, which fires before any page script, so our
-/// patches are in place first.
-fn inject_hardening(frame: &mut Frame) {
-    frame.execute_java_script(Some(&CefString::from(hardening_payload())), None, 0);
+/// Run the hardening script in `frame`'s freshly-created V8 context under `config`.
+/// Called from the render-side `on_context_created`, which fires before any page
+/// script, so our patches are in place first.
+fn inject_hardening(frame: &mut Frame, config_json: &str) {
+    frame.execute_java_script(
+        Some(&CefString::from(hardening_payload(config_json).as_str())),
+        None,
+        0,
+    );
+}
+
+// --- CD-25: per-window hardening config (D-0040) ----------------------------
+// The GLOBAL preset lives in settings.rs; each slot may hold a per-window OVERRIDE
+// (session-ephemeral — not persisted). The EFFECTIVE config (override else global)
+// is resolved at browser-CREATE time and carried to the render process via the
+// CreateBrowser `extra_info` dictionary — per-window, alongside the session-global
+// seed switch (unchanged). A level change RESPAWNS the slot's browser so the fresh
+// document injects under the new config: a live context can't be re-hardened (the
+// patches are irreversible, applied before page scripts). The dict rides `extra_info`
+// (5th CreateBrowser arg) and composes cleanly with the Tor proxy (6th arg).
+
+/// Per-slot hardening override sentinel: "inherit the global preset".
+const HARDEN_INHERIT: u8 = u8::MAX;
+/// Per-slot hardening OVERRIDE (0=off, 1=standard, 2=strict) or [`HARDEN_INHERIT`].
+/// The per-window control offers presets only — per-vector custom is a global
+/// capability — so there is no per-window `custom` override.
+static SLOT_HARDENING: [AtomicU8; MAX_SLOTS] =
+    [const { AtomicU8::new(HARDEN_INHERIT) }; MAX_SLOTS];
+
+/// Set slot `i`'s hardening override (`None` = inherit the global preset).
+pub fn set_slot_hardening(i: usize, level: Option<crate::harden::Level>) {
+    if i < MAX_SLOTS {
+        let code = match level {
+            None | Some(crate::harden::Level::Custom) => HARDEN_INHERIT,
+            Some(crate::harden::Level::Off) => 0,
+            Some(crate::harden::Level::Standard) => 1,
+            Some(crate::harden::Level::Strict) => 2,
+        };
+        SLOT_HARDENING[i].store(code, Ordering::Relaxed);
+    }
+}
+
+/// Slot `i`'s hardening override, if any (`None` = inheriting the global preset).
+pub fn slot_hardening_override(i: usize) -> Option<crate::harden::Level> {
+    if i >= MAX_SLOTS {
+        return None;
+    }
+    match SLOT_HARDENING[i].load(Ordering::Relaxed) {
+        0 => Some(crate::harden::Level::Off),
+        1 => Some(crate::harden::Level::Standard),
+        2 => Some(crate::harden::Level::Strict),
+        _ => None,
+    }
+}
+
+/// The EFFECTIVE resolved config for slot `i` (its override, else the global preset).
+pub fn slot_effective_config(i: usize) -> crate::harden::Config {
+    match slot_hardening_override(i) {
+        Some(level) => crate::harden::resolve(level, crate::settings::hardening_custom()),
+        None => crate::settings::hardening_global_config(),
+    }
+}
+
+/// Per-slot browser GENERATION (CD-25). Browsers are created ASYNCHRONOUSLY (MTML:
+/// `on_after_created` fires later on the CEF UI thread), so within one main-thread
+/// pass a `close_slot` cannot tear down a browser whose creation is still in flight.
+/// Every `close_slot` bumps the slot's generation; a browser captures the generation
+/// at CREATE time and, on arrival, closes itself if the slot has since moved on. This
+/// closes the double-respawn orphan (two same-slot respawns in one drain) AND the
+/// respawn-then-close ghost (a live page/circuit registered for a closed slot) — the
+/// `tor`-mode guard alone missed both because a hardening respawn does not flip Tor.
+static SLOT_GEN: [AtomicU32; MAX_SLOTS] = [const { AtomicU32::new(0) }; MAX_SLOTS];
+
+fn slot_gen(i: usize) -> u32 {
+    if i < MAX_SLOTS { SLOT_GEN[i].load(Ordering::Relaxed) } else { 0 }
+}
+
+/// Build the CreateBrowser `extra_info` dict carrying slot `i`'s effective hardening
+/// config to its render process. `None` only if the dict can't be created (the render
+/// side then fails safe to Standard — never silently Off).
+fn harden_extra_info(i: usize) -> Option<DictionaryValue> {
+    let dict = dictionary_value_create()?;
+    dict.set_string(
+        Some(&CefString::from("cd_harden")),
+        Some(&CefString::from(slot_effective_config(i).to_json().as_str())),
+    );
+    Some(dict)
+}
+
+/// Per-window hardening changes from the page (CEF UI thread), drained by the main
+/// thread which owns the slot lifecycle and performs the respawn.
+fn pending_slot_hardening() -> &'static Mutex<Vec<usize>> {
+    static P: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(Vec::new()))
+}
+pub fn take_pending_slot_hardening() -> Vec<usize> {
+    std::mem::take(&mut pending_slot_hardening().lock().unwrap())
+}
+
+/// Set when the GLOBAL hardening preset changes (CEF UI thread), so the main thread
+/// respawns every slot that INHERITS the global (whose effective config changed).
+fn pending_global_hardening() -> &'static Mutex<bool> {
+    static P: OnceLock<Mutex<bool>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(false))
+}
+pub fn take_pending_global_hardening() -> bool {
+    std::mem::replace(&mut pending_global_hardening().lock().unwrap(), false)
+}
+
+// Render-side per-browser hardening config, keyed by Browser::identifier() (the
+// stable cross-process id). Populated in on_browser_created from extra_info, read in
+// on_context_created, cleared in on_browser_destroyed. Thread-local like the render
+// router — every render callback runs on the render main thread.
+#[derive(Clone)]
+struct RenderHardenCfg {
+    inject: bool,
+    json: String,
+}
+thread_local! {
+    static RENDER_HARDEN: RefCell<HashMap<c_int, RenderHardenCfg>> = RefCell::new(HashMap::new());
+}
+fn render_store_cfg(id: c_int, json: String) {
+    let inject = crate::harden::Config::from_json(&json).on;
+    RENDER_HARDEN.with(|m| m.borrow_mut().insert(id, RenderHardenCfg { inject, json }));
+}
+/// The render config for browser `id`. Fail-safe: an unknown browser (extra_info was
+/// absent / a create path we did not cover) defaults to Standard — always PROTECTED,
+/// never silently Off.
+fn render_get_cfg(id: c_int) -> RenderHardenCfg {
+    RENDER_HARDEN.with(|m| {
+        m.borrow().get(&id).cloned().unwrap_or(RenderHardenCfg {
+            inject: true,
+            json: crate::harden::STANDARD_JSON.to_string(),
+        })
+    })
+}
+fn render_remove_cfg(id: c_int) {
+    RENDER_HARDEN.with(|m| {
+        m.borrow_mut().remove(&id);
+    });
 }
 
 // --- Handoffs to the main thread --------------------------------------------
@@ -1304,6 +1470,66 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
             pending_close().lock().unwrap().push(slot);
             Ok(serde_json::json!({ "ok": true }).to_string())
         }
+        // GLOBAL hardening preset (CD-25): off/standard/strict, or custom with a
+        // `vectors` object of per-vector booleans. `confirm:true` is REQUIRED to
+        // weaken (drop a vector / turn off) — the host re-validates the two-
+        // confirmation gate rather than trusting the page to have run it. On success
+        // every slot that inherits the global respawns under the new config.
+        "set_hardening" => {
+            let level = v
+                .get("level")
+                .and_then(|l| l.as_str())
+                .ok_or((2, "missing 'level'".to_string()))?;
+            let confirm = v.get("confirm").and_then(|c| c.as_bool()).unwrap_or(false);
+            let vectors = v.get("vectors").map(|vec| {
+                let b = |k: &str| vec.get(k).and_then(|x| x.as_bool()).unwrap_or(true);
+                let base = crate::harden::Config {
+                    on: true,
+                    strict: false,
+                    canvas: b("canvas"),
+                    webgl: b("webgl"),
+                    audio: b("audio"),
+                    metrics: b("metrics"),
+                    nav: b("nav"),
+                    fonts: b("fonts"),
+                };
+                crate::harden::Config { on: base.any_vector(), ..base }
+            });
+            let reply = crate::settings::set_hardening(level, vectors, confirm).map_err(|e| (3, e))?;
+            *pending_global_hardening().lock().unwrap() = true;
+            Ok(reply)
+        }
+        // PER-WINDOW hardening override (CD-25): inherit/off/standard/strict for one
+        // slot (per-window offers presets only). Same weakening gate as the global.
+        // Queued for the main thread, which respawns the slot under the new config.
+        "set_slot_hardening" => {
+            let slot = target_slot(&v);
+            let level_str = v
+                .get("level")
+                .and_then(|l| l.as_str())
+                .ok_or((2, "missing 'level'".to_string()))?;
+            let confirm = v.get("confirm").and_then(|c| c.as_bool()).unwrap_or(false);
+            let target_level: Option<crate::harden::Level> = if level_str == "inherit" {
+                None
+            } else {
+                Some(
+                    crate::harden::Level::parse(level_str)
+                        .filter(|l| *l != crate::harden::Level::Custom)
+                        .ok_or((2, format!("bad level: {level_str}")))?,
+                )
+            };
+            let current = slot_effective_config(slot);
+            let target = match target_level {
+                Some(l) => crate::harden::resolve(l, crate::settings::hardening_custom()),
+                None => crate::settings::hardening_global_config(),
+            };
+            if crate::harden::is_weakening(&current, &target) && !confirm {
+                return Err((3, "weakening hardening requires confirmation".to_string()));
+            }
+            set_slot_hardening(slot, target_level);
+            pending_slot_hardening().lock().unwrap().push(slot);
+            Ok(serde_json::json!({ "ok": true }).to_string())
+        }
         // APPLICATION-level quit (CD-21): the two floating MF-zone quit buttons.
         // Distinct from `close_slot` (one window) — these end the whole shell.
         // `quit` = no save (default layout next launch); `quit_save` = persist the
@@ -1451,6 +1677,12 @@ wrap_client! {
         // installing a clearnet browser on a Tor slot (or vice versa) is a fail-open
         // IP leak — so a mismatched browser is closed instead of installed.
         tor: bool,
+        // The slot generation this browser was created for (CD-25). Validated in
+        // on_after_created against the slot's CURRENT generation: a respawn or close
+        // that raced this creation bumped the generation, so a stale browser closes
+        // itself instead of registering (fixes the same-tor double-respawn orphan and
+        // the respawn-then-close ghost the tor guard alone missed).
+        generation: u32,
     }
 
     impl Client {
@@ -1468,7 +1700,7 @@ wrap_client! {
             }
         }
         fn life_span_handler(&self) -> Option<LifeSpanHandler> {
-            Some(CyberLifeSpanHandler::new(self.role, self.tor))
+            Some(CyberLifeSpanHandler::new(self.role, self.tor, self.generation))
         }
         fn request_handler(&self) -> Option<RequestHandler> {
             // Web isolation (cyberdesk:// only) on the internal views — the shared
@@ -1652,6 +1884,7 @@ wrap_life_span_handler! {
     struct CyberLifeSpanHandler {
         role: Role,
         tor: bool,
+        generation: u32,
     }
 
     impl LifeSpanHandler {
@@ -1694,6 +1927,20 @@ wrap_life_span_handler! {
                 // reverse — is an IP leak, so close it instead of registering it.
                 if let Role::Slot(i) = self.role
                     && self.tor != slot_is_tor(i)
+                {
+                    if let Some(host) = browser.host() {
+                        host.close_browser(1);
+                    }
+                    return;
+                }
+                // FAIL-CLOSED lifecycle (CD-25): a respawn or a close raced this
+                // creation and bumped the slot generation, so this browser is stale —
+                // close it instead of registering. Without this, two same-slot
+                // respawns in one drain orphan the first browser, and a respawn drained
+                // before a close leaves a live page/circuit on a closed slot (the tor
+                // guard above misses both — a hardening respawn never flips Tor).
+                if let Role::Slot(i) = self.role
+                    && self.generation != slot_gen(i)
                 {
                     if let Some(host) = browser.host() {
                         host.close_browser(1);
@@ -1898,6 +2145,30 @@ wrap_render_process_handler! {
     struct CyberRenderProcessHandler;
 
     impl RenderProcessHandler {
+        /// Capture the per-window hardening config the browser process stamped into
+        /// `extra_info` (CD-25), keyed by the stable Browser::identifier(). Runs
+        /// before any of this browser's contexts are created.
+        fn on_browser_created(
+            &self,
+            browser: Option<&mut Browser>,
+            extra_info: Option<&mut DictionaryValue>,
+        ) {
+            let Some(b) = browser else { return };
+            let id = b.identifier();
+            let json = extra_info
+                .map(|d| CefString::from(&d.string(Some(&CefString::from("cd_harden")))).to_string())
+                .filter(|s| !s.is_empty())
+                // Fail safe: no dict / no key -> Standard (protected), never Off.
+                .unwrap_or_else(|| crate::harden::STANDARD_JSON.to_string());
+            render_store_cfg(id, json);
+        }
+
+        fn on_browser_destroyed(&self, browser: Option<&mut Browser>) {
+            if let Some(b) = browser {
+                render_remove_cfg(b.identifier());
+            }
+        }
+
         fn on_context_created(
             &self,
             browser: Option<&mut Browser>,
@@ -1908,8 +2179,11 @@ wrap_render_process_handler! {
             //  * cyberdesk:// (our internal UI) — expose window.cefQuery so the IPC
             //    bridge exists SOLELY on the internal views, never on the web.
             //  * a web frame — inject the CD-16 fingerprinting hardening at
-            //    document-start (before any page script). Never both: our own UI is
-            //    trusted and must not be farbled; web frames get no IPC bridge.
+            //    document-start (before any page script), under THIS browser's
+            //    effective per-window config (CD-25). Off => skip injection entirely.
+            //    Never both: our own UI is trusted and must not be farbled; web frames
+            //    get no IPC bridge.
+            let bid = browser.as_ref().map(|b| b.identifier()).unwrap_or(0);
             let url = frame
                 .as_ref()
                 .map(|f| CefString::from(&f.url()).to_string())
@@ -1923,7 +2197,10 @@ wrap_render_process_handler! {
             } else if should_harden(&url)
                 && let Some(f) = frame
             {
-                inject_hardening(f);
+                let cfg = render_get_cfg(bid);
+                if cfg.inject {
+                    inject_hardening(f, &cfg.json);
+                }
             }
         }
 

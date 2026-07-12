@@ -140,17 +140,59 @@
       below.</p>
     </section>
 
-    <!-- Fingerprinting hardening (CD-16, D-0039). Always on, every window. The
-         honesty label is mandatory (Vision Law): tracking-resistance, NOT anonymity. -->
+    <!-- Fingerprinting hardening (CD-16 / CD-25, D-0039 / D-0040). Global preset +
+         per-window override + a two-confirmation gate on weakening. The honesty label
+         is mandatory (Vision Law): tracking-resistance, NOT anonymity. -->
     <section class="rows tor-section" aria-label="Tracking resistance">
-      <h2 class="section-head">Tracking resistance</h2>
+      <h2 class="section-head">Tracking resistance <span id="fp-level" class="tor-status"></span></h2>
 
-      <div class="row muted">
+      <div class="row">
         <div class="label">
-          <span class="name">Fingerprinting hardening</span>
-          <span class="hint">Always on, in every window — clearnet and Tor alike</span>
+          <span class="name">Protection level</span>
+          <span class="hint">The default for every window; each window can override its own</span>
         </div>
-        <span class="on-badge">On</span>
+        <div class="select" id="fp-select">
+          <button class="select-btn" id="fp-btn" type="button"
+                  aria-haspopup="listbox" aria-expanded="false">
+            <span class="select-val" id="fp-val">Standard</span>
+            <svg class="select-chev" viewBox="0 0 24 24" width="16" height="16"><path
+              d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <ul class="select-menu" id="fp-menu" role="listbox" hidden>
+            <li role="option" data-value="off">Off</li>
+            <li role="option" data-value="standard">Standard</li>
+            <li role="option" data-value="strict">Strict</li>
+            <li role="option" data-value="custom">Custom…</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Detailed per-vector view — shown only in Custom. Disabling a protection is
+           a weakening action and is gated (settings.js). Timezone is process-global
+           (always UTC), so it is not a per-vector toggle. -->
+      <div class="fp-detail" id="fp-detail" hidden>
+        <p class="hint fp-detail-note">Custom mode. Turning a protection off makes this
+        browser easier to fingerprint — a partial, unusual set can make you
+        <em>more</em> identifiable. Timezone stays UTC (it is process-global).</p>
+        <div class="row"><div class="label"><span class="name">Canvas</span>
+          <span class="hint">Image / canvas readback</span></div>
+          <div class="switch" data-fp="canvas" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
+        <div class="row"><div class="label"><span class="name">WebGL</span>
+          <span class="hint">GPU readback + vendor / renderer</span></div>
+          <div class="switch" data-fp="webgl" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
+        <div class="row"><div class="label"><span class="name">Audio</span>
+          <span class="hint">AudioContext readback</span></div>
+          <div class="switch" data-fp="audio" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
+        <div class="row"><div class="label"><span class="name">Layout &amp; text metrics</span>
+          <span class="hint">Client rects + text measurement</span></div>
+          <div class="switch" data-fp="metrics" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
+        <div class="row"><div class="label"><span class="name">CPU &amp; memory</span>
+          <span class="hint">CPU-core and memory buckets</span></div>
+          <div class="switch" data-fp="nav" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
+        <div class="row"><div class="label"><span class="name">Fonts</span>
+          <span class="hint">Local font enumeration</span></div>
+          <div class="switch" data-fp="fonts" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
       </div>
 
       <dl class="tor-info">
@@ -173,6 +215,20 @@
 
     <p class="status" id="status"></p>
   </main>
+
+  <!-- Two-confirmation safety gate (CD-25). Shown before any WEAKENING of hardening
+       (Off, a dropped vector, entering custom). Informs + confirms twice; never
+       forbids (the developer escape hatch). Strengthening never opens it. -->
+  <div class="gate-backdrop" id="gate" hidden>
+    <div class="gate-dialog" role="alertdialog" aria-modal="true" aria-labelledby="gate-title">
+      <h3 id="gate-title" class="gate-title">Weaken tracking protection?</h3>
+      <p class="honesty gate-body" id="gate-body"></p>
+      <div class="gate-actions">
+        <button class="btn gate-keep" id="gate-cancel" type="button">Keep protected</button>
+        <button class="btn gate-weaken" id="gate-confirm" type="button">Weaken anyway</button>
+      </div>
+    </div>
+  </div>
 
 <script>
 /*__JS__*/

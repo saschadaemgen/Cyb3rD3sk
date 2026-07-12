@@ -24,10 +24,14 @@ Transport: `window.cefQuery({ request, persistent: false, onSuccess, onFailure }
 ### `get_settings` (view -> host)
 
 - Request: `{"cmd":"get_settings"}`
-- Success: `{"feather_edges":<bool>,"animated_background":<bool>,"stay_foreground":<bool>,"glow_intensity":<int>,"search_engine":<str>,"tor_enabled":<bool>,"tor_default":<bool>}`
-  (`tor_enabled` / `tor_default` added in CD-15.)
+- Success: `{"feather_edges":<bool>,"animated_background":<bool>,"stay_foreground":<bool>,"glow_intensity":<int>,"search_engine":<str>,"tor_enabled":<bool>,"tor_default":<bool>,"fp_preset":<str>,"fp_custom":{…}}`
+  (`tor_enabled` / `tor_default` added in CD-15; `fp_preset` / `fp_custom` in CD-25.)
   - `glow_intensity` is a whole percent (50..=220).
   - `search_engine` ∈ { `google`, `duckduckgo`, `bing`, `startpage` } (CD-07).
+  - `fp_preset` ∈ { `off`, `standard`, `strict`, `custom` } — the GLOBAL fingerprinting-
+    hardening preset a window inherits (CD-25, default `standard`).
+  - `fp_custom` — the per-vector flags used when `fp_preset` is `custom`, e.g.
+    `{"on":<bool>,"strict":<bool>,"canvas":<bool>,"webgl":<bool>,"audio":<bool>,"metrics":<bool>,"nav":<bool>,"fonts":<bool>}`.
 - Failure: code 1 (malformed request JSON).
 
 ### `set_setting` (view -> host)
@@ -49,6 +53,37 @@ CD-05 (D-0012) renamed the background toggle `deep_field` -> `animated_backgroun
 (it now governs whichever background the template selects) and added the numeric
 `glow_intensity`; the store migrates the old key. Unknown commands are rejected
 with code 4. There is no passthrough channel.
+
+### `set_hardening` (view -> host, CD-25)
+
+The GLOBAL fingerprinting-hardening preset — its own command (not `set_setting`)
+because it carries a structured `vectors` object and a weakening `confirm` flag.
+
+- Request: `{"cmd":"set_hardening","level":"<off|standard|strict|custom>"[,"vectors":{"canvas":<bool>,"webgl":<bool>,"audio":<bool>,"metrics":<bool>,"nav":<bool>,"fonts":<bool>}][,"confirm":<bool>]}`
+  - `vectors` is read only when `level` is `custom`; absent flags default to `true`.
+  - `confirm` — REQUIRED (`true`) to WEAKEN (drop a vector, or turn off). The host
+    re-validates the two-confirmation safety gate rather than trusting the page to
+    have run it; an unconfirmed weakening is rejected with code 3. Strengthening
+    (toward Strict / re-enabling a vector) never needs it.
+- Effect: persists the preset (SQLite `hardening_level`; `hardening_custom` when
+  custom) and RESPAWNS every window that INHERITS the global so it reloads under the
+  new config (a live document can't be re-hardened).
+- Success: `{"ok":true,"key":"hardening_level","value":"<level>"}`
+- Failure: code 2 (missing `level`), 3 (unknown level / unconfirmed weakening).
+
+### `set_slot_hardening` (view -> host, CD-25)
+
+A PER-WINDOW override (presets only; per-vector custom is a global capability).
+
+- Request: `{"cmd":"set_slot_hardening","level":"<inherit|off|standard|strict>"[,"confirm":<bool>][,"slot":<int>]}`
+  - `inherit` clears the override (the window follows the global again).
+  - `confirm` — same weakening rule as `set_hardening`; the host compares the window's
+    current effective config to the target and rejects an unconfirmed weakening (code 3).
+- Effect: queues the override for the main thread, which respawns the slot's browser
+  under the new config (like a Tor flip). Overrides are session-ephemeral (not
+  persisted); a reused slot id starts fresh (inheriting the global).
+- Success: `{"ok":true}`
+- Failure: code 2 (missing/invalid `level`), 3 (unconfirmed weakening).
 
 ## Command bar / navigation IPC (CD-04, live)
 
@@ -222,11 +257,17 @@ any column's target x/width, per-column Tor mode, or the Tor engine status), nev
 frame (the CD-11 on-change cadence). The page positions/reveals its ensembles from it
 and glides via CSS (~220 ms).
 
-- Payload: `{"slots":[{"id":<int>,"x":<num>,"w":<num>,"tor":<bool>}, …],"engaged":<int|null>,"autofocus":<bool>,"tor_status":<int>}`
+- Payload: `{"slots":[{"id":<int>,"x":<num>,"w":<num>,"tor":<bool>,"fp":<int>,"fp_inherited":<bool>,"fp_reduced":<bool>}, …],"engaged":<int|null>,"autofocus":<bool>,"tor_status":<int>}`
   - `slots` — one entry per live column in display order; `x`/`w` are **band-DIP**
     (the band's origin = the window origin), so the page places each ensemble above
     its column. `id` is the stable slot id (the same id the `slot` field carries back).
     `tor` — whether this column is on Tor (lights its anonymity icon).
+  - `fp` (CD-25) — this window's EFFECTIVE hardening level: 0 off / 1 standard /
+    2 strict / 3 custom, driving the per-window tracking-resistance orb.
+  - `fp_inherited` (CD-25) — `true` if the window follows the global preset, `false`
+    if it has its own override (the orb shows a distinct override marker).
+  - `fp_reduced` (CD-25) — `true` when the effective config is below the safe Standard
+    (off, or any vector dropped); the orb reads as a warning (honesty rule).
   - `engaged` — the id of the column whose ensemble is revealed, or `null` (all hidden).
   - `autofocus` — focus + select the engaged capsule's input on this reveal (Ctrl+L).
     A **transient**: it is excluded from the host's change-signature, so a routine

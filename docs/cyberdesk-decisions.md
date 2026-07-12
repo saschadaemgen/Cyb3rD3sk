@@ -2,6 +2,119 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0040 - 2026-07-12 - Hardening controls: global + per-window preset, preset-first, de-hardening is info-gated with two confirmations (CD-25)
+
+*Decision.* The fingerprinting-hardening controls over CD-16 (D-0039) are two-level:
+a **global master preset** (`Off` / `Standard` / `Strict`, default `Standard`) in
+Settings with an optional **per-vector detail** view (Custom), and a **per-window
+override** (presets only) that a window follows the global unless set. The preset
+path is primary (anti-footgun); granular custom control is secondary. Any action that
+**weakens** hardening — selecting Off, dropping an individual vector, or entering
+custom mode — shows an honest trackability warning and requires **two confirmations**
+before it takes effect; **strengthening is ungated**. The gate informs and confirms
+but never forbids — it is also the developer escape hatch (fully disable any one
+vector). Per-window status (level, inherited-vs-override, custom/reduced flagged) is
+surfaced on the floating command set (CD-12/CD-18 idiom). All copy stays
+**tracking-resistance, never anonymity**, and no control implies OS/UA/platform
+spoofing (extends D-0039; changes none of CD-16's mechanics or defaults).
+
+*Why.* A security product must make its protections visible and configurable, and
+developers must be able to disable them — but a unique per-vector toggle combination
+is itself a fingerprint (the reason Tor Browser offers no OS choice). Preset-first
+plus an info-gated de-hardening path gives full configurability while keeping the
+safe, coherent path the default and stating the trackability cost of deviating
+honestly (EC-01).
+
+*The config seam in `hardening.js` (the one necessary edit to a CD-16 file).* CD-16's
+mechanics are frozen, but a control layer must feed WHICH vectors run. There is no
+clean alternative: the render process injects a document-start script, and no stable
+Chromium pref gates canvas/WebGL/audio/rect farbling. So `hardening.js` gains a second
+placeholder `__CYBERDESK_FP_CONFIG__` (a JSON object of per-vector booleans + a
+`strict` flag) next to the seed, and each of its six vector IIFEs is gated on its flag
+(`if (FP_CONFIG.canvas) …`). The farbling ALGORITHMS are unchanged; the **Standard
+config resolves to every flag true / strict false, byte-identical to CD-16** (proven
+by re-running the CD-16 headless harness under the Standard config). `strict` collapses
+the CPU-core / memory buckets to a single common value (never over-reporting). Timezone
+(`TZ=UTC`, CD-16 `main.rs`) is process-global and is deliberately NOT in the config —
+it stays always-on and is surfaced honestly as such; `main.rs` is untouched.
+
+*Config channel across the browser→render boundary (crate-source-first).* The
+per-session seed switch (`--cyberdesk-fp-seed`, D-0039) is launch-time and
+process-global — it cannot carry per-window state. So each slot's EFFECTIVE config
+(override else global) is resolved at browser-CREATE time and carried to its render
+process via the CreateBrowser **`extra_info`** DictionaryValue (5th arg; confirmed in
+the pinned crate — `browser_host_create_browser` + `dictionary_value_create` +
+`set_string`, the same idiom as `set_proxy_pref`). The render handler gains
+`on_browser_created` (caches the config by the stable `Browser::identifier()`, a
+render-side thread-local map like the message router), `on_context_created` (looks it
+up, skips injection entirely for Off, else injects with the config), and
+`on_browser_destroyed` (evicts). Fail-safe: an absent/garbled config resolves to
+**Standard** — a browser we failed to configure stays PROTECTED, never silently Off.
+The dict rides `extra_info` independently of the Tor proxy on the request context (6th
+arg), so a Tor window carries any hardening level.
+
+*Respawn-on-change (mirrors the Tor toggle).* Injection is irreversible (patches
+applied before page scripts), so a level change RESPAWNS the affected slot(s) — the
+per-window change respawns that slot; a global change respawns only slots that INHERIT
+it. The respawn reuses the CD-15 `toggle_tor` machinery but RELOADS the current page
+(not the start page): a hardening change is not a network-identity change. Per-slot
+override state is a `[AtomicU8; MAX_SLOTS]` mirroring `SLOT_TOR`; it is reset on real
+close (a reused slot id never carries a stale override) and inherited by popups.
+
+*Respawn lifecycle guard (from the adversarial review).* Browsers are created
+ASYNCHRONOUSLY (MTML — `on_after_created` fires later on the CEF UI thread), so within
+one main-thread drain a `close_slot` cannot tear down an in-flight creation. The CD-15
+`tor`-mode guard caught a stale re-toggle only because each toggle FLIPS Tor; a
+hardening respawn does not, so two same-slot respawns in one pass (or a respawn drained
+before a close) would orphan/ghost a live browser (a leaked page/Tor circuit). Fixed
+with a per-slot GENERATION (`SLOT_GEN[i]`) bumped by every `close_slot`, captured on the
+`CyberClient` at create time (threaded across the deferred Tor-spawn hop) and checked in
+`on_after_created`: a browser whose captured generation ≠ the slot's current generation
+closes itself instead of registering. This closes both the double-respawn orphan and the
+respawn-then-close ghost for the hardening AND Tor paths. The per-window menu's
+weaken/strengthen classifier was also aligned to `harden::is_weakening` (only Off drops
+below the Standard safe floor among presets; an Inherit that resolves weaker is gated on
+the host's rejection) so it no longer mislabels Strict→Standard as a weakening.
+
+*Wire format.* The global preset is `set_hardening` (its own command — it carries a
+structured `vectors` object + a `confirm` flag). The per-window override is
+`set_slot_hardening` (`inherit`/`off`/`standard`/`strict`, queued like `toggle_tor`).
+Status rides three new per-slot `cdFrame` fields (`fp`, `fp_inherited`, `fp_reduced`)
+folded into the change-signature. `get_settings` gains `fp_preset` + `fp_custom`.
+
+*Gate.* Two confirmations, client-side in the view (a modal in Settings; an inline
+two-step popover on the floating per-window menu), before the weakening command is
+sent — AND the host re-validates: a `confirm:true` flag is REQUIRED on any command
+that weakens (the host computes weaken/strengthen from the current vs target effective
+config, `harden::is_weakening`), so a client bug can't weaken silently. The per-window
+menu can't always classify an ambiguous choice (an Inherit that resolves weaker); the
+host rejects it and the menu shows the gate on the rejection. Honest text states the
+trackability cost in plain language and defers serious anonymity to Tor Browser.
+
+*Reasoned scope (recorded).*
+1. **Per-window granularity is presets only** (Inherit/Standard/Strict/Off); per-vector
+   Custom is a **global** capability (Settings). The floating control stays small, and
+   the ticket's own per-window example is preset-level. Per-window per-vector is
+   deferred.
+2. **Per-window overrides are session-ephemeral** (not persisted across restart / into
+   the CD-21 saved session). The global preset persists. This avoids a schema bump; a
+   window inherits the global on the next launch. Persisting overrides is a follow-up
+   (mirror the `session_slots.tor` column).
+3. **Timezone is not per-window / per-vector** (process-global; see above), labelled as
+   such in the detail view.
+4. No custom combination is **contradictory** (Brave-style): disabling any subset of
+   CD-16 vectors only EXPOSES those real values — it never makes two surfaces disagree.
+   So the custom warning is about UNIQUENESS/entropy ("a partial set can make you more
+   identifiable"), not contradiction — stated honestly.
+
+*Verification.* Headless: `harden.rs` unit tests (level resolution, `is_weakening`
+classification, JSON fail-safe) + a Node harness running the ACTUAL `hardening.js`
+under Off/Standard/Strict/Custom configs (Standard ≡ CD-16; Strict tightens buckets;
+Custom gates individual vectors — the developer escape hatch; Off gates all) and the
+weaken/strengthen classification mirrored across Rust/JS. `cargo build`/`clippy`/`test`
+clean. The live checks (coveryourtracks/browserleaks per level, per-window override,
+two-session compare) are the maintainer's.
+
 ## D-0039 - 2026-07-12 - Fingerprinting hardening is coherent tracking-resistance, not anonymity; no OS/UA/platform spoofing (CD-16)
 
 *Decision.* CyberDesk's fingerprinting hardening (CD-16) is scoped as

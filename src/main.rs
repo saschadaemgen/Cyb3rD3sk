@@ -11,6 +11,7 @@
 
 mod app;
 mod browser;
+mod harden;
 mod logging;
 mod memory;
 mod pulsegrid;

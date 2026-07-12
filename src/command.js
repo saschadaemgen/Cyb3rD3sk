@@ -33,6 +33,8 @@
     star: '<svg viewBox="0 0 24 24" width="17" height="17"><path class="star-path" d="' + STAR_PATH + '" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>',
     // A shield (privacy motif) for the per-window Tor toggle (CD-15).
     tor: '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 3l7 3v5c0 4.6-3 7.6-7 9-4-1.4-7-4.4-7-9V6l7-3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>',
+    // A fingerprint (tracking-resistance motif) for the per-window hardening control (CD-25).
+    fp: '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 5c-3.3 0-6 2.7-6 6v3M18 12v-1c0-3.3-2.7-6-6-6M9 12a3 3 0 016 0v3M12 12v6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
     // An X for the per-window close icon (CD-18).
     close: '<svg viewBox="0 0 24 24" width="15" height="15"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
   };
@@ -62,6 +64,7 @@
           '<input class="url" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="Search or enter address">' +
           '<button class="star" title="Favorite (Ctrl+D)" aria-label="Favorite" aria-pressed="false">' + SVG.star + '</button>' +
         '</div>' +
+        '<button class="fp-orb" title="Tracking resistance for this window" aria-label="Tracking resistance for this window" aria-haspopup="menu">' + SVG.fp + '</button>' +
         '<button class="tor-orb" title="Route this window through Tor" aria-label="Toggle Tor for this window" aria-pressed="false">' + SVG.tor + '</button>' +
         '<button class="close-btn" title="Close this window (Ctrl+W)" aria-label="Close this window">' + SVG.close + '</button>' +
       '</div>' +
@@ -73,6 +76,7 @@
       input: el.querySelector(".url"),
       scheme: el.querySelector(".scheme"),
       star: el.querySelector(".star"),
+      fp: el.querySelector(".fp-orb"),
       tor: el.querySelector(".tor-orb"),
       close: el.querySelector(".close-btn"),
       capsule: el.querySelector(".capsule"),
@@ -91,6 +95,21 @@
   function paintStar(e, fav) {
     e.star.classList.toggle("on", !!fav);
     e.star.setAttribute("aria-pressed", fav ? "true" : "false");
+  }
+
+  // Paint the per-window hardening orb (CD-25) from the frame-state fields. Standard
+  // (the safe default) reads neutral to avoid always-lit clutter; Strict is accent-
+  // lit; Off / reduced is warn-tinted (honesty: a reduced state must LOOK reduced);
+  // a per-window override carries a small marker distinguishing it from inherited.
+  var FP_LEVEL_NAMES = ["off", "standard", "strict", "custom"];
+  function paintFpOrb(e, d) {
+    if (!e.fp) return;
+    e.fp.classList.toggle("strict", d.fp === 2 && !d.reduced);
+    e.fp.classList.toggle("reduced", d.reduced || d.fp === 0);
+    e.fp.classList.toggle("override", !d.inherited);
+    var lvl = d.fp === 0 ? "off" : d.reduced ? "reduced" : FP_LEVEL_NAMES[d.fp] || "standard";
+    e.fp.title = "Tracking resistance: " + lvl +
+      (d.inherited ? " (global default)" : " (window override)");
   }
 
   // Load this ensemble's own column nav state (scheme, star, prefill).
@@ -199,6 +218,9 @@
       }
     });
     e.star.addEventListener("click", function () { toggleFav(e); });
+    // Per-window tracking-resistance menu (CD-25): opens the level chooser for THIS
+    // column. Weakening is gated inside the menu; strengthening applies at once.
+    e.fp.addEventListener("click", function (ev) { ev.stopPropagation(); openFpMenu(e); });
     // Per-window Tor toggle (CD-15): flips THIS column between clearnet and Tor;
     // the host respawns its browser under the new context. The lit/connecting
     // state is set from the frame push (cdFrame), not optimistically.
@@ -278,6 +300,115 @@
     });
   }
 
+  // --- Per-window tracking-resistance menu (CD-25) ------------------------
+  // A small floating menu opened from each ensemble's .fp-orb: Use global default /
+  // Standard / Strict / Off. Weakening (Off, or below the current effective level)
+  // opens an inline TWO-step confirmation before it applies; strengthening applies
+  // at once. The host re-validates weakening, so a choice the client can't classify
+  // (Inherit that resolves weaker) is caught by the host and gated on the rejection.
+  var fpPop = document.createElement("div");
+  fpPop.className = "fp-pop";
+  fpPop.hidden = true;
+  fpPop.addEventListener("click", function (ev) { ev.stopPropagation(); });
+  document.body.appendChild(fpPop);
+
+  var FP_OPTS = [
+    { level: "inherit", label: "Use global default" },
+    { level: "standard", label: "Standard" },
+    { level: "strict", label: "Strict" },
+    { level: "off", label: "Off" }
+  ];
+  function closeFpPop() { fpPop.hidden = true; }
+
+  function applySlotFp(id, level, confirm, onNeedGate) {
+    query({ cmd: "set_slot_hardening", slot: id, level: level, confirm: !!confirm })
+      .catch(function () {
+        // Host rejected an unconfirmed weakening the client didn't flag (e.g. an
+        // Inherit that resolves weaker) — show the gate, then retry confirmed.
+        if (!confirm && onNeedGate) onNeedGate();
+      });
+  }
+
+  function chooseLevel(e, level) {
+    // Among the per-window presets, only Off drops below the Standard safe floor:
+    // Standard and Strict both keep every vector on, so neither is a weakening —
+    // matching the authoritative host classifier harden::is_weakening (which ignores
+    // the `strict` bucket flag). An Inherit that resolves weaker than the current
+    // window is caught by the host and gated on the rejection (see applySlotFp).
+    var weaken = level === "off";
+    function commitConfirmed() { applySlotFp(e.id, level, true, null); }
+    if (weaken) {
+      fpGate(level, commitConfirmed);
+    } else {
+      closeFpPop();
+      applySlotFp(e.id, level, false, function () { fpGate(level, commitConfirmed); });
+    }
+  }
+
+  function fpGate(level, onConfirm) {
+    fpPop.innerHTML = "";
+    var warn = document.createElement("div");
+    warn.className = "fp-pop-warn";
+    warn.innerHTML = level === "off"
+      ? "Turning protection <b>off</b> gives every site a stable fingerprint — trackers can link your visits and recognise you when you return. Weaken this window anyway?"
+      : "This lowers this window's protection, making it easier to fingerprint. Weaken anyway?";
+    fpPop.appendChild(warn);
+    var step = 1;
+    var actions = document.createElement("div");
+    actions.className = "fp-pop-actions";
+    var keep = document.createElement("button");
+    keep.className = "fp-pop-btn keep"; keep.type = "button"; keep.textContent = "Keep protected";
+    keep.addEventListener("click", function (ev) { ev.stopPropagation(); closeFpPop(); });
+    var weakenBtn = document.createElement("button");
+    weakenBtn.className = "fp-pop-btn weaken"; weakenBtn.type = "button"; weakenBtn.textContent = "Weaken anyway";
+    weakenBtn.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      if (step === 1) {
+        step = 2;
+        warn.innerHTML = "Lower <b>your own</b> protection? For serious anti-fingerprinting anonymity use <b>Tor Browser</b>.";
+        weakenBtn.textContent = "Yes, weaken";
+        return;
+      }
+      closeFpPop();
+      onConfirm();
+    });
+    actions.appendChild(keep); actions.appendChild(weakenBtn);
+    fpPop.appendChild(actions);
+    fpPop.hidden = false;
+  }
+
+  function openFpMenu(e) {
+    var d = e.fpData || { fp: 1, inherited: true, reduced: false };
+    fpPop.innerHTML = "";
+    var title = document.createElement("div");
+    title.className = "fp-pop-title";
+    title.textContent = "Tracking resistance";
+    fpPop.appendChild(title);
+    var sub = document.createElement("div");
+    sub.className = "fp-pop-sub";
+    var now = d.fp === 0 ? "off" : d.reduced ? "reduced" : FP_LEVEL_NAMES[d.fp] || "standard";
+    sub.textContent = (d.inherited ? "Following the global default" : "Overriding the global") + " · now: " + now;
+    fpPop.appendChild(sub);
+    FP_OPTS.forEach(function (opt) {
+      var row = document.createElement("button");
+      row.className = "fp-pop-opt"; row.type = "button";
+      row.textContent = opt.label;
+      var active = opt.level === "inherit" ? d.inherited
+        : (!d.inherited && FP_LEVEL_NAMES[d.fp] === opt.level);
+      if (active) row.classList.add("active");
+      row.addEventListener("click", function (ev) { ev.stopPropagation(); chooseLevel(e, opt.level); });
+      fpPop.appendChild(row);
+    });
+    fpPop.hidden = false;
+    var r = e.fp.getBoundingClientRect();
+    var w = fpPop.offsetWidth || 240;
+    fpPop.style.left = Math.min(Math.max(6, r.left), window.innerWidth - w - 6) + "px";
+    fpPop.style.top = (r.bottom + 6) + "px";
+  }
+
+  // A click anywhere else closes the menu (its own clicks stopPropagation).
+  document.addEventListener("click", function () { closeFpPop(); });
+
   // --- Host frame state: position ensembles + reveal the engaged one ------
   // Called by the host on change (execute_java_script): a JSON string of
   //   { slots:[{id,x,w}], engaged:<id|null>, autofocus:<bool> }
@@ -303,6 +434,10 @@
       e.tor.classList.toggle("ready", !!sl.tor && torStatus === 2);
       e.tor.classList.toggle("failed", !!sl.tor && torStatus === 3);
       e.tor.setAttribute("aria-pressed", sl.tor ? "true" : "false");
+      // Per-window hardening indicator (CD-25): effective level, inherited-vs-override,
+      // and a reduced flag (off / below-standard). Driven entirely by the frame push.
+      e.fpData = { fp: sl.fp | 0, inherited: sl.fp_inherited !== false, reduced: !!sl.fp_reduced };
+      paintFpOrb(e, e.fpData);
       // Close icon: the last window can't be closed (host refuses); dim + disable
       // it there so the UI matches the host behavior (CD-18).
       var lastOne = (f.slots || []).length <= 1;

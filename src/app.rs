@@ -573,6 +573,37 @@ impl Shell {
         tracing::info!(slot = id, "toggle_tor: end (respawn requested, returned immediately)");
     }
 
+    /// Apply a hardening change to slot `id` (CD-25): respawn its browser so the
+    /// fresh document injects under the new effective config — a live context can't
+    /// be re-hardened (the patches are irreversible, applied before page scripts).
+    /// Mirrors [`toggle_tor`]'s respawn, but RELOADS the current page (not the start
+    /// page): a hardening change is not a network-identity change, so the user stays
+    /// on their page, just re-hardened. The per-slot override / global preset was
+    /// already updated before this runs; `create_browser_url` reads the (unchanged)
+    /// Tor mode, so a Tor slot stays Tor.
+    fn apply_slot_hardening(&mut self, id: usize) {
+        if !self.order.contains(&id) {
+            return;
+        }
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let url = browser::slot_url(id);
+        browser::close_slot(id);
+        if let Some(r) = self.renderer.as_mut() {
+            r.clear_slot(id);
+        }
+        self.loading[id] = 0.0;
+        self.push_geometry();
+        let hwnd = window_hwnd(&window);
+        if url.starts_with("http://") || url.starts_with("https://") {
+            browser::create_browser_url(Role::Slot(id), hwnd, &url);
+        } else {
+            browser::create_browser(Role::Slot(id), hwnd); // → cyberdesk://start/
+        }
+        self.push_frame(false);
+    }
+
     /// Open `url` in a new slot beside the source slot — a user-gesture popup or
     /// a Ctrl-/middle-click on a link (D-0018). The new slot is one unit, spawns
     /// immediately with the URL, and becomes active. If the grid has no room, fall
@@ -605,6 +636,9 @@ impl Shell {
             crate::tor::init();
         }
         browser::set_slot_tor(free, src_tor);
+        // CD-25: a popup inherits the source window's hardening override too (so a
+        // Strict window's popups stay Strict), read BEFORE the browser is created.
+        browser::set_slot_hardening(free, browser::slot_hardening_override(source_id));
         if let Some(window) = self.window.clone() {
             self.push_geometry();
             let hwnd = window_hwnd(&window);
@@ -783,6 +817,11 @@ impl Shell {
         self.loading[id] = 0.0;
         self.width_units[id] = 1;
         self.disp_rects[id] = None;
+        // CD-25: slot ids are reused; clear any per-window hardening override so a
+        // reused id starts fresh (inheriting the global preset), never carrying a
+        // closed window's override. (Respawns use `close_slot`, not this path, so an
+        // override survives a hardening/Tor respawn.)
+        browser::set_slot_hardening(id, None);
         // Promote a neighbor only if the active slot itself was the one closed;
         // closing a non-active slot (via its orb) leaves the active slot as is.
         if closed_active {
@@ -954,15 +993,37 @@ impl Shell {
         // (it is part of the sig, so an unchanged sig means an unchanged status), so
         // `about_to_wait` won't redundantly re-push for the same value.
         self.tor_status_pushed = tor_status;
+        // Per-slot hardening view (CD-25): the effective level code (0=off, 1=standard,
+        // 2=strict, 3=custom), whether it is INHERITED (vs a per-window override), and
+        // whether it is REDUCED below the safe Standard (off / a dropped vector). Used
+        // for both the change-sig and the payload so a level change re-pushes.
+        let hview = |id: usize| -> (u8, bool, bool) {
+            let ov = browser::slot_hardening_override(id);
+            let code = match ov.unwrap_or_else(crate::settings::hardening_level) {
+                crate::harden::Level::Off => 0u8,
+                crate::harden::Level::Standard => 1,
+                crate::harden::Level::Strict => 2,
+                crate::harden::Level::Custom => 3,
+            };
+            let reduced = crate::harden::is_weakening(
+                &crate::harden::Config::STANDARD,
+                &browser::slot_effective_config(id),
+            );
+            (code, ov.is_none(), reduced)
+        };
         let mut sig = format!("{:?}#{tor_status}", self.engaged_slot);
         for (p, &id) in self.order.iter().enumerate() {
+            let (fp, inh, red) = hview(id);
             let _ = write!(
                 sig,
-                ";{}:{},{},{}",
+                ";{}:{},{},{},{},{},{}",
                 id,
                 (rects[p].x as f64 / scale).round(),
                 (rects[p].w as f64 / scale).round(),
-                browser::slot_is_tor(id) as u32
+                browser::slot_is_tor(id) as u32,
+                fp,
+                inh as u32,
+                red as u32
             );
         }
         if !autofocus && sig == self.frame_sig {
@@ -975,11 +1036,15 @@ impl Shell {
             .iter()
             .enumerate()
             .map(|(p, &id)| {
+                let (fp, inh, red) = hview(id);
                 serde_json::json!({
                     "id": id,
                     "x": (rects[p].x as f64 / scale).round(),
                     "w": (rects[p].w as f64 / scale).round(),
                     "tor": browser::slot_is_tor(id),
+                    "fp": fp,
+                    "fp_inherited": inh,
+                    "fp_reduced": red,
                 })
             })
             .collect();
@@ -1871,6 +1936,26 @@ impl ApplicationHandler for Shell {
         if self.views_started {
             for id in browser::take_pending_tor_toggles() {
                 self.toggle_tor(id);
+            }
+        }
+
+        // Per-window hardening overrides + a global-preset change (CD-25). Each
+        // respawns the affected slot(s) under the new config. A global change
+        // respawns only slots that INHERIT it (an overridden slot keeps its own).
+        if self.views_started {
+            for id in browser::take_pending_slot_hardening() {
+                self.apply_slot_hardening(id);
+            }
+            if browser::take_pending_global_hardening() {
+                let inherit: Vec<usize> = self
+                    .order
+                    .iter()
+                    .copied()
+                    .filter(|&id| browser::slot_hardening_override(id).is_none())
+                    .collect();
+                for id in inherit {
+                    self.apply_slot_hardening(id);
+                }
             }
         }
 

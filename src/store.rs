@@ -219,6 +219,11 @@ impl Store {
         // CD-15: the Tor engine is available by default; new windows are clearnet.
         self.set_if_absent("tor_enabled", "true");
         self.set_if_absent("tor_default", "false");
+        // CD-25: the global fingerprinting-hardening preset, default Standard (the
+        // recommended coherent default). Per-window overrides are session-ephemeral
+        // and are not persisted here; the custom per-vector blob (hardening_custom)
+        // is written only when the user enters custom mode.
+        self.set_if_absent("hardening_level", "standard");
         // glow_intensity is seeded lazily from the background.glow_default token
         // in settings::init (kept out of the store until the user changes it).
     }

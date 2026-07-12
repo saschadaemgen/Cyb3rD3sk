@@ -77,6 +77,21 @@ feathered compositing, and an isolated in-shell settings surface.
   this is **tracking-resistance, not anonymity** — it breaks cross-site/cross-session
   linkability, but a low-population browser cannot provide a crowd to hide in; for
   serious anti-fingerprinting anonymity, use **Tor Browser**.
+* **Hardening controls — global + per-window, safety-gated (CD-25, D-0040):** the
+  hardening is now visible and configurable. Settings has a **global preset**
+  (**Off** / **Standard** / **Strict**, default Standard) that applies to every window,
+  plus a **Custom** detail view for per-vector control (canvas, WebGL, audio, layout &
+  text metrics, CPU & memory, fonts). Each window can **override** its own level from a
+  floating fingerprint control beside its Tor/close icons — inherit the global, or pick
+  Standard / Strict / Off — with the level, inherited-vs-override, and any **reduced**
+  state shown honestly (a reduced window reads as a warning). The **preset path is the
+  default** (a unique per-vector toggle combination is itself a fingerprint, so the safe
+  coherent presets stay primary). Any action that **weakens** protection — Off, dropping
+  a vector, entering custom — shows an honest trackability warning and needs **two
+  confirmations** before it applies; **strengthening is instant and ungated**. The gate
+  informs and confirms but never forbids: it is also the developer escape hatch (fully
+  disable any one protection to debug). Every label stays **tracking-resistance, never
+  anonymity**, and no control claims to hide the OS/UA/platform.
 * **Own start page, no Google, no saved websites (CD-14, D-0025):** every empty/new
   slot opens to an **own start page** served from the binary at `cyberdesk://start/`
   (same isolation as settings, **zero network**) — Google is gone. It is a black
@@ -215,7 +230,10 @@ feathered compositing, and an isolated in-shell settings surface.
   that shows the window's status (clearnet / connecting / ready / failed) and toggles
   Tor for that window, and a **close icon** that closes that window (the last window
   refuses). These consolidate the scattered CD-15 Tor glyph and the CD-12
-  corner-hover close into two clear controls.
+  corner-hover close into two clear controls. **CD-25** adds a third: a **tracking-
+  resistance icon** (a fingerprint glyph) that opens this window's hardening level
+  chooser and shows its effective level (neutral for Standard, accent for Strict, warn
+  for a reduced/off window, with an override marker when it differs from the global).
 
 The accelerated (zero-copy GPU) OSR path was researched; CyberDesk stays on the
 CPU path for now — see `docs/cyberdesk-decisions.md` (D-0009).

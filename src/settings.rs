@@ -10,6 +10,7 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
+use crate::harden;
 use crate::store::Store;
 
 /// The persisted key/value store (shared process-wide with the history/favorites
@@ -33,6 +34,14 @@ static SEARCH_ENGINE: AtomicU8 = AtomicU8::new(0);
 static TOR_ENABLED: AtomicBool = AtomicBool::new(true);
 /// Whether new windows open in Tor by default (CD-15). Off by default (clearnet).
 static TOR_DEFAULT: AtomicBool = AtomicBool::new(false);
+/// The GLOBAL fingerprinting-hardening preset a window inherits (CD-25): 0=off,
+/// 1=standard (default), 2=strict, 3=custom. A per-window override lives in
+/// browser.rs (`SLOT_HARDENING`); this is the default it falls back to.
+static HARDENING_LEVEL: AtomicU8 = AtomicU8::new(1);
+/// The custom per-vector flags used only when the level is `custom`. Read at
+/// browser-create time and by the frame-state push (not per rendered frame), so a
+/// Mutex is fine. Defaults to Standard (all vectors on).
+static HARDENING_CUSTOM: Mutex<harden::Config> = Mutex::new(harden::Config::STANDARD);
 
 /// The settings keys the internal view is allowed to read and write. Anything
 /// outside this list is rejected by [`set`] / [`set_glow_intensity`].
@@ -48,6 +57,9 @@ pub const KEY_SEARCH_ENGINE: &str = "search_engine";
 /// Per-window Tor: the engine master switch and the new-window default (CD-15).
 pub const KEY_TOR_ENABLED: &str = "tor_enabled";
 pub const KEY_TOR_DEFAULT: &str = "tor_default";
+/// Global fingerprinting-hardening preset + custom per-vector flags (CD-25).
+pub const KEY_HARDENING_LEVEL: &str = "hardening_level";
+pub const KEY_HARDENING_CUSTOM: &str = "hardening_custom";
 
 /// Glow-intensity slider bounds (percent).
 pub const GLOW_MIN: u32 = 50;
@@ -78,6 +90,73 @@ pub fn search_engine() -> &'static str {
     engine_name(SEARCH_ENGINE.load(Ordering::Relaxed))
 }
 
+// --- Fingerprinting-hardening config (CD-25, D-0040) ------------------------
+
+fn level_code(l: harden::Level) -> u8 {
+    match l {
+        harden::Level::Off => 0,
+        harden::Level::Standard => 1,
+        harden::Level::Strict => 2,
+        harden::Level::Custom => 3,
+    }
+}
+fn level_from_code(c: u8) -> harden::Level {
+    match c {
+        0 => harden::Level::Off,
+        2 => harden::Level::Strict,
+        3 => harden::Level::Custom,
+        _ => harden::Level::Standard,
+    }
+}
+
+/// The GLOBAL hardening preset level a window inherits.
+pub fn hardening_level() -> harden::Level {
+    level_from_code(HARDENING_LEVEL.load(Ordering::Relaxed))
+}
+
+/// The stored custom per-vector flags (meaningful only when the level is Custom).
+pub fn hardening_custom() -> harden::Config {
+    *HARDENING_CUSTOM.lock().unwrap()
+}
+
+/// The resolved GLOBAL effective config a window inherits when it has no per-window
+/// override.
+pub fn hardening_global_config() -> harden::Config {
+    harden::resolve(hardening_level(), hardening_custom())
+}
+
+/// Apply and persist the global hardening config (CD-25). `level` is one of
+/// off/standard/strict/custom; `vectors` supplies the per-vector flags for custom.
+/// A WEAKENING change (any vector dropped, or turned off) is refused without
+/// `confirm` — the host re-validates the two-confirmation safety gate rather than
+/// trusting the page to have run it. Strengthening is always allowed. Returns the
+/// reply JSON on success.
+pub fn set_hardening(
+    level: &str,
+    vectors: Option<harden::Config>,
+    confirm: bool,
+) -> Result<String, String> {
+    let lvl = harden::Level::parse(level).ok_or_else(|| format!("unknown hardening level: {level}"))?;
+    let current = hardening_global_config();
+    let new_custom = if lvl == harden::Level::Custom {
+        vectors.unwrap_or_else(hardening_custom)
+    } else {
+        hardening_custom()
+    };
+    let target = harden::resolve(lvl, new_custom);
+    if harden::is_weakening(&current, &target) && !confirm {
+        return Err("weakening hardening requires confirmation".to_string());
+    }
+    HARDENING_LEVEL.store(level_code(lvl), Ordering::Relaxed);
+    let store = store().lock().unwrap();
+    store.set(KEY_HARDENING_LEVEL, level);
+    if lvl == harden::Level::Custom {
+        *HARDENING_CUSTOM.lock().unwrap() = new_custom;
+        store.set(KEY_HARDENING_CUSTOM, &new_custom.to_json());
+    }
+    Ok(format!("{{\"ok\":true,\"key\":\"{KEY_HARDENING_LEVEL}\",\"value\":\"{level}\"}}"))
+}
+
 /// Open the store and load the persisted settings into the atomics. Must be
 /// called once on the main thread before CEF starts.
 pub fn init() {
@@ -97,6 +176,14 @@ pub fn init() {
     SEARCH_ENGINE.store(engine, Ordering::Relaxed);
     TOR_ENABLED.store(s.get_bool(KEY_TOR_ENABLED, true), Ordering::Relaxed);
     TOR_DEFAULT.store(s.get_bool(KEY_TOR_DEFAULT, false), Ordering::Relaxed);
+    let level = s
+        .get(KEY_HARDENING_LEVEL)
+        .and_then(|v| harden::Level::parse(&v))
+        .unwrap_or(harden::Level::Standard);
+    HARDENING_LEVEL.store(level_code(level), Ordering::Relaxed);
+    if let Some(j) = s.get(KEY_HARDENING_CUSTOM) {
+        *HARDENING_CUSTOM.lock().unwrap() = harden::Config::from_json(&j);
+    }
 }
 
 /// Is the Tor engine available (the master switch)?
@@ -134,15 +221,18 @@ pub fn glow_intensity() -> f32 {
 
 /// Current settings as a JSON object string, for the `get_settings` IPC reply.
 pub fn snapshot_json() -> String {
+    // `fp_custom` is injected raw (it is already a JSON object, not a string).
     format!(
-        "{{\"feather_edges\":{},\"animated_background\":{},\"stay_foreground\":{},\"glow_intensity\":{},\"search_engine\":\"{}\",\"tor_enabled\":{},\"tor_default\":{}}}",
+        "{{\"feather_edges\":{},\"animated_background\":{},\"stay_foreground\":{},\"glow_intensity\":{},\"search_engine\":\"{}\",\"tor_enabled\":{},\"tor_default\":{},\"fp_preset\":\"{}\",\"fp_custom\":{}}}",
         feather_edges(),
         animated_background(),
         stay_foreground(),
         glow_intensity_percent(),
         search_engine(),
         TOR_ENABLED.load(Ordering::Relaxed),
-        TOR_DEFAULT.load(Ordering::Relaxed)
+        TOR_DEFAULT.load(Ordering::Relaxed),
+        hardening_level().as_str(),
+        hardening_custom().to_json(),
     )
 }
 
