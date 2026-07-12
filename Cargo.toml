@@ -26,10 +26,11 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
-# Update-awareness HTTPS client (CD-13, D-0023) — the host's ONE intentional
-# outbound connection, a single pinned manifest. rustls-based (no OpenSSL); the
-# reasoned exception to the lean-dependency doctrine is recorded in D-0023.
-ureq = { version = "2", default-features = false, features = ["tls"] }
+# NOTE: the update-awareness HTTPS client (`ureq`, CD-13/D-0023) was RETIRED in CD-22
+# (D-0036): the live manifest fetch is gone (the info area is now client-side only, and
+# the app self-update feed is deferred to a later ticket). The binary opens no HTTP
+# client of its own — NetGuard (D-0004) holds without exception. When the self-update
+# feed returns, its network client comes back with it.
 # Embedded Tor engine (CD-15, D-0026) — pure-Rust Tor via arti-client, rustls
 # (no OpenSSL), on a background tokio runtime. Heavy but justified by the
 # per-window Tor feature; the reasoned dependency exception is recorded in D-0026.

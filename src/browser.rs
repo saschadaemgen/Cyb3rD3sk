@@ -1166,20 +1166,11 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
             BAR_TYPING.store(active, Ordering::Relaxed);
             Ok(serde_json::json!({ "ok": true }).to_string())
         }
-        // Update-awareness info panel (CD-13). Internal view only, allowlisted.
+        // Update-awareness info panel (CD-13 → CD-22). Internal view only,
+        // allowlisted. Read-only now: the panel derives every component status from
+        // the client-side table (no live fetch), so the CD-13 `dismiss_item` /
+        // `check_updates` commands were retired in CD-22 along with the manifest feed.
         "get_info_items" => Ok(crate::updates::info_snapshot_json()),
-        "dismiss_item" => {
-            let id = v
-                .get("id")
-                .and_then(|x| x.as_str())
-                .ok_or((2, "missing 'id'".to_string()))?;
-            crate::updates::dismiss(id);
-            Ok(serde_json::json!({ "ok": true }).to_string())
-        }
-        "check_updates" => {
-            crate::updates::request_check();
-            Ok(serde_json::json!({ "ok": true }).to_string())
-        }
         // Per-window Tor toggle (CD-15 Stage B): flip the ensemble's slot between
         // clearnet and Tor. The main thread respawns the browser under the new
         // context; queued here because it owns the slot lifecycle.

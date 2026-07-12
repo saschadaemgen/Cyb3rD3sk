@@ -1,16 +1,15 @@
-// Info panel logic (CD-13, detailed component list + held-back state CD-20).
-// Talks to the Rust host exclusively over the CEF message router (window.cefQuery)
-// — no network, no fetch, no external resources. Commands: get_info_items,
-// dismiss_item, check_updates (and reuses navigate for notes links). Wire format
-// in docs/cyberdesk-wire-format.md.
+// Info panel logic (CD-13 → CD-22). Talks to the Rust host exclusively over the CEF
+// message router (window.cefQuery) — no network, no fetch, no external resources.
+// Read-only: it asks the host for the component statuses and renders them. The status
+// for every external dependency is derived CLIENT-SIDE (installed vs a build-declared
+// latest-known version); there is no live manifest fetch and no "Last check failed"
+// footer (retired in CD-22 — the app self-update feed returns in its own later ticket).
+// Only command: get_info_items. Wire format in docs/cyberdesk-wire-format.md.
 
 (function () {
   "use strict";
 
-  var itemsEl = document.getElementById("items");
   var compsEl = document.getElementById("components");
-  var checkedEl = document.getElementById("checked");
-  var checkNowBtn = document.getElementById("check-now");
 
   function query(req) {
     return new Promise(function (resolve, reject) {
@@ -34,40 +33,11 @@
     return e;
   }
 
-  // A notes link opens in the active slot (host closes the panel on navigate).
-  function openNotes(url) {
-    query({ cmd: "navigate", input: url }).catch(function () {});
-  }
-
-  function dismiss(id) {
-    query({ cmd: "dismiss_item", id: id }).then(load).catch(function () {});
-  }
-
-  // --- Update item cards (the notification-rail seed) -----------------------
-  function renderItem(it) {
-    var card = el("div", "item " + (it.severity || "recommended"));
-    var head = el("div", "item-head");
-    head.appendChild(el("span", "item-title", it.title));
-    head.appendChild(el("span", "item-sev", it.severity || "recommended"));
-    card.appendChild(head);
-    card.appendChild(el("div", "item-body", it.body));
-
-    var actions = el("div", "item-actions");
-    if (it.action && it.action.url) {
-      var notes = el("button", "btn", it.action.label || "Release notes");
-      notes.addEventListener("click", function () { openNotes(it.action.url); });
-      actions.appendChild(notes);
-    }
-    var dis = el("button", "btn ghost", "Dismiss");
-    dis.addEventListener("click", function () { dismiss(it.id); });
-    actions.appendChild(dis);
-    card.appendChild(actions);
-    return card;
-  }
-
-  // --- Component list: three honest states + informational (CD-20) ----------
+  // --- Component list: real per-component status (CD-22) ---------------------
   // The state map is the single place the vocabulary lives, so the wording stays
-  // consistent and never claims more than the host reported.
+  // consistent and never claims more than the host reported. "informational" is only
+  // a defensive fallback for an undeclared component — every tracked one has a real
+  // comparison result (up to date / update available / held back).
   var STATE = {
     current:       { cls: "ok",     label: "Up to date" },
     update:        { cls: "update", label: "Update available" },
@@ -109,48 +79,22 @@
   }
 
   function render(snap) {
-    // Update items (the NEW, non-dismissed ones); empty when up to date.
-    itemsEl.replaceChildren();
-    (snap.items || []).forEach(function (it) { itemsEl.appendChild(renderItem(it)); });
-
-    // The detailed component list: always shown, always honest.
     compsEl.replaceChildren();
-    (snap.components || []).forEach(function (c) { compsEl.appendChild(renderComponent(c)); });
-
-    if (!snap.have_feed && (!snap.components || snap.components.length === 0)) {
-      compsEl.appendChild(el("p", "empty", "No feed data yet — the update manifest could not be reached."));
+    var comps = (snap && snap.components) || [];
+    if (comps.length === 0) {
+      compsEl.appendChild(el("p", "empty", "No component information available."));
+      return;
     }
-
-    // Footer: honest about the last check. A failed live fetch is never dressed up
-    // as a clean "up to date" — we say the check failed and note we're showing the
-    // last-known data (CD-20).
-    if (snap.feed_ok === false) {
-      var msg = "Last check failed";
-      if (snap.checked_ago) msg += " · " + snap.checked_ago;
-      if (snap.have_feed) msg += " · showing last known data";
-      checkedEl.textContent = msg;
-      checkedEl.classList.add("failed");
-    } else {
-      checkedEl.classList.remove("failed");
-      checkedEl.textContent = snap.checked_ago ? ("Checked " + snap.checked_ago) : "Not checked yet";
-    }
+    comps.forEach(function (c) { compsEl.appendChild(renderComponent(c)); });
   }
 
   function load() {
     return query({ cmd: "get_info_items" })
       .then(function (resp) { render(JSON.parse(resp)); })
-      .catch(function () { checkedEl.textContent = "Info unavailable"; });
+      .catch(function () {
+        compsEl.replaceChildren(el("p", "empty", "Component information unavailable."));
+      });
   }
-
-  checkNowBtn.addEventListener("click", function () {
-    checkedEl.classList.remove("failed");
-    checkedEl.textContent = "Checking…";
-    query({ cmd: "check_updates" }).catch(function () {});
-    // The check runs async on the host worker; refresh a couple of times to pick
-    // up the fresh result (small manifest, usually well under a second).
-    setTimeout(load, 1200);
-    setTimeout(load, 3000);
-  });
 
   load();
 })();

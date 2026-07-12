@@ -20,17 +20,14 @@
       </div>
     </header>
 
-    <!-- NEW update items (the notification-rail seed); empty when up to date. -->
-    <section class="items" id="items"></section>
-
-    <!-- Detailed component list: always shown, honest about every version and
-         state (current / update available / held back). CD-20. -->
+    <!-- Component list: each external dependency shows a REAL status (up to date /
+         update available / held back), compared client-side against this build's
+         known versions. No live fetch (CD-22). -->
     <h2 class="section-title">Components</h2>
     <section class="components" id="components"></section>
 
     <footer class="foot">
-      <span class="checked" id="checked"></span>
-      <button class="btn" id="check-now" type="button">Check now</button>
+      <span class="source">Compared against the versions this build ships — no network check.</span>
     </footer>
   </main>
 

@@ -44,49 +44,7 @@ html, body {
 h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.3px; }
 .sub { font-size: 11px; color: var(--text-dim); letter-spacing: 2px; text-transform: uppercase; }
 
-/* --- Update item cards ---------------------------------------------------- */
-.items { display: flex; flex-direction: column; gap: 12px; }
-
-.item {
-  border: 1px solid var(--panel-border);
-  border-left: 3px solid var(--brand);
-  border-radius: calc(var(--corner-radius) * 0.6);
-  padding: 14px 16px;
-  background: color-mix(in srgb, var(--brand) 6%, transparent);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.item.security { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 7%, transparent); }
-.item.info { border-left-color: var(--accent); }
-
-.item-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.item-title { font-size: 15px; font-weight: 600; }
-.item-sev {
-  font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase;
-  color: var(--text-dim); flex: none;
-}
-.item.security .item-sev { color: var(--warn); }
-.item-body { font-size: 13px; color: var(--text-dim); line-height: 1.45; }
-
-.item-actions { display: flex; gap: 10px; margin-top: 2px; }
-
-.btn {
-  font: inherit;
-  font-size: 13px;
-  padding: 7px 14px;
-  border-radius: 999px;
-  border: 1px solid var(--brand);
-  background: transparent;
-  color: var(--brand);
-  cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
-}
-.btn:hover { background: var(--brand); color: var(--bg); }
-.btn.ghost { border-color: var(--panel-border); color: var(--text-dim); }
-.btn.ghost:hover { background: color-mix(in srgb, var(--panel-border) 40%, transparent); color: var(--text); }
-
-/* --- Detailed component list (CD-20) -------------------------------------- */
+/* --- Component list (CD-20, CD-22) ---------------------------------------- */
 .section-title {
   font-size: 11px;
   font-weight: 600;
@@ -163,15 +121,13 @@ h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.3px; }
 .empty { font-size: 12.5px; color: var(--text-dim); padding: 4px 2px; }
 
 /* --- Footer --------------------------------------------------------------- */
+/* A single honest line naming the source of the statuses — no live fetch (CD-22). */
 .foot {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 16px;
   padding-top: 14px;
   border-top: 1px solid var(--panel-border);
   margin-top: auto;
 }
-.checked { font-size: 12px; color: var(--text-dim); }
-/* A failed live fetch is a soft warning (amber), never dressed up as success. */
-.checked.failed { color: var(--warn); }
+.source { font-size: 12px; color: var(--text-dim); line-height: 1.4; }
