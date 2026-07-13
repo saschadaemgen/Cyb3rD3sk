@@ -2,6 +2,50 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0044 - 2026-07-13 - Product UI is confident and honest: no competitor references, no self-deprecation; bounded limits are internal-only (CD-28)
+
+*Decision.* User-facing surfaces state what CyberDesk does, accurately and
+confidently, and must **never** name or point to a competitor (e.g. Tor Browser)
+or frame the product as insufficient. Honesty here means not lying about
+capabilities - it does not mean advertising a competitor or self-deprecating.
+The one genuine bounded limit that had leaked into UI/EC-01 copy - the
+anonymity-set effect against a global passive adversary - is moved to internal
+`cyberdesk-security.md` as developer-facing scope, explicitly never to be
+surfaced in product UI, marketing, or demos. EC-01 is rewritten: technical facts
+kept, "use Tor Browser" conclusion removed, consequence reframed as "solve every
+fingerprint vector; each solved vector is a product win." CyberDesk's
+positioning is: better than Tor Browser on every axis buildable in software.
+
+*Why.* A security product that tells buyers in its own UI that a free competitor
+is better does not sell and hands critics a screenshot. The earlier "use Tor
+Browser" copy was both a marketing wound and a distortion (the product wins
+broadly; it trails only on non-buildable mass/time axes). Corrected to
+confident-and-honest.
+
+*Surfaces corrected.* Settings (the Tor and Tracking-resistance sections' scope
+paragraphs), the two weakening-gate step-2 texts (Settings modal + the
+per-window floating menu), and the README's two "Honest scope" passages. The
+gate still states the trackability cost of weakening in plain language (that is
+information about the user's own choice, unchanged per D-0040) - only the
+competitor pointer is gone. IP-anonymity copy now points to CyberDesk's own
+per-window Tor. Historical records (this file's older entries, the architecture
+status log, season protocols) are left verbatim - they are history, and this
+entry supersedes their normative force.
+
+*Reasoned deviations (recorded).* (1) The ticket locates EC-01 in
+`cyberdesk-feature-backlog.md`, but no written EC register existed there -
+EC-01 lived only as references (D-0039/D-0040, code comments). The register
+section is therefore CREATED in that file and EC-01 written directly in the
+corrected form (facts kept, conclusion corrected), with a register rule that
+entries never conclude "use another product". (2) The README is treated as a
+product/marketing surface (it is the product's face to any reader) and
+corrected under the same rule, not left as an internal doc.
+
+*Standing copy rule.* Product UI states what CyberDesk **does**, confidently and
+accurately. It **never** names or points to a competitor, and it **never**
+self-deprecates. Bounded technical limits, where they exist, live in internal
+docs. (Also recorded in `CLAUDE.md` as a binding working rule.)
+
 ## D-0043 - 2026-07-13 - Search-engine selector is authoritative; factory default is DuckDuckGo, not Google (CD-27)
 
 *Decision.* The in-app search-engine selector actually routes address-bar

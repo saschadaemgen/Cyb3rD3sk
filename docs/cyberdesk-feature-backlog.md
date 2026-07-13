@@ -65,3 +65,44 @@ Soft season mapping - chat fill level and reality decide the actual cuts. Comple
 
 - CARVILON OS: Debian 13, branded Calamares installer, CyberDesk boots as the shell
 - NetGuard extended into a device firewall on the appliance (nftables rules generated from the same policy, eBPF monitoring via aya)
+
+## External critiques (EC register)
+
+Outside technical critiques that constrain or direct the engineering. Each entry
+records the verified facts and the engineering consequence we draw from them.
+Register rule (D-0044): entries never conclude "use another product" — a critique's
+consequence is always something we build.
+
+### EC-01 — Fingerprinting strategy: uniformity vs. randomization (Sam Bent / Tor Browser 14.5 OS-spoofing removal)
+
+**Verified facts (kept, they shape CD-16/CD-25/CD-29):**
+
+- There are two workable anti-fingerprinting strategies: **uniformity** (everyone
+  reports the same value — needs a crowd all reporting it) and **randomization**
+  (per-session noise — needs no crowd, breaks linkage).
+- Tor Browser **14.5 removed OS spoofing**: it now reports the real OS family,
+  because maintaining a coherent OS lie across every surface proved untenable —
+  even the uniformity flagship gave up that vector rather than ship an
+  incoherent one.
+- The **anonymity-set effect is real but bounded**: a large identical crowd
+  structurally helps only against a global passive adversary correlating
+  fingerprints network-wide (bounded scope note: `cyberdesk-security.md`,
+  internal-only).
+- **Naive/incoherent spoofing backfires**: a spoofed value that contradicts
+  another surface (the Brave UA/`navigator.platform` mismatch) makes the user
+  *more* unique, not less. Coherence is a hard constraint — no OS/UA/platform
+  spoofing, no cross-surface contradiction (binding since CD-16, D-0039).
+
+**Engineering consequence (the corrected conclusion):** solve **every**
+fingerprint vector — clamp stable signals to a common standard value, farble
+measured signals with fresh coherent per-session noise (the CD-29 sweep
+executes this vector-by-vector) — and treat **each solved vector as a product
+and marketing win**. The earlier conclusion drawn from this critique ("for
+serious anti-fingerprinting anonymity, use Tor Browser") was wrong and is
+deleted (D-0044): a bounded limit against one adversary model is not a reason
+to point users at anything else.
+
+**Stance:** CyberDesk targets **parity-or-better with Tor Browser on every axis
+buildable in software**. The only non-buildable axes are crowd size (mass) and
+audit reputation (time) — internal scope notes, never product limitations to
+advertise.

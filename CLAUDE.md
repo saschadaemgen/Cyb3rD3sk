@@ -40,6 +40,17 @@ Principle: **no real IPs, hostnames, or secrets in the repo** — placeholders
 only (documentation IPs such as `203.0.113.x`). CARVILON-internal addresses
 never enter the history.
 
+## Product copy (D-0044)
+
+Product UI states what CyberDesk **does**, confidently and accurately. It
+**never** names or points to a competitor (no "use Tor Browser" or equivalent,
+ever), and it **never** self-deprecates. Honesty means not lying about
+capabilities — not advertising alternatives. IP-anonymity copy points to
+CyberDesk's own per-window Tor (and the VPN route once shipped). Bounded
+technical limits, where they genuinely exist, live in internal docs
+(`docs/cyberdesk-security.md`), never in UI, marketing, or demos. The README
+counts as a product surface under this rule.
+
 ## No desktop scraping
 
 Never screen-capture the user's desktop or any foreign window for verification.

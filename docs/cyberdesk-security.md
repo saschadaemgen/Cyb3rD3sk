@@ -1,6 +1,6 @@
 # CyberDesk - Security
 
-Project CARVILON CyberDesk - living document - Status: 2026-07-08
+Project CARVILON CyberDesk - living document - Status: 2026-07-13
 
 ## Iron law
 
@@ -46,6 +46,26 @@ phone-home and is **not** disabled - certificate verification stays on. Metrics
 (UMA) and crash upload are off by default (no `crash_reporter.cfg` ships, so no
 `ServerURL` and no upload). CD-17 is the precursor and proof for the NetGuard
 analyzer epic: host silent + engine silenced + proven.
+
+## Anonymity-set scope note (CD-28, D-0044)
+
+**Internal engineering scope - never surface in product UI, marketing, or demos.**
+
+A large shared crowd (Tor Browser's uniformity model) structurally helps only
+against a **global passive network adversary** that correlates fingerprints
+across the whole network: with millions of users reporting identical values,
+no fingerprint singles one of them out. CyberDesk's coherent per-session
+farbling (CD-16, D-0039) takes the other workable strategy: it breaks
+**cross-site and cross-session linkage** - a tracker cannot match today's
+fingerprint to tomorrow's - but it does not place the user inside a large
+identical crowd. Against the adversaries the product targets (commercial
+trackers, cross-site profilers, fingerprint-linkage across sessions), the
+farbling model holds on its own merits.
+
+Engineering consequence, not product copy: solve every fingerprint vector
+(clamp stable signals, farble measured ones - the CD-29 sweep), and market
+each solved vector. The two axes no software can build are crowd size (mass)
+and audit reputation (time); they are scope notes here, nothing more.
 
 ## Supply chain
 
