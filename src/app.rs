@@ -999,7 +999,8 @@ impl Shell {
         // for both the change-sig and the payload so a level change re-pushes.
         let hview = |id: usize| -> (u8, bool, bool) {
             let ov = browser::slot_hardening_override(id);
-            let code = match ov.unwrap_or_else(crate::settings::hardening_level) {
+            let level = ov.map(|o| o.level).unwrap_or_else(crate::settings::hardening_level);
+            let code = match level {
                 crate::harden::Level::Off => 0u8,
                 crate::harden::Level::Standard => 1,
                 crate::harden::Level::Strict => 2,

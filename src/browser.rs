@@ -28,7 +28,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::os::raw::c_int;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use cef::wrapper::message_router::{
@@ -979,54 +979,51 @@ fn inject_hardening(frame: &mut Frame, config_json: &str) {
     );
 }
 
-// --- CD-25: per-window hardening config (D-0040) ----------------------------
+// --- CD-25 / CD-29: per-window hardening override (D-0040 / D-0045) ----------
 // The GLOBAL preset lives in settings.rs; each slot may hold a per-window OVERRIDE
-// (session-ephemeral — not persisted). The EFFECTIVE config (override else global)
-// is resolved at browser-CREATE time and carried to the render process via the
-// CreateBrowser `extra_info` dictionary — per-window, alongside the session-global
-// seed switch (unchanged). A level change RESPAWNS the slot's browser so the fresh
-// document injects under the new config: a live context can't be re-hardened (the
-// patches are irreversible, applied before page scripts). The dict rides `extra_info`
-// (5th CreateBrowser arg) and composes cleanly with the Tor proxy (6th arg).
+// (session-ephemeral — not persisted). Since CD-29 the override can be a full
+// per-vector CUSTOM config, not just a preset, so every vector is settable
+// per-window as well as globally (Task C). The EFFECTIVE config (override else
+// global) is resolved at browser-CREATE time and carried to the render process via
+// the CreateBrowser `extra_info` dictionary — per-window, alongside the
+// session-global seed switch. A level change RESPAWNS the slot's browser so the
+// fresh document injects under the new config: a live context can't be re-hardened
+// (the patches are irreversible, applied before page scripts). The dict rides
+// `extra_info` (5th CreateBrowser arg) and composes cleanly with the Tor proxy.
 
-/// Per-slot hardening override sentinel: "inherit the global preset".
-const HARDEN_INHERIT: u8 = u8::MAX;
-/// Per-slot hardening OVERRIDE (0=off, 1=standard, 2=strict) or [`HARDEN_INHERIT`].
-/// The per-window control offers presets only — per-vector custom is a global
-/// capability — so there is no per-window `custom` override.
-static SLOT_HARDENING: [AtomicU8; MAX_SLOTS] =
-    [const { AtomicU8::new(HARDEN_INHERIT) }; MAX_SLOTS];
+/// A per-window hardening override: a preset level, plus the per-vector flags used
+/// only when `level == Custom`. Session-ephemeral. `None` (no override stored) means
+/// "inherit the global preset".
+#[derive(Clone, Copy)]
+pub struct SlotOverride {
+    pub level: crate::harden::Level,
+    pub custom: crate::harden::Config,
+}
+
+/// Per-slot hardening override (`None` = inherit the global). Read at browser-create
+/// time and by the frame push (not per rendered frame), so a Mutex is fine.
+static SLOT_HARDENING: [Mutex<Option<SlotOverride>>; MAX_SLOTS] =
+    [const { Mutex::new(None) }; MAX_SLOTS];
 
 /// Set slot `i`'s hardening override (`None` = inherit the global preset).
-pub fn set_slot_hardening(i: usize, level: Option<crate::harden::Level>) {
+pub fn set_slot_hardening(i: usize, ov: Option<SlotOverride>) {
     if i < MAX_SLOTS {
-        let code = match level {
-            None | Some(crate::harden::Level::Custom) => HARDEN_INHERIT,
-            Some(crate::harden::Level::Off) => 0,
-            Some(crate::harden::Level::Standard) => 1,
-            Some(crate::harden::Level::Strict) => 2,
-        };
-        SLOT_HARDENING[i].store(code, Ordering::Relaxed);
+        *SLOT_HARDENING[i].lock().unwrap() = ov;
     }
 }
 
 /// Slot `i`'s hardening override, if any (`None` = inheriting the global preset).
-pub fn slot_hardening_override(i: usize) -> Option<crate::harden::Level> {
+pub fn slot_hardening_override(i: usize) -> Option<SlotOverride> {
     if i >= MAX_SLOTS {
         return None;
     }
-    match SLOT_HARDENING[i].load(Ordering::Relaxed) {
-        0 => Some(crate::harden::Level::Off),
-        1 => Some(crate::harden::Level::Standard),
-        2 => Some(crate::harden::Level::Strict),
-        _ => None,
-    }
+    *SLOT_HARDENING[i].lock().unwrap()
 }
 
 /// The EFFECTIVE resolved config for slot `i` (its override, else the global preset).
 pub fn slot_effective_config(i: usize) -> crate::harden::Config {
     match slot_hardening_override(i) {
-        Some(level) => crate::harden::resolve(level, crate::settings::hardening_custom()),
+        Some(ov) => crate::harden::resolve(ov.level, ov.custom),
         None => crate::settings::hardening_global_config(),
     }
 }
@@ -1590,27 +1587,35 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
                 .and_then(|l| l.as_str())
                 .ok_or((2, "missing 'level'".to_string()))?;
             let confirm = v.get("confirm").and_then(|c| c.as_bool()).unwrap_or(false);
-            let vectors = v.get("vectors").map(|vec| {
-                let b = |k: &str| vec.get(k).and_then(|x| x.as_bool()).unwrap_or(true);
-                let base = crate::harden::Config {
-                    on: true,
-                    strict: false,
-                    canvas: b("canvas"),
-                    webgl: b("webgl"),
-                    audio: b("audio"),
-                    metrics: b("metrics"),
-                    nav: b("nav"),
-                    fonts: b("fonts"),
-                };
-                crate::harden::Config { on: base.any_vector(), ..base }
-            });
+            // Every vector from the object is applied; absent keys stay ON, so a page
+            // that omits a vector never silently weakens it (CD-29).
+            let vectors = v.get("vectors").map(crate::harden::Config::from_vectors_value);
             let reply = crate::settings::set_hardening(level, vectors, confirm).map_err(|e| (3, e))?;
             *pending_global_hardening().lock().unwrap() = true;
             Ok(reply)
         }
-        // PER-WINDOW hardening override (CD-25): inherit/off/standard/strict for one
-        // slot (per-window offers presets only). Same weakening gate as the global.
-        // Queued for the main thread, which respawns the slot under the new config.
+        // Per-window hardening state (CD-29): the slot's effective level, whether it
+        // is inheriting the global, and the full per-vector config — so the per-window
+        // Custom detail can paint each vector's current state without bloating the
+        // frame push. Read-only.
+        "get_slot_hardening" => {
+            let slot = target_slot(&v);
+            let ov = slot_hardening_override(slot);
+            let level = ov
+                .map(|o| o.level)
+                .unwrap_or_else(crate::settings::hardening_level);
+            let eff = slot_effective_config(slot);
+            Ok(format!(
+                "{{\"level\":\"{}\",\"inherited\":{},\"config\":{}}}",
+                level.as_str(),
+                ov.is_none(),
+                eff.to_json()
+            ))
+        }
+        // PER-WINDOW hardening override (CD-25 / CD-29): inherit/off/standard/strict,
+        // OR custom with a per-vector `vectors` object (CD-29 Task C — every vector
+        // settable per-window too). Same weakening gate as the global; the host
+        // re-validates it. Queued for the main thread, which respawns the slot.
         "set_slot_hardening" => {
             let slot = target_slot(&v);
             let level_str = v
@@ -1618,24 +1623,34 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
                 .and_then(|l| l.as_str())
                 .ok_or((2, "missing 'level'".to_string()))?;
             let confirm = v.get("confirm").and_then(|c| c.as_bool()).unwrap_or(false);
-            let target_level: Option<crate::harden::Level> = if level_str == "inherit" {
-                None
-            } else {
-                Some(
-                    crate::harden::Level::parse(level_str)
+            let ov: Option<SlotOverride> = match level_str {
+                "inherit" => None,
+                "custom" => {
+                    // Vectors from the page, else the slot's existing custom, else
+                    // Standard (fail-protected). Absent keys stay ON (from_vectors_value).
+                    let custom = v
+                        .get("vectors")
+                        .map(crate::harden::Config::from_vectors_value)
+                        .or_else(|| slot_hardening_override(slot).map(|o| o.custom))
+                        .unwrap_or(crate::harden::Config::STANDARD);
+                    Some(SlotOverride { level: crate::harden::Level::Custom, custom })
+                }
+                other => {
+                    let l = crate::harden::Level::parse(other)
                         .filter(|l| *l != crate::harden::Level::Custom)
-                        .ok_or((2, format!("bad level: {level_str}")))?,
-                )
+                        .ok_or((2, format!("bad level: {other}")))?;
+                    Some(SlotOverride { level: l, custom: crate::harden::Config::STANDARD })
+                }
             };
             let current = slot_effective_config(slot);
-            let target = match target_level {
-                Some(l) => crate::harden::resolve(l, crate::settings::hardening_custom()),
+            let target = match ov {
+                Some(o) => crate::harden::resolve(o.level, o.custom),
                 None => crate::settings::hardening_global_config(),
             };
             if crate::harden::is_weakening(&current, &target) && !confirm {
                 return Err((3, "weakening hardening requires confirmation".to_string()));
             }
-            set_slot_hardening(slot, target_level);
+            set_slot_hardening(slot, ov);
             pending_slot_hardening().lock().unwrap().push(slot);
             Ok(serde_json::json!({ "ok": true }).to_string())
         }

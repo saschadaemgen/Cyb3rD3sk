@@ -316,8 +316,17 @@
     { level: "inherit", label: "Use global default" },
     { level: "standard", label: "Standard" },
     { level: "strict", label: "Strict" },
+    { level: "custom", label: "Custom…" },
     { level: "off", label: "Off" }
   ];
+  // The full per-vector list (CD-29 Task C): every vector settable per-window, not
+  // just presets. Canonical order matches harden.rs::VECTOR_KEYS.
+  var FP_VECTORS = ["canvas", "webgl", "gpu", "audio", "metrics", "nav", "fonts", "timing", "media", "math"];
+  var FP_VECTOR_LABELS = {
+    canvas: "Canvas", webgl: "WebGL readback", gpu: "GPU identity", audio: "Audio",
+    metrics: "Layout & text metrics", nav: "Device profile", fonts: "Fonts",
+    timing: "Clock precision", media: "Media & codecs", math: "Math rounding"
+  };
   function closeFpPop() { fpPop.hidden = true; }
 
   function applySlotFp(id, level, confirm, onNeedGate) {
@@ -330,6 +339,8 @@
   }
 
   function chooseLevel(e, level) {
+    // "Custom…" opens the per-vector detail (fetched from the host), not a preset.
+    if (level === "custom") { openFpCustom(e); return; }
     // Among the per-window presets, only Off drops below the Standard safe floor:
     // Standard and Strict both keep every vector on, so neither is a weakening —
     // matching the authoritative host classifier harden::is_weakening (which ignores
@@ -343,6 +354,69 @@
       closeFpPop();
       applySlotFp(e.id, level, false, function () { fpGate(level, commitConfirmed); });
     }
+  }
+
+  // --- Per-window per-vector Custom detail (CD-29 Task C) ------------------
+  // Fetch the slot's current effective config from the host, then show a switch per
+  // vector. Turning a vector OFF is a weakening: it opens the same two-step gate and
+  // applies confirmed. Turning one ON applies at once. Each change sends the FULL
+  // vectors object under level "custom", so the window becomes a per-vector override.
+  function openFpCustom(e) {
+    query({ cmd: "get_slot_hardening", slot: e.id }).then(function (r) {
+      var d; try { d = JSON.parse(r); } catch (x) { return; }
+      var cfg = (d && d.config) || {};
+      var vectors = {};
+      FP_VECTORS.forEach(function (k) { vectors[k] = cfg[k] !== false; });
+      renderFpCustom(e, vectors);
+    }).catch(function () {});
+  }
+
+  function applySlotCustom(e, vectors, confirm, onNeedGate) {
+    query({ cmd: "set_slot_hardening", slot: e.id, level: "custom", vectors: vectors, confirm: !!confirm })
+      .catch(function () { if (!confirm && onNeedGate) onNeedGate(); });
+  }
+
+  function renderFpCustom(e, vectors) {
+    fpPop.innerHTML = "";
+    var head = document.createElement("div");
+    head.className = "fp-pop-title";
+    head.textContent = "Custom · this window";
+    fpPop.appendChild(head);
+    var sub = document.createElement("div");
+    sub.className = "fp-pop-sub";
+    sub.textContent = "Turn individual protections on or off. A partial set can make this window easier to fingerprint.";
+    fpPop.appendChild(sub);
+
+    FP_VECTORS.forEach(function (k) {
+      var row = document.createElement("button");
+      row.className = "fp-pop-opt fp-vec" + (vectors[k] ? " active" : "");
+      row.type = "button";
+      row.textContent = (vectors[k] ? "● " : "○ ") + FP_VECTOR_LABELS[k];
+      row.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        var turningOff = !!vectors[k];
+        function commit() {
+          vectors[k] = !vectors[k];
+          renderFpCustom(e, vectors); // re-render in place (popup stays open)
+          applySlotCustom(e, vectors, turningOff, null);
+        }
+        if (turningOff) {
+          // Two-step gate, then commit confirmed — mirrors the preset weakening gate.
+          fpGate("vector", function () { commit(); });
+        } else {
+          commit();
+        }
+      });
+      fpPop.appendChild(row);
+    });
+
+    var back = document.createElement("button");
+    back.className = "fp-pop-opt fp-pop-back";
+    back.type = "button";
+    back.textContent = "‹ Back to levels";
+    back.addEventListener("click", function (ev) { ev.stopPropagation(); openFpMenu(e); });
+    fpPop.appendChild(back);
+    fpPop.hidden = false;
   }
 
   function fpGate(level, onConfirm) {

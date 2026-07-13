@@ -183,29 +183,43 @@
         <div class="row"><div class="label"><span class="name">Canvas</span>
           <span class="hint">Image / canvas readback</span></div>
           <div class="switch" data-fp="canvas" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
-        <div class="row"><div class="label"><span class="name">WebGL</span>
-          <span class="hint">GPU readback + vendor / renderer</span></div>
+        <div class="row"><div class="label"><span class="name">WebGL readback</span>
+          <span class="hint">GPU pixel readback (readPixels)</span></div>
           <div class="switch" data-fp="webgl" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
+        <div class="row"><div class="label"><span class="name">GPU identity</span>
+          <span class="hint">WebGL / WebGPU vendor &amp; renderer strings</span></div>
+          <div class="switch" data-fp="gpu" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
         <div class="row"><div class="label"><span class="name">Audio</span>
           <span class="hint">AudioContext readback</span></div>
           <div class="switch" data-fp="audio" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
         <div class="row"><div class="label"><span class="name">Layout &amp; text metrics</span>
           <span class="hint">Client rects + text measurement</span></div>
           <div class="switch" data-fp="metrics" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
-        <div class="row"><div class="label"><span class="name">CPU &amp; memory</span>
-          <span class="hint">CPU-core and memory buckets</span></div>
+        <div class="row"><div class="label"><span class="name">Device profile</span>
+          <span class="hint">CPU cores, memory, touch, battery, network</span></div>
           <div class="switch" data-fp="nav" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
         <div class="row"><div class="label"><span class="name">Fonts</span>
-          <span class="hint">Local font enumeration</span></div>
+          <span class="hint">Standard font set; local fonts hidden</span></div>
           <div class="switch" data-fp="fonts" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
+        <div class="row"><div class="label"><span class="name">Clock precision</span>
+          <span class="hint">Blunt high-resolution timers</span></div>
+          <div class="switch" data-fp="timing" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
+        <div class="row"><div class="label"><span class="name">Media &amp; codecs</span>
+          <span class="hint">Codec answers + voices normalized</span></div>
+          <div class="switch" data-fp="media" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
+        <div class="row"><div class="label"><span class="name">Math rounding</span>
+          <span class="hint">Erase transcendental-rounding differences</span></div>
+          <div class="switch" data-fp="math" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
       </div>
 
       <dl class="tor-info">
-        <div><dt>What it does</dt><dd>Adds tiny, invisible per-session noise to the
-        readback surfaces sites use to fingerprint you (canvas, WebGL, audio, text
-        metrics), and reduces a few high-entropy values (CPU cores, memory, fonts,
-        timezone). The noise is stable within a session but changes on the next
-        launch, so a site cannot link one session to the next.</dd></div>
+        <div><dt>What it does</dt><dd>Solves every measurable fingerprint vector:
+        stable signals are clamped to common values (your local fonts are hidden
+        behind a standard set, GPU strings and screen size read as an ordinary
+        machine, codecs and math are normalized), and measured signals carry fresh
+        per-session noise (canvas, WebGL, audio, text metrics, high-resolution
+        timers). The noise is stable within a session but changes on the next launch
+        or a new identity, so a site cannot link one session to the next.</dd></div>
         <div><dt>What stays real</dt><dd>Your operating system, browser identity
         (User-Agent), and language are left untouched and mutually consistent — no
         half-spoofing that would make you <em>more</em> identifiable.</dd></div>

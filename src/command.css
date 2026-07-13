@@ -216,6 +216,10 @@ html, body {
 }
 .fp-pop-opt:hover { background: color-mix(in srgb, var(--brand) 16%, transparent); }
 .fp-pop-opt.active { color: var(--brand); font-weight: 600; }
+/* Per-vector Custom rows (CD-29): a dot glyph carries on/off; a subtle divider
+   sets the Back control apart from the vector list. */
+.fp-pop-opt.fp-vec { font-size: 12.5px; padding: 6px 10px; }
+.fp-pop-back { margin-top: 4px; border-top: 1px solid var(--panel-border); color: var(--text-dim); }
 .fp-pop-warn { font-size: 12px; color: var(--text-dim); line-height: 1.5; padding: 6px 8px 8px; }
 .fp-pop-warn b { color: var(--text); font-weight: 600; }
 .fp-pop-actions { display: flex; gap: 8px; justify-content: flex-end; padding: 4px; }

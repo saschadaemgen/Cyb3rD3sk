@@ -142,30 +142,42 @@
   var fpLevelPill = document.getElementById("fp-level");
   var fpDetail = document.getElementById("fp-detail");
   var FP_LABELS = { off: "Off", standard: "Standard", strict: "Strict", custom: "Custom" };
-  var VECTORS = ["canvas", "webgl", "audio", "metrics", "nav", "fonts"];
+  // The full CD-29 vector list (canonical order matches harden.rs::VECTOR_KEYS).
+  var VECTORS = ["canvas", "webgl", "gpu", "audio", "metrics", "nav", "fonts", "timing", "media", "math"];
   var VECTOR_LABELS = {
-    canvas: "canvas", webgl: "WebGL", audio: "audio",
-    metrics: "layout & text metrics", nav: "CPU & memory", fonts: "fonts"
+    canvas: "canvas", webgl: "WebGL readback", gpu: "GPU identity", audio: "audio",
+    metrics: "layout & text metrics", nav: "device profile", fonts: "fonts",
+    timing: "clock precision", media: "media & codecs", math: "math rounding"
   };
-  var ALL_ON = { on: true, canvas: true, webgl: true, audio: true, metrics: true, nav: true, fonts: true };
-  var fpState = { preset: "standard", vectors: { canvas: true, webgl: true, audio: true, metrics: true, nav: true, fonts: true } };
+  function allVectors(on) {
+    var o = {};
+    VECTORS.forEach(function (k) { o[k] = on; });
+    return o;
+  }
+  var ALL_ON = (function () { var o = allVectors(true); o.on = true; return o; })();
+  var fpState = { preset: "standard", vectors: allVectors(true) };
 
-  // Resolve a (preset, vectors) into the effective 6-vector config for the weaken
+  // Resolve a (preset, vectors) into the effective per-vector config for the weaken
   // classification (mirror harden.rs::resolve).
   function fpEffective(preset, vectors) {
     if (preset === "off") {
-      return { on: false, canvas: false, webgl: false, audio: false, metrics: false, nav: false, fonts: false };
+      var off = allVectors(false); off.on = false; return off;
     }
     if (preset === "custom") {
-      var any = false;
-      VECTORS.forEach(function (k) { if (vectors[k]) any = true; });
-      return { on: any, canvas: vectors.canvas, webgl: vectors.webgl, audio: vectors.audio, metrics: vectors.metrics, nav: vectors.nav, fonts: vectors.fonts };
+      var eff = {}, any = false;
+      VECTORS.forEach(function (k) { eff[k] = !!vectors[k]; if (vectors[k]) any = true; });
+      eff.on = any;
+      return eff;
     }
-    return { on: true, canvas: true, webgl: true, audio: true, metrics: true, nav: true, fonts: true }; // standard / strict
+    var on = allVectors(true); on.on = true; return on; // standard / strict
   }
   function isWeakening(cur, tgt) {
-    return (cur.on && !tgt.on) || (cur.canvas && !tgt.canvas) || (cur.webgl && !tgt.webgl) ||
-      (cur.audio && !tgt.audio) || (cur.metrics && !tgt.metrics) || (cur.nav && !tgt.nav) || (cur.fonts && !tgt.fonts);
+    if (cur.on && !tgt.on) return true;
+    for (var i = 0; i < VECTORS.length; i++) {
+      var k = VECTORS[i];
+      if (cur[k] && !tgt[k]) return true;
+    }
+    return false;
   }
 
   function paintFp() {
