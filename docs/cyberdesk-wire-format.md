@@ -27,7 +27,9 @@ Transport: `window.cefQuery({ request, persistent: false, onSuccess, onFailure }
 - Success: `{"feather_edges":<bool>,"animated_background":<bool>,"stay_foreground":<bool>,"glow_intensity":<int>,"search_engine":<str>,"tor_enabled":<bool>,"tor_default":<bool>,"fp_preset":<str>,"fp_custom":{…}}`
   (`tor_enabled` / `tor_default` added in CD-15; `fp_preset` / `fp_custom` in CD-25.)
   - `glow_intensity` is a whole percent (50..=220).
-  - `search_engine` ∈ { `google`, `duckduckgo`, `bing`, `startpage` } (CD-07).
+  - `search_engine` ∈ { `google`, `duckduckgo`, `bing`, `startpage`, `brave` }
+    (CD-07; CD-27/D-0043 added `brave` and flipped the factory default to
+    `duckduckgo`).
   - `fp_preset` ∈ { `off`, `standard`, `strict`, `custom` } — the GLOBAL fingerprinting-
     hardening preset a window inherits (CD-25, default `standard`).
   - `fp_custom` — the per-vector flags used when `fp_preset` is `custom`, e.g.
@@ -42,7 +44,7 @@ Transport: `window.cefQuery({ request, persistent: false, onSuccess, onFailure }
   - `glow_intensity` — number (whole percent; accepts a JSON number or a numeric
     string, clamped host-side to 50..=220).
   - `search_engine` — string (CD-07); one of `google`, `duckduckgo`, `bing`,
-    `startpage`. Any other value is rejected with code 3.
+    `startpage`, `brave` (CD-27). Any other value is rejected with code 3.
 - Effect: updates the in-memory setting (applied by the next rendered frame /
   next navigation) and the SQLite `settings` row (survives restart).
 - Success: `{"ok":true,"key":"<key>","value":<bool|int|str>}`

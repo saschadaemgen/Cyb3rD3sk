@@ -2,6 +2,52 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0043 - 2026-07-13 - Search-engine selector is authoritative; factory default is DuckDuckGo, not Google (CD-27)
+
+*Decision.* The in-app search-engine selector actually routes address-bar
+queries to the chosen engine: CyberDesk owns the query→search-URL routing via
+its own address bars (`browser.rs::search_url_for` behind the `navigate` IPC),
+never Chromium's omnibox default-search-engine. The factory default is
+**DuckDuckGo**; Google remains a selectable option but is no longer the default.
+A de-Googled browser must not ship Google as the default search - this closes
+the last Google-by-default surface after CD-17/CD-26. Brave Search joins the
+allowlist (planning-chat optional item; trivial under the owned mapping), and
+the settings dropdown demotes Google to the last entry.
+
+*Verified premise (refines the CD-26 wording).* CD-26 proved the selector never
+reaches Chromium's `TemplateURLService` (folae's DSE gate fired with DuckDuckGo
+selected). CD-27's code audit shows the USER-FACING path never depended on that
+service either: both address bars (command band, start page) send `navigate`
+over the message router, and the host classifies URL-vs-search and builds the
+search URL from the live `search_engine` setting - the ticket's preferred
+"CyberDesk owns the routing" architecture was already in place, and is now
+pure, engine-parameterized, and pinned by unit tests (per-engine templates,
+URL-vs-search classification, form-urlencoding, and a no-google-leak guarantee
+for non-Google engines). No OTHER user-reachable Chromium-internal search
+surface exists: the pinned crate hardwires windowless browsers to
+`RuntimeStyle::ALLOY` (`cef 149.3.0 window_info.rs::set_as_windowless`), so the
+Chrome-style context menu with its DSE-driven "Search with Google for ..." item
+cannot appear, and the DSE-gated background services died in CD-26.
+`TemplateURLService` therefore stays untouched - no fragile
+`default_search_provider_data` pref injection.
+
+*What WAS Google-by-default (both fixed).* (1) The code-side factory default
+(engine id 0 = google in settings.rs; unknown ids/names also fell back to
+Google) - now DuckDuckGo everywhere, including the defense-in-depth fallbacks.
+(2) The store seeder wrote a LITERAL `search_engine=google` row into every
+install (store.rs `seed_defaults`), indistinguishable from a user choice. Fresh
+stores now seed `duckduckgo`; existing stores get a ONE-SHOT, marker-gated
+migration (`meta.search_default_cd27`) that flips exactly the seeded-or-chosen
+`google` value once - correcting our own seed, not the user (pre-CD-27 the two
+were indistinguishable; a user who re-picks Google afterwards keeps it across
+restarts, pinned by store tests).
+
+*Why.* The CD-26 audit surfaced the DSE finding and the Google factory default;
+for a de-Googled privacy browser that spent three tickets silencing Google,
+shipping Google as the default search was a contradiction. Both are corrected:
+the selector's authority is verified and test-pinned, and the default is a
+privacy engine (DuckDuckGo over Startpage, which sources results from Google).
+
 ## D-0042 - 2026-07-13 - Residual idle google.com traffic closed: eager signin ListAccounts + AI-Mode eligibility fetch + generic Reporting API/NEL (CD-26)
 
 *Finding.* The CD-17 idle net-log still contained 11 google.com URLs. Structural

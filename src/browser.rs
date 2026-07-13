@@ -1388,10 +1388,13 @@ fn urlencode(s: &str) -> String {
 fn search_url_for(engine: &str, query: &str) -> String {
     let q = urlencode(query);
     match engine {
-        "duckduckgo" => format!("https://duckduckgo.com/?q={q}"),
+        "google" => format!("https://www.google.com/search?q={q}"),
         "bing" => format!("https://www.bing.com/search?q={q}"),
         "startpage" => format!("https://www.startpage.com/sp/search?query={q}"),
-        _ => format!("https://www.google.com/search?q={q}"),
+        "brave" => format!("https://search.brave.com/search?q={q}"),
+        // The factory default — and the fallback for any unknown name: never
+        // silently Google (CD-27, D-0043).
+        _ => format!("https://duckduckgo.com/?q={q}"),
     }
 }
 
@@ -2433,6 +2436,7 @@ mod tests {
             ("duckduckgo", "https://duckduckgo.com/?q="),
             ("bing", "https://www.bing.com/search?q="),
             ("startpage", "https://www.startpage.com/sp/search?query="),
+            ("brave", "https://search.brave.com/search?q="),
             ("google", "https://www.google.com/search?q="),
         ];
         for (engine, prefix) in cases {
@@ -2448,13 +2452,22 @@ mod tests {
     /// the de-Google guarantee for the chosen-search path (CD-27 acceptance 1).
     #[test]
     fn non_google_engines_never_touch_google() {
-        for engine in ["duckduckgo", "bing", "startpage"] {
+        for engine in ["duckduckgo", "bing", "startpage", "brave"] {
             let url = search_url_for(engine, "how to test a search engine");
             assert!(
                 !url.contains("google"),
                 "{engine} search leaked toward google: {url}"
             );
         }
+    }
+
+    /// An unknown engine name falls back to the factory default, DuckDuckGo —
+    /// a mis-stored or future value must never silently search Google (CD-27,
+    /// D-0043).
+    #[test]
+    fn unknown_engine_falls_back_to_duckduckgo() {
+        assert!(search_url_for("", "x").starts_with("https://duckduckgo.com/?q="));
+        assert!(search_url_for("altavista", "x").starts_with("https://duckduckgo.com/?q="));
     }
 
     /// The URL-vs-search decision: bare domains, schemes, and localhost forms

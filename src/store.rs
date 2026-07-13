@@ -214,8 +214,21 @@ impl Store {
             self.set("animated_background", prev.as_deref().unwrap_or("true"));
         }
         self.set_if_absent("stay_foreground", "true");
-        // CD-07: the command-bar search-engine choice, default Google.
-        self.set_if_absent("search_engine", "google");
+        // CD-07: the command-bar search-engine choice. CD-27 (D-0043) flipped
+        // the factory default Google -> DuckDuckGo: a de-Googled browser must
+        // not ship Google as its default search.
+        self.set_if_absent("search_engine", "duckduckgo");
+        // CD-27 (D-0043) one-shot migration: every pre-CD-27 store carries a
+        // LITERAL "google" row written by this seeder — indistinguishable from
+        // a user choice, so flipping it corrects our own seed, not the user.
+        // The meta marker limits the flip to exactly one run: an EXPLICIT
+        // post-migration Google choice sticks across restarts.
+        if self.meta_get("search_default_cd27").is_none() {
+            if self.get("search_engine").as_deref() == Some("google") {
+                self.set("search_engine", "duckduckgo");
+            }
+            self.meta_set("search_default_cd27", "done");
+        }
         // CD-15: the Tor engine is available by default; new windows are clearnet.
         self.set_if_absent("tor_enabled", "true");
         self.set_if_absent("tor_default", "false");
@@ -664,6 +677,53 @@ mod tests {
         let only_b = s.query_suggestions("b.example", 6);
         assert_eq!(only_b.len(), 1);
         assert_eq!(only_b[0].url, "https://b.example/");
+    }
+
+    // --- Search-engine factory default (CD-27, D-0043) ----------------------
+
+    /// A fresh store seeds DuckDuckGo as the search engine — never Google
+    /// (CD-27 acceptance 2, headless half).
+    #[test]
+    fn fresh_store_defaults_to_duckduckgo() {
+        let s = Store::open_in_memory();
+        assert_eq!(s.get("search_engine").as_deref(), Some("duckduckgo"));
+        assert!(s.meta_get("search_default_cd27").is_some(), "marker set on first seed");
+    }
+
+    /// A pre-CD-27 store (the seeder's literal "google" row, no migration
+    /// marker) is flipped to DuckDuckGo by the next open's seed pass.
+    #[test]
+    fn seeded_google_row_migrates_to_duckduckgo() {
+        let s = Store::open_in_memory();
+        // Rewind to the pre-CD-27 state: google row, marker absent.
+        s.set("search_engine", "google");
+        s.conn
+            .execute("DELETE FROM meta WHERE key = 'search_default_cd27'", [])
+            .unwrap();
+        s.seed_defaults(); // what the next open runs
+        assert_eq!(s.get("search_engine").as_deref(), Some("duckduckgo"));
+    }
+
+    /// An EXPLICIT post-migration Google choice survives the next open — the
+    /// marker limits the flip to one run; Google stays a working option.
+    #[test]
+    fn explicit_google_choice_survives_reopen() {
+        let s = Store::open_in_memory();
+        s.set("search_engine", "google"); // the user picked Google in settings
+        s.seed_defaults(); // next open: marker already present, no flip
+        assert_eq!(s.get("search_engine").as_deref(), Some("google"));
+    }
+
+    /// A non-Google pre-CD-27 choice is never touched by the migration.
+    #[test]
+    fn non_google_choice_is_untouched_by_migration() {
+        let s = Store::open_in_memory();
+        s.set("search_engine", "bing");
+        s.conn
+            .execute("DELETE FROM meta WHERE key = 'search_default_cd27'", [])
+            .unwrap();
+        s.seed_defaults();
+        assert_eq!(s.get("search_engine").as_deref(), Some("bing"));
     }
 
     // --- Session save/restore (CD-21, D-0035) -------------------------------

@@ -90,11 +90,14 @@
   var engineBtn = document.getElementById("engine-btn");
   var engineMenu = document.getElementById("engine-menu");
   var engineVal = document.getElementById("engine-val");
-  var ENGINE_LABELS =
-    { google: "Google", duckduckgo: "DuckDuckGo", bing: "Bing", startpage: "Startpage" };
+  var ENGINE_LABELS = {
+    google: "Google", duckduckgo: "DuckDuckGo", bing: "Bing",
+    startpage: "Startpage", brave: "Brave Search"
+  };
 
   function paintEngine(value) {
-    var v = ENGINE_LABELS[value] ? value : "google";
+    // Unknown values paint the factory default, DuckDuckGo (CD-27, D-0043).
+    var v = ENGINE_LABELS[value] ? value : "duckduckgo";
     engineVal.textContent = ENGINE_LABELS[v];
     var opts = engineMenu.querySelectorAll("li");
     for (var i = 0; i < opts.length; i++) {

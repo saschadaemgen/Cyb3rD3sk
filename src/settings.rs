@@ -26,9 +26,14 @@ static STAY_FOREGROUND: AtomicBool = AtomicBool::new(true);
 /// the `background.glow_default` token, applied in [`init`]; this literal is
 /// only a pre-init placeholder.
 static GLOW_INTENSITY: AtomicU32 = AtomicU32::new(115);
-/// Search engine for the command-bar search fallback, as a small id (0=google
-/// default, 1=duckduckgo, 2=bing, 3=startpage).
-static SEARCH_ENGINE: AtomicU8 = AtomicU8::new(0);
+/// Search engine for the command-bar search fallback, as a small id (0=google,
+/// 1=duckduckgo, 2=bing, 3=startpage, 4=brave). The factory default is
+/// DuckDuckGo (CD-27, D-0043) — a de-Googled browser must not ship Google as
+/// its default search; Google stays a selectable option.
+static SEARCH_ENGINE: AtomicU8 = AtomicU8::new(DEFAULT_ENGINE);
+
+/// The factory-default engine id: DuckDuckGo (CD-27, D-0043).
+const DEFAULT_ENGINE: u8 = 1;
 /// Whether the per-window Tor engine is available at all (CD-15). When off, the
 /// toggle glyph does nothing and new windows never default to Tor.
 static TOR_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -73,19 +78,24 @@ fn engine_id(value: &str) -> Option<u8> {
         "duckduckgo" => Some(1),
         "bing" => Some(2),
         "startpage" => Some(3),
+        "brave" => Some(4),
         _ => None,
     }
 }
 fn engine_name(id: u8) -> &'static str {
     match id {
-        1 => "duckduckgo",
+        0 => "google",
         2 => "bing",
         3 => "startpage",
-        _ => "google",
+        4 => "brave",
+        // The factory default — and the defense-in-depth fallback for any
+        // out-of-range id: never silently Google (CD-27, D-0043).
+        _ => "duckduckgo",
     }
 }
 
-/// The selected search engine: `google` | `duckduckgo` | `bing` | `startpage`.
+/// The selected search engine:
+/// `google` | `duckduckgo` | `bing` | `startpage` | `brave`.
 pub fn search_engine() -> &'static str {
     engine_name(SEARCH_ENGINE.load(Ordering::Relaxed))
 }
@@ -172,7 +182,10 @@ pub fn init() {
         .unwrap_or(default_glow)
         .clamp(GLOW_MIN, GLOW_MAX);
     GLOW_INTENSITY.store(glow, Ordering::Relaxed);
-    let engine = s.get(KEY_SEARCH_ENGINE).and_then(|v| engine_id(&v)).unwrap_or(0);
+    let engine = s
+        .get(KEY_SEARCH_ENGINE)
+        .and_then(|v| engine_id(&v))
+        .unwrap_or(DEFAULT_ENGINE);
     SEARCH_ENGINE.store(engine, Ordering::Relaxed);
     TOR_ENABLED.store(s.get_bool(KEY_TOR_ENABLED, true), Ordering::Relaxed);
     TOR_DEFAULT.store(s.get_bool(KEY_TOR_DEFAULT, false), Ordering::Relaxed);
@@ -278,4 +291,24 @@ pub fn set_search_engine(value: &str) -> Result<String, String> {
     Ok(format!(
         "{{\"ok\":true,\"key\":\"{KEY_SEARCH_ENGINE}\",\"value\":\"{value}\"}}"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_ENGINE, engine_id, engine_name};
+
+    /// Every allowlisted engine round-trips id <-> name; anything else is
+    /// rejected by the id side, and the name side resolves the factory default
+    /// AND any out-of-range id to DuckDuckGo — never silently Google (CD-27,
+    /// D-0043).
+    #[test]
+    fn engine_allowlist_round_trips_and_default_is_duckduckgo() {
+        for name in ["google", "duckduckgo", "bing", "startpage", "brave"] {
+            assert_eq!(engine_name(engine_id(name).unwrap()), name);
+        }
+        assert_eq!(engine_id("altavista"), None);
+        assert_eq!(engine_id(""), None);
+        assert_eq!(engine_name(DEFAULT_ENGINE), "duckduckgo");
+        assert_eq!(engine_name(250), "duckduckgo");
+    }
 }

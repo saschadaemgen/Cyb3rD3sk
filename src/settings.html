@@ -29,16 +29,20 @@
         <div class="select" id="engine-select">
           <button class="select-btn" id="engine-btn" type="button"
                   aria-haspopup="listbox" aria-expanded="false">
-            <span class="select-val" id="engine-val">Google</span>
+            <span class="select-val" id="engine-val">DuckDuckGo</span>
             <svg class="select-chev" viewBox="0 0 24 24" width="16" height="16"><path
               d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2"
               stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
+          <!-- Factory default first, Google demoted to the last entry (CD-27,
+               D-0043). Every option is live: the host routes the query to the
+               SELECTED engine (search_url_for), never to Chromium's DSE. -->
           <ul class="select-menu" id="engine-menu" role="listbox" hidden>
-            <li role="option" data-value="google">Google</li>
             <li role="option" data-value="duckduckgo">DuckDuckGo</li>
-            <li role="option" data-value="bing">Bing</li>
+            <li role="option" data-value="brave">Brave Search</li>
             <li role="option" data-value="startpage">Startpage</li>
+            <li role="option" data-value="bing">Bing</li>
+            <li role="option" data-value="google">Google</li>
           </ul>
         </div>
       </div>

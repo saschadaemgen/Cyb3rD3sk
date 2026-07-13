@@ -193,8 +193,10 @@ feathered compositing, and an isolated in-shell settings surface.
   **second, web-isolated OSR view** locked to an internal `cyberdesk://` custom
   scheme (D-0010), served entirely in-process from embedded assets. It can never
   reach the web (its navigation is confined to `cyberdesk://`). A **search-engine**
-  select (Google / DuckDuckGo / Bing / Startpage, a token-styled custom dropdown,
-  D-0015), a **glow-intensity** slider (50–220 %), and three toggles (animated
+  select (DuckDuckGo — the factory default, D-0043 — / Brave / Startpage / Bing /
+  Google; a token-styled custom dropdown, D-0015; the host routes every
+  address-bar query to the SELECTED engine), a **glow-intensity** slider
+  (50–220 %), and three toggles (animated
   background, feathered edges, and stay-in-foreground) are wired over a CEF
   message-router IPC bridge (`get_settings` / `set_setting`), applied live and
   persisted to SQLite.
@@ -374,8 +376,9 @@ its own floating command set (CD-12).
 An amber glyph in the address capsule marks a page served over plain `http://`
 (e.g. `neverssl.com`, which stays http by design); `https` and internal pages
 show no warning. The **gear** (top-right) opens the settings card with a live,
-persisted **search-engine** select (Google / DuckDuckGo / Bing / Startpage — the
-top-bar search fallback), a **glow-intensity** slider (50–220 %,
+persisted **search-engine** select (DuckDuckGo — the factory default, D-0043 — /
+Brave / Startpage / Bing / Google; the not-a-URL search fallback routes to the
+selected engine), a **glow-intensity** slider (50–220 %,
 brightness of the animated background), and three toggles: **animated background**
 (the Pulse Grid, or whichever background the template selects), **feathered
 edges**, and **stay in foreground** (keep the fullscreen shell above other
