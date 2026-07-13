@@ -56,6 +56,23 @@ static SCREEN_PRESET: AtomicU8 = AtomicU8::new(DEFAULT_SCREEN_PRESET);
 /// The factory-default reported screen preset: 1920x1080 (id 2).
 const DEFAULT_SCREEN_PRESET: u8 = 2;
 
+// --- Per-session identity rotation (CD-29, D-0046) --------------------------
+/// Fresh global identity (farble seed) each launch. Default ON — the safe,
+/// unlinkable default. When OFF the seed persists across launches (a deliberately
+/// stable cross-launch identity).
+static ROTATE_ON_RESTART: AtomicBool = AtomicBool::new(true);
+/// Automatically re-roll the global identity every [`ROTATE_INTERVAL_MIN`] minutes
+/// (the Pulse Grid countdown showpiece). Default OFF.
+static ROTATE_AUTO: AtomicBool = AtomicBool::new(false);
+/// Also rotate the Tor circuit(s) on every identity rotation. Default OFF.
+static ROTATE_NEW_CIRCUIT: AtomicBool = AtomicBool::new(false);
+/// The automatic-rotation interval, in whole minutes (clamped to
+/// [`ROTATE_INTERVAL_MIN_BOUND`]..=[`ROTATE_INTERVAL_MAX_BOUND`]).
+static ROTATE_INTERVAL_MIN: AtomicU32 = AtomicU32::new(DEFAULT_ROTATE_INTERVAL);
+const DEFAULT_ROTATE_INTERVAL: u32 = 15;
+pub const ROTATE_INTERVAL_MIN_BOUND: u32 = 1;
+pub const ROTATE_INTERVAL_MAX_BOUND: u32 = 180;
+
 /// The settings keys the internal view is allowed to read and write. Anything
 /// outside this list is rejected by [`set`] / [`set_glow_intensity`].
 pub const KEY_FEATHER_EDGES: &str = "feather_edges";
@@ -75,6 +92,14 @@ pub const KEY_HARDENING_LEVEL: &str = "hardening_level";
 pub const KEY_HARDENING_CUSTOM: &str = "hardening_custom";
 /// Global reported-screen-size preset (CD-29).
 pub const KEY_SCREEN_PRESET: &str = "screen_preset";
+/// Per-session identity rotation (CD-29).
+pub const KEY_ROTATE_ON_RESTART: &str = "rotate_on_restart";
+pub const KEY_ROTATE_AUTO: &str = "rotate_auto";
+pub const KEY_ROTATE_NEW_CIRCUIT: &str = "rotate_new_circuit";
+pub const KEY_ROTATE_INTERVAL: &str = "rotate_interval_min";
+/// The persisted global identity seed key (only meaningful when `rotate_on_restart`
+/// is off — a stable cross-launch identity).
+const KEY_IDENTITY_SEED: &str = "identity_seed";
 
 /// Glow-intensity slider bounds (percent).
 pub const GLOW_MIN: u32 = 50;
@@ -199,6 +224,48 @@ pub fn set_screen_preset(value: &str) -> Result<String, String> {
     ))
 }
 
+// --- Identity rotation (CD-29) ----------------------------------------------
+
+/// Fresh global identity each launch (default). When off, the seed persists.
+pub fn rotate_on_restart() -> bool {
+    ROTATE_ON_RESTART.load(Ordering::Relaxed)
+}
+/// Is automatic rotation on?
+pub fn rotate_auto() -> bool {
+    ROTATE_AUTO.load(Ordering::Relaxed)
+}
+/// Also rotate the Tor circuit(s) on a rotation?
+pub fn rotate_new_circuit() -> bool {
+    ROTATE_NEW_CIRCUIT.load(Ordering::Relaxed)
+}
+/// The automatic-rotation interval in whole minutes (bounded).
+pub fn rotate_interval_min() -> u32 {
+    ROTATE_INTERVAL_MIN.load(Ordering::Relaxed)
+}
+
+/// Apply and persist the automatic-rotation interval (whole minutes, clamped).
+pub fn set_rotate_interval(minutes: i64) -> Result<String, String> {
+    let clamped =
+        minutes.clamp(ROTATE_INTERVAL_MIN_BOUND as i64, ROTATE_INTERVAL_MAX_BOUND as i64) as u32;
+    ROTATE_INTERVAL_MIN.store(clamped, Ordering::Relaxed);
+    store()
+        .lock()
+        .unwrap()
+        .set(KEY_ROTATE_INTERVAL, &clamped.to_string());
+    Ok(format!(
+        "{{\"ok\":true,\"key\":\"{KEY_ROTATE_INTERVAL}\",\"value\":{clamped}}}"
+    ))
+}
+
+/// The persisted global identity seed, if any (for the stable cross-launch identity).
+pub fn persisted_identity_seed() -> Option<String> {
+    store().lock().unwrap().get(KEY_IDENTITY_SEED)
+}
+/// Persist the global identity seed (for the stable cross-launch identity).
+pub fn store_identity_seed(seed: &str) {
+    store().lock().unwrap().set(KEY_IDENTITY_SEED, seed);
+}
+
 /// Apply and persist the global hardening config (CD-25). `level` is one of
 /// off/standard/strict/custom; `vectors` supplies the per-vector flags for custom.
 /// A WEAKENING change (any vector dropped, or turned off) is refused without
@@ -266,6 +333,15 @@ pub fn init() {
         .and_then(|v| screen_code(&v))
         .unwrap_or(DEFAULT_SCREEN_PRESET);
     SCREEN_PRESET.store(screen, Ordering::Relaxed);
+    ROTATE_ON_RESTART.store(s.get_bool(KEY_ROTATE_ON_RESTART, true), Ordering::Relaxed);
+    ROTATE_AUTO.store(s.get_bool(KEY_ROTATE_AUTO, false), Ordering::Relaxed);
+    ROTATE_NEW_CIRCUIT.store(s.get_bool(KEY_ROTATE_NEW_CIRCUIT, false), Ordering::Relaxed);
+    let interval = s
+        .get(KEY_ROTATE_INTERVAL)
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(DEFAULT_ROTATE_INTERVAL)
+        .clamp(ROTATE_INTERVAL_MIN_BOUND, ROTATE_INTERVAL_MAX_BOUND);
+    ROTATE_INTERVAL_MIN.store(interval, Ordering::Relaxed);
 }
 
 /// Is the Tor engine available (the master switch)?
@@ -305,7 +381,7 @@ pub fn glow_intensity() -> f32 {
 pub fn snapshot_json() -> String {
     // `fp_custom` is injected raw (it is already a JSON object, not a string).
     format!(
-        "{{\"feather_edges\":{},\"animated_background\":{},\"stay_foreground\":{},\"glow_intensity\":{},\"search_engine\":\"{}\",\"tor_enabled\":{},\"tor_default\":{},\"fp_preset\":\"{}\",\"fp_custom\":{},\"screen_preset\":\"{}\"}}",
+        "{{\"feather_edges\":{},\"animated_background\":{},\"stay_foreground\":{},\"glow_intensity\":{},\"search_engine\":\"{}\",\"tor_enabled\":{},\"tor_default\":{},\"fp_preset\":\"{}\",\"fp_custom\":{},\"screen_preset\":\"{}\",\"rotate_on_restart\":{},\"rotate_auto\":{},\"rotate_new_circuit\":{},\"rotate_interval_min\":{}}}",
         feather_edges(),
         animated_background(),
         stay_foreground(),
@@ -316,6 +392,10 @@ pub fn snapshot_json() -> String {
         hardening_level().as_str(),
         hardening_custom().to_json(),
         screen_preset_name(),
+        rotate_on_restart(),
+        rotate_auto(),
+        rotate_new_circuit(),
+        rotate_interval_min(),
     )
 }
 
@@ -329,6 +409,9 @@ pub fn set(key: &str, value: bool) -> Result<String, String> {
         KEY_STAY_FOREGROUND => &STAY_FOREGROUND,
         KEY_TOR_ENABLED => &TOR_ENABLED,
         KEY_TOR_DEFAULT => &TOR_DEFAULT,
+        KEY_ROTATE_ON_RESTART => &ROTATE_ON_RESTART,
+        KEY_ROTATE_AUTO => &ROTATE_AUTO,
+        KEY_ROTATE_NEW_CIRCUIT => &ROTATE_NEW_CIRCUIT,
         other => return Err(format!("unknown setting key: {other}")),
     };
     atomic.store(value, Ordering::Relaxed);

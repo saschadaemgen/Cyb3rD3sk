@@ -78,6 +78,9 @@ pub fn run(windowed: bool) {
     // Opens and takes ownership of the app-state store (state.db) and loads the
     // persisted toggles; the settings IPC writes through it live.
     settings::init();
+    // Initialize the global identity seed (CD-29): fresh each launch, or the
+    // persisted seed when "new identity on restart" is off. Must follow settings::init.
+    browser::init_identity_seed();
 
     let mut app = Shell {
         windowed,
@@ -85,6 +88,8 @@ pub fn run(windowed: bool) {
         renderer: None,
         theme: Theme::load(),
         start: Instant::now(),
+        rot_anchor: Instant::now(),
+        rot_flash_until: None,
         cef_inited: false,
         views_started: false,
         scale: 1.0,
@@ -131,6 +136,11 @@ struct Shell {
     renderer: Option<SurfaceRenderer>,
     theme: Theme,
     start: Instant,
+    /// Automatic identity-rotation cycle anchor (CD-29): the start of the current
+    /// countdown. Reset on each rotation and whenever auto-rotation is (re)enabled.
+    rot_anchor: Instant,
+    /// A brief post-rotation flash deadline — drives the Pulse Grid re-roll burst.
+    rot_flash_until: Option<Instant>,
     cef_inited: bool,
     views_started: bool,
     scale: f32,
@@ -825,6 +835,7 @@ impl Shell {
         // path, so an override survives a hardening/Tor/screen respawn.)
         browser::set_slot_hardening(id, None);
         browser::set_slot_screen(id, None);
+        browser::clear_slot_identity(id);
         // Promote a neighbor only if the active slot itself was the one closed;
         // closing a non-active slot (via its orb) leaves the active slot as is.
         if closed_active {
@@ -1060,6 +1071,59 @@ impl Shell {
         })
         .to_string();
         browser::set_frame_state(&payload);
+    }
+
+    /// Drive automatic identity rotation (CD-29 Task D). When auto-rotation is on and
+    /// the interval elapses, re-roll the GLOBAL identity (every window's next page
+    /// load / any new window gets the fresh, unlinkable fingerprint) and start the
+    /// Pulse Grid re-roll flash. Honest by design: auto rotation re-seeds the basis for
+    /// SUBSEQUENT loads and is the visible showpiece — it does NOT reload live pages
+    /// (mid-page re-rolling is cosmetic; the manual button and on-restart are the
+    /// immediate cross-session-linkage killers). Cheap: a couple of atomic reads/frame.
+    fn tick_identity_rotation(&mut self) {
+        if !crate::settings::rotate_auto() {
+            // Keep the anchor fresh so re-enabling starts a full interval, and no stale
+            // countdown is shown.
+            self.rot_anchor = Instant::now();
+            return;
+        }
+        let interval = Duration::from_secs(crate::settings::rotate_interval_min() as u64 * 60);
+        if self.rot_anchor.elapsed() >= interval {
+            browser::rotate_global_identity();
+            self.rot_anchor = Instant::now();
+            self.rot_flash_until = Some(Instant::now() + Duration::from_millis(900));
+        }
+    }
+
+    /// The Pulse Grid glow multiplier for the identity-rotation countdown showpiece
+    /// (CD-29). 1.0 when auto-rotation is off. Otherwise a gentle build that ramps in
+    /// the final stretch of the interval (the grid visibly "charges"), then a bright
+    /// decaying burst right after a re-roll (the visible re-roll). Always ≥ 1.0, so the
+    /// countdown only ever ADDS energy — never dims the user's chosen glow.
+    fn rotation_glow_factor(&self) -> f32 {
+        // A post-rotation flash dominates while it lasts.
+        if let Some(until) = self.rot_flash_until {
+            let now = Instant::now();
+            if now < until {
+                let remain = (until - now).as_secs_f32();
+                let t = (remain / 0.9).clamp(0.0, 1.0); // 1 at the burst, 0 at its end
+                return 1.0 + 1.15 * t; // up to ~2.15x, decaying to 1.0
+            }
+        }
+        if !crate::settings::rotate_auto() {
+            return 1.0;
+        }
+        let interval = (crate::settings::rotate_interval_min() as f32 * 60.0).max(1.0);
+        let phase = (self.rot_anchor.elapsed().as_secs_f32() / interval).clamp(0.0, 1.0);
+        // Flat for most of the cycle; a smooth ramp over the final ~12% ("charging").
+        let ramp_start = 0.88;
+        if phase <= ramp_start {
+            1.0
+        } else {
+            let t = (phase - ramp_start) / (1.0 - ramp_start); // 0..1 over the tail
+            // ease-in (t^2) so the charge visibly accelerates toward the re-roll.
+            1.0 + 0.55 * t * t
+        }
     }
 
     /// Ctrl+L: reveal + focus the keyboard-active slot's own capsule.
@@ -1880,6 +1944,10 @@ impl ApplicationHandler for Shell {
                         pulse,
                         count: crate::updates::update_count() as f32,
                     };
+                    // CD-29: the identity-rotation countdown modulates the glow (charge
+                    // → re-roll burst), on top of the user's setting. Computed before
+                    // the mutable renderer borrow below.
+                    let glow = settings::glow_intensity() * self.rotation_glow_factor();
                     if let Some(r) = self.renderer.as_mut() {
                         r.render(
                             time,
@@ -1890,7 +1958,7 @@ impl ApplicationHandler for Shell {
                             gear_geom(w, scale),
                             settings::feather_edges(),
                             settings::animated_background(),
-                            settings::glow_intensity(),
+                            glow,
                             scale,
                             open,
                             is_bar,
@@ -1916,6 +1984,11 @@ impl ApplicationHandler for Shell {
         {
             self.restore_session(&window);
             self.views_started = true;
+        }
+
+        // Drive automatic identity rotation + its Pulse Grid countdown (CD-29).
+        if self.views_started {
+            self.tick_identity_rotation();
         }
 
         // Spawn a lazy slot's browser on its first navigation (queued by the

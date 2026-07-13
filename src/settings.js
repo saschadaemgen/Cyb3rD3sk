@@ -130,6 +130,27 @@
     })(engineOpts[i]);
   }
 
+  // Identity rotation interval slider (CD-29): minutes between automatic rotations.
+  var rotInterval = document.getElementById("rot-interval");
+  var rotIntervalVal = document.getElementById("rot-interval-val");
+  function paintRotInterval(minutes) {
+    var m = parseInt(minutes, 10);
+    if (isNaN(m)) m = 15;
+    var min = parseInt(rotInterval.min, 10);
+    var max = parseInt(rotInterval.max, 10);
+    m = Math.max(min, Math.min(max, m));
+    rotInterval.value = m;
+    rotIntervalVal.textContent = m + " min";
+    var fill = ((m - min) / (max - min)) * 100;
+    rotInterval.style.setProperty("--fill", fill + "%");
+  }
+  rotInterval.addEventListener("input", function () {
+    var m = parseInt(rotInterval.value, 10);
+    paintRotInterval(m);
+    query({ cmd: "set_setting", key: "rotate_interval_min", value: m })
+      .catch(function (err) { setStatus(String(err), true); });
+  });
+
   // Reported screen-size select (CD-29): a common real resolution for screen.*.
   // Same custom-dropdown pattern as the engine select; applied live, persisted.
   var screenSelect = document.getElementById("screen-select");
@@ -370,9 +391,13 @@
       paint("stay_foreground", s.stay_foreground);
       paint("tor_default", s.tor_default);
       paint("tor_enabled", s.tor_enabled);
+      paint("rotate_on_restart", s.rotate_on_restart);
+      paint("rotate_auto", s.rotate_auto);
+      paint("rotate_new_circuit", s.rotate_new_circuit);
       paintGlow(s.glow_intensity);
       paintEngine(s.search_engine);
       paintScreen(s.screen_preset);
+      paintRotInterval(s.rotate_interval_min);
       fpState.preset = FP_LABELS[s.fp_preset] ? s.fp_preset : "standard";
       if (s.fp_custom) {
         VECTORS.forEach(function (k) { fpState.vectors[k] = s.fp_custom[k] !== false; });

@@ -463,6 +463,23 @@
     var now = d.fp === 0 ? "off" : d.reduced ? "reduced" : FP_LEVEL_NAMES[d.fp] || "standard";
     sub.textContent = (d.inherited ? "Following the global default" : "Overriding the global") + " · now: " + now;
     fpPop.appendChild(sub);
+
+    // Manual "new identity now" (CD-29 Task D): re-roll THIS window's fingerprint
+    // (and its Tor circuit if enabled) and reload it — the "burn it now" control.
+    var idBtn = document.createElement("button");
+    idBtn.className = "fp-pop-opt fp-newid";
+    idBtn.type = "button";
+    idBtn.textContent = "↻ New identity now";
+    idBtn.title = "Re-roll this window's fingerprint and reload it fresh";
+    idBtn.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      query({ cmd: "new_identity", slot: e.id }).then(function () {
+        idBtn.textContent = "↻ New identity ✓";
+        setTimeout(closeFpPop, 700);
+      }).catch(function () {});
+    });
+    fpPop.appendChild(idBtn);
+
     FP_OPTS.forEach(function (opt) {
       var row = document.createElement("button");
       row.className = "fp-pop-opt"; row.type = "button";

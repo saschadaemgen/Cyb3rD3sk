@@ -49,6 +49,14 @@ Transport: `window.cefQuery({ request, persistent: false, onSuccess, onFailure }
     `1920x1080` (default), `1600x900`, `1280x720`. Sets the common resolution web
     slots report for `screen.*`; the actual viewport is never faked. Changing it
     respawns every slot that inherits the global screen. Any other value → code 3.
+  - `rotate_on_restart`, `rotate_auto`, `rotate_new_circuit` — boolean (CD-29
+    identity rotation). `rotate_on_restart` (default true) mints a fresh global
+    identity seed each launch; turning it OFF persists the current seed for a stable
+    cross-launch identity. `rotate_auto` (default false) enables the timed global
+    re-roll (the Pulse Grid countdown). `rotate_new_circuit` (default false) also
+    rotates Tor circuits on a rotation.
+  - `rotate_interval_min` — number (CD-29); automatic-rotation interval in whole
+    minutes, clamped host-side to 1..=180.
 - Effect: updates the in-memory setting (applied by the next rendered frame /
   next navigation) and the SQLite `settings` row (survives restart).
 - Success: `{"ok":true,"key":"<key>","value":<bool|int|str>}`
@@ -98,6 +106,20 @@ not just presets — every vector is settable per-window as well as globally.
   persisted); a reused slot id starts fresh (inheriting the global).
 - Success: `{"ok":true}`
 - Failure: code 2 (missing/invalid `level`), 3 (unconfirmed weakening).
+
+### `new_identity` (view -> host, CD-29)
+
+The MANUAL per-window "new identity now" — re-rolls THIS window's farble seed (and its
+Tor circuit if `rotate_new_circuit` is on) and respawns it so the fresh document loads
+under the new identity immediately.
+
+- Request: `{"cmd":"new_identity"[,"slot":<int>]}`
+- Effect: sets the slot's identity-seed override to a fresh value and queues a respawn.
+- Success: `{"ok":true}`
+
+Automatic rotation (`rotate_auto`) and on-restart rotation are host-driven (a timer /
+launch), not commands. A global auto-rotation re-seeds every window's basis for
+subsequent loads and drives the Pulse Grid countdown; it does not reload live pages.
 
 ### `get_slot_hardening` (view -> host, CD-29)
 

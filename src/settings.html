@@ -255,6 +255,60 @@
       a tracker records today doesn't match the one it sees tomorrow. For IP
       anonymity, add CyberDesk's built-in <strong>per-window Tor</strong> (above) —
       the two layers are designed to work together.</p>
+
+      <!-- Per-session identity rotation (CD-29). Re-seeds the fingerprint so a fresh,
+           unlinkable identity is produced — manually, automatically, or each launch. -->
+      <h2 class="section-head" style="margin-top:18px;">New identity</h2>
+
+      <div class="row">
+        <div class="label">
+          <span class="name">New identity on restart</span>
+          <span class="hint">A fresh, unlinkable fingerprint every launch</span>
+        </div>
+        <div class="switch" data-key="rotate_on_restart" role="switch" tabindex="0" aria-checked="false">
+          <span class="knob"></span>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="label">
+          <span class="name">Rotate automatically</span>
+          <span class="hint">Re-roll the fingerprint on a timer — the grid counts down and re-rolls</span>
+        </div>
+        <div class="switch" data-key="rotate_auto" role="switch" tabindex="0" aria-checked="false">
+          <span class="knob"></span>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="label">
+          <span class="name">Rotation interval</span>
+          <span class="hint">Minutes between automatic rotations</span>
+        </div>
+        <div class="slider">
+          <input id="rot-interval" class="range" type="range" min="1" max="180" step="1"
+                 value="15" aria-label="Rotation interval (minutes)">
+          <span class="val" id="rot-interval-val">15 min</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="label">
+          <span class="name">Also get a new Tor circuit</span>
+          <span class="hint">On each rotation, switch Tor windows to fresh circuits too</span>
+        </div>
+        <div class="switch" data-key="rotate_new_circuit" role="switch" tabindex="0" aria-checked="false">
+          <span class="knob"></span>
+        </div>
+      </div>
+
+      <p class="honesty">A new identity re-seeds the noise your browser adds to every
+      fingerprint surface, so a fresh set of sessions can't be linked to the old one.
+      It works strongest <strong>between</strong> pages and sessions: the per-window
+      <em>New identity now</em> button (in each window's tracking-resistance menu) and
+      <em>on restart</em> reload with a fresh identity immediately, while automatic
+      rotation re-seeds the basis for what you open next and drives the countdown on
+      the grid.</p>
     </section>
 
     <p class="status" id="status"></p>

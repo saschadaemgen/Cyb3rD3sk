@@ -245,5 +245,25 @@ console.log("\n[fonts clamp]");
   check("canvas font: standard family kept", ctx.font.indexOf("Segoe UI") !== -1);
 }
 
+// 7. Identity rotation (Task E): re-seeding = a fresh identity across EVERY farbled
+//    vector, while the clamps (common values) stay put. This is what a rotation event
+//    (manual / auto / on-restart) does — the host swaps the injected seed and respawns.
+console.log("\n[identity rotation / Task E]");
+{
+  const before = makeSandbox("seed-BEFORE", STANDARD);
+  const after = makeSandbox("seed-AFTER", STANDARD); // a rotation → a new seed
+  check("rotation changes canvas identity", canvasHash(before) !== canvasHash(after));
+  check("rotation changes audio identity", audioHash(before) !== audioHash(after));
+  check("rotation changes webgl readback identity", webglReadHash(before) !== webglReadHash(after));
+  // The clamps are common values by design — they must NOT change on rotation
+  // (everyone shares them; that is the point of a clamp vs a farble).
+  const glB = new before.WebGLRenderingContext(), glA = new after.WebGLRenderingContext();
+  check("rotation does NOT change the GPU clamp", glB.getParameter(0x9246) === glA.getParameter(0x9246));
+  check("rotation does NOT change the math clamp", before.Math.tan(0.9) === after.Math.tan(0.9));
+  // Re-seeding to the SAME value reproduces the SAME identity (stable within a session).
+  const again = makeSandbox("seed-BEFORE", STANDARD);
+  check("same seed reproduces the same identity", canvasHash(before) === canvasHash(again));
+}
+
 console.log("\n" + (failures ? `FAILED (${failures})` : "ALL PASS"));
 process.exit(failures ? 1 : 0);

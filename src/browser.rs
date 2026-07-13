@@ -899,31 +899,136 @@ fn hex_of(buf: &[u8]) -> String {
     s
 }
 
-/// The per-session hardening seed (BROWSER process): 16 random bytes, hex-encoded,
-/// generated exactly once. Passed to every child in `on_before_child_process_launch`
-/// so the whole session shares one seed → within-session stability, cross-session
-/// unlinkability (a fresh launch ⇒ a fresh seed ⇒ a different fingerprint).
-fn session_seed() -> &'static str {
-    static SEED: OnceLock<String> = OnceLock::new();
-    SEED.get_or_init(|| {
-        let mut buf = [0u8; 16];
-        if getrandom::fill(&mut buf).is_err() {
-            // Practically unreachable on Windows; a non-zero fallback keeps the
-            // farbling from silently collapsing to a fixed all-zero seed.
-            let pid = std::process::id().to_le_bytes();
-            for (i, b) in buf.iter_mut().enumerate() {
-                *b = pid[i % 4] ^ (i as u8).wrapping_mul(31).wrapping_add(0x9e);
-            }
+/// A fresh 16-byte random seed, hex-encoded. The farble basis: a new seed ⇒ a
+/// different, unlinkable fingerprint across every farbled vector.
+fn fresh_seed_hex() -> String {
+    let mut buf = [0u8; 16];
+    if getrandom::fill(&mut buf).is_err() {
+        // Practically unreachable on Windows; a non-zero fallback keeps the farbling
+        // from silently collapsing to a fixed all-zero seed.
+        let pid = std::process::id().to_le_bytes();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+            .to_le_bytes();
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = pid[i % 4] ^ nanos[i % 4] ^ (i as u8).wrapping_mul(31).wrapping_add(0x9e);
         }
-        hex_of(&buf)
-    })
+    }
+    hex_of(&buf)
 }
 
-/// The hardening seed as seen by a RENDER process: read from the command-line
-/// switch the browser appended (parsed from argv directly, so it does not depend
-/// on any CEF callback ordering). Falls back to a fresh per-process random seed if
-/// the switch is somehow absent — still cross-session-different, only losing
-/// cross-render-process consistency.
+// --- CD-29: per-session identity ROTATION (D-0046) --------------------------
+// The farble seed is the IDENTITY. CD-16 fixed it once per launch; CD-29 makes it
+// ROTATABLE so a user can produce a fresh, unlinkable fingerprint on demand:
+//   * ON RESTART  — a fresh global seed each launch (default; the persisted-seed
+//     path keeps a stable identity across launches when the user turns it off);
+//   * MANUAL      — a per-window "new identity now" re-rolls that slot's seed and
+//     respawns it (the "burn it now" cross-session-linkage killer);
+//   * AUTOMATIC   — a global re-roll every N minutes (the Pulse Grid countdown
+//     showpiece), re-seeding every window.
+// The EFFECTIVE per-slot seed (override else global) rides the CreateBrowser
+// `extra_info` dict alongside the hardening config, so a respawn applies it. The
+// argv switch below stays as a fallback for any render process created without a
+// per-slot seed (never a hardened slot in practice).
+
+/// The GLOBAL identity seed (browser process). Initialized by [`init_identity_seed`]
+/// at startup; re-rolled by [`rotate_global_identity`].
+fn identity_seed() -> &'static Mutex<String> {
+    static S: OnceLock<Mutex<String>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(fresh_seed_hex()))
+}
+
+/// Per-slot identity-seed OVERRIDE (`None` = follow the global). Set by a manual
+/// per-window rotation; cleared by a global rotation and on slot reuse.
+static SLOT_SEED: [Mutex<Option<String>>; MAX_SLOTS] = [const { Mutex::new(None) }; MAX_SLOTS];
+
+/// Initialize the global identity seed at startup (browser process, after settings
+/// load). Fresh each launch when "new identity on restart" is on (the default), else
+/// the persisted seed (a stable cross-launch identity) — minting + storing one the
+/// first time.
+pub fn init_identity_seed() {
+    let seed = if crate::settings::rotate_on_restart() {
+        fresh_seed_hex()
+    } else {
+        match crate::settings::persisted_identity_seed() {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                let s = fresh_seed_hex();
+                crate::settings::store_identity_seed(&s);
+                s
+            }
+        }
+    };
+    *identity_seed().lock().unwrap() = seed;
+}
+
+/// A snapshot of the current global identity seed (for the argv fallback switch).
+fn identity_seed_snapshot() -> String {
+    identity_seed().lock().unwrap().clone()
+}
+
+/// The EFFECTIVE identity seed for slot `i` (its override, else the global). Carried
+/// to the render process via `extra_info` so a respawn adopts it.
+fn slot_effective_seed(i: usize) -> String {
+    if i < MAX_SLOTS
+        && let Some(s) = SLOT_SEED[i].lock().unwrap().clone()
+    {
+        return s;
+    }
+    identity_seed_snapshot()
+}
+
+/// MANUAL rotation: re-roll slot `i`'s identity (its own fresh seed). The caller
+/// respawns the slot so the fresh document injects under the new seed. If the
+/// "also new Tor circuit" setting is on, rotate the slot's circuit too.
+pub fn rotate_slot_identity(i: usize) {
+    if i >= MAX_SLOTS {
+        return;
+    }
+    *SLOT_SEED[i].lock().unwrap() = Some(fresh_seed_hex());
+    if crate::settings::rotate_new_circuit() && slot_is_tor(i) {
+        crate::tor::new_identity();
+    }
+    tracing::info!(slot = i, "identity: manual per-window rotation");
+}
+
+/// GLOBAL rotation: re-roll the global identity and clear every per-slot override,
+/// so every window adopts the fresh identity. The caller respawns all slots. If the
+/// "also new Tor circuit" setting is on, rotate circuits too. Used by the automatic
+/// timer (the countdown showpiece).
+pub fn rotate_global_identity() {
+    *identity_seed().lock().unwrap() = fresh_seed_hex();
+    for s in SLOT_SEED.iter() {
+        *s.lock().unwrap() = None;
+    }
+    if crate::settings::rotate_new_circuit() {
+        crate::tor::new_identity();
+    }
+    tracing::info!("identity: global rotation (all windows re-seeded)");
+}
+
+/// Clear slot `i`'s identity-seed override (on slot reuse — a fresh window follows
+/// the global identity, never a closed window's rotated seed).
+pub fn clear_slot_identity(i: usize) {
+    if i < MAX_SLOTS {
+        *SLOT_SEED[i].lock().unwrap() = None;
+    }
+}
+
+/// Persist the CURRENT global identity seed (called when the user turns OFF "new
+/// identity on restart", so the very identity they are using now is the one restored
+/// next launch — not a fresh one).
+pub fn persist_current_identity() {
+    crate::settings::store_identity_seed(&identity_seed_snapshot());
+}
+
+/// The hardening seed as seen by a RENDER process: read from the command-line switch
+/// the browser appended (parsed from argv directly, so it does not depend on any CEF
+/// callback ordering). This is the FALLBACK only — a hardened slot's authoritative
+/// seed rides `extra_info` (`cd_seed`). Falls back to a fresh per-process random seed
+/// if the switch is somehow absent.
 fn render_seed() -> &'static str {
     static SEED: OnceLock<String> = OnceLock::new();
     SEED.get_or_init(|| {
@@ -933,19 +1038,17 @@ fn render_seed() -> &'static str {
         {
             return v;
         }
-        let mut buf = [0u8; 16];
-        let _ = getrandom::fill(&mut buf);
-        hex_of(&buf)
+        fresh_seed_hex()
     })
 }
 
 /// The document-start injection payload for a given per-window EFFECTIVE config
-/// (CD-25): the embedded hardening script with the session seed AND the config JSON
-/// substituted. Unlike CD-16's single cached string, this is per-config (the config
-/// varies per window), so it is rebuilt per injection — cheap next to a navigation.
-fn hardening_payload(config_json: &str) -> String {
+/// (CD-25) and identity seed (CD-29): the embedded hardening script with the seed AND
+/// the config JSON substituted. Rebuilt per injection (both vary per window / per
+/// rotation) — cheap next to a navigation.
+fn hardening_payload(config_json: &str, seed: &str) -> String {
     include_str!("hardening.js")
-        .replace("__CYBERDESK_FP_SEED__", render_seed())
+        .replace("__CYBERDESK_FP_SEED__", seed)
         .replace("__CYBERDESK_FP_CONFIG__", config_json)
 }
 
@@ -968,12 +1071,12 @@ fn should_harden(url: &str) -> bool {
     !SKIP.iter().any(|p| url.starts_with(p))
 }
 
-/// Run the hardening script in `frame`'s freshly-created V8 context under `config`.
-/// Called from the render-side `on_context_created`, which fires before any page
-/// script, so our patches are in place first.
-fn inject_hardening(frame: &mut Frame, config_json: &str) {
+/// Run the hardening script in `frame`'s freshly-created V8 context under `config`
+/// and identity `seed`. Called from the render-side `on_context_created`, which fires
+/// before any page script, so our patches are in place first.
+fn inject_hardening(frame: &mut Frame, config_json: &str, seed: &str) {
     frame.execute_java_script(
-        Some(&CefString::from(hardening_payload(config_json).as_str())),
+        Some(&CefString::from(hardening_payload(config_json, seed).as_str())),
         None,
         0,
     );
@@ -1050,6 +1153,12 @@ fn harden_extra_info(i: usize) -> Option<DictionaryValue> {
     dict.set_string(
         Some(&CefString::from("cd_harden")),
         Some(&CefString::from(slot_effective_config(i).to_json().as_str())),
+    );
+    // CD-29: the slot's effective identity seed rides alongside the config, so a
+    // respawn after a rotation injects under the new seed.
+    dict.set_string(
+        Some(&CefString::from("cd_seed")),
+        Some(&CefString::from(slot_effective_seed(i).as_str())),
     );
     Some(dict)
 }
@@ -1174,22 +1283,27 @@ pub fn take_pending_global_screen() -> bool {
 struct RenderHardenCfg {
     inject: bool,
     json: String,
+    seed: String,
 }
 thread_local! {
     static RENDER_HARDEN: RefCell<HashMap<c_int, RenderHardenCfg>> = RefCell::new(HashMap::new());
 }
-fn render_store_cfg(id: c_int, json: String) {
+fn render_store_cfg(id: c_int, json: String, seed: String) {
     let inject = crate::harden::Config::from_json(&json).on;
-    RENDER_HARDEN.with(|m| m.borrow_mut().insert(id, RenderHardenCfg { inject, json }));
+    // An absent per-browser seed falls back to the argv seed (never empty → the
+    // farble seed is always present).
+    let seed = if seed.is_empty() { render_seed().to_string() } else { seed };
+    RENDER_HARDEN.with(|m| m.borrow_mut().insert(id, RenderHardenCfg { inject, json, seed }));
 }
 /// The render config for browser `id`. Fail-safe: an unknown browser (extra_info was
 /// absent / a create path we did not cover) defaults to Standard — always PROTECTED,
 /// never silently Off.
 fn render_get_cfg(id: c_int) -> RenderHardenCfg {
     RENDER_HARDEN.with(|m| {
-        m.borrow().get(&id).cloned().unwrap_or(RenderHardenCfg {
+        m.borrow().get(&id).cloned().unwrap_or_else(|| RenderHardenCfg {
             inject: true,
             json: crate::harden::STANDARD_JSON.to_string(),
+            seed: render_seed().to_string(),
         })
     })
 }
@@ -1580,11 +1694,26 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
                     .or_else(|| value.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
                     .ok_or((2, "'value' must be numeric for glow_intensity".to_string()))?;
                 crate::settings::set_glow_intensity(n).map_err(|e| (3, e))
+            } else if key == crate::settings::KEY_ROTATE_INTERVAL {
+                let n = value
+                    .as_i64()
+                    .or_else(|| value.as_f64().map(|f| f.round() as i64))
+                    .or_else(|| value.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+                    .ok_or((2, "'value' must be numeric for rotate_interval_min".to_string()))?;
+                crate::settings::set_rotate_interval(n).map_err(|e| (3, e))
             } else {
                 let b = value
                     .as_bool()
                     .ok_or((2, "'value' must be boolean".to_string()))?;
-                crate::settings::set(key, b).map_err(|e| (3, e))
+                let reply = crate::settings::set(key, b).map_err(|e| (3, e))?;
+                // Turning OFF "new identity on restart" persists the CURRENT identity
+                // seed, so the identity in use now is the one restored next launch
+                // (CD-29). Turning it back on leaves the stored seed for a launch to
+                // ignore in favor of a fresh one.
+                if key == crate::settings::KEY_ROTATE_ON_RESTART && !b {
+                    persist_current_identity();
+                }
+                Ok(reply)
             }
         }
         // Command band frame state pull (CD-12): the page loads it on start, then
@@ -1817,6 +1946,17 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
             crate::tor::new_identity();
             Ok(serde_json::json!({ "ok": true }).to_string())
         }
+        // Manual per-window "new identity now" (CD-29 Task D): re-roll THIS window's
+        // farble seed (and, if enabled, its Tor circuit), then respawn it so the fresh
+        // document injects under the new identity — the "burn it now" control. This is
+        // the strongest per-window unlinkability lever (a fresh seed AND a reload, so
+        // it applies immediately, not just to future loads).
+        "new_identity" => {
+            let slot = target_slot(&v);
+            rotate_slot_identity(slot);
+            pending_slot_hardening().lock().unwrap().push(slot);
+            Ok(serde_json::json!({ "ok": true }).to_string())
+        }
         // The MF-zone viewer's log stream (CD-18): the last ring-buffer lines matching
         // an optional {filter:{target_prefix,level_min}, since_seq}. Pull-based +
         // incremental — the page sends back the highest seq it has seen.
@@ -1993,9 +2133,12 @@ wrap_browser_process_handler! {
         /// all renderers share ONE seed and derive identical per-origin farbling.
         fn on_before_child_process_launch(&self, command_line: Option<&mut CommandLine>) {
             if let Some(cmd) = command_line {
+                // The current global identity seed as a fallback for any render
+                // process without a per-slot `cd_seed` (CD-29). The per-slot seed in
+                // extra_info is authoritative for hardened slots.
                 cmd.append_switch_with_value(
                     Some(&CefString::from(FP_SEED_SWITCH)),
-                    Some(&CefString::from(session_seed())),
+                    Some(&CefString::from(identity_seed_snapshot().as_str())),
                 );
             }
         }
@@ -2499,12 +2642,17 @@ wrap_render_process_handler! {
         ) {
             let Some(b) = browser else { return };
             let id = b.identifier();
-            let json = extra_info
-                .map(|d| CefString::from(&d.string(Some(&CefString::from("cd_harden")))).to_string())
-                .filter(|s| !s.is_empty())
-                // Fail safe: no dict / no key -> Standard (protected), never Off.
-                .unwrap_or_else(|| crate::harden::STANDARD_JSON.to_string());
-            render_store_cfg(id, json);
+            let (json, seed) = match extra_info {
+                Some(d) => {
+                    let json = CefString::from(&d.string(Some(&CefString::from("cd_harden")))).to_string();
+                    let seed = CefString::from(&d.string(Some(&CefString::from("cd_seed")))).to_string();
+                    // Fail safe: no key -> Standard (protected), never Off.
+                    let json = if json.is_empty() { crate::harden::STANDARD_JSON.to_string() } else { json };
+                    (json, seed)
+                }
+                None => (crate::harden::STANDARD_JSON.to_string(), String::new()),
+            };
+            render_store_cfg(id, json, seed);
         }
 
         fn on_browser_destroyed(&self, browser: Option<&mut Browser>) {
@@ -2543,7 +2691,7 @@ wrap_render_process_handler! {
             {
                 let cfg = render_get_cfg(bid);
                 if cfg.inject {
-                    inject_hardening(f, &cfg.json);
+                    inject_hardening(f, &cfg.json, &cfg.seed);
                 }
             }
         }
@@ -2584,7 +2732,20 @@ wrap_render_process_handler! {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_input_for, common_screen_for, restamp_tor_status, search_url_for};
+    use super::{classify_input_for, common_screen_for, fresh_seed_hex, restamp_tor_status, search_url_for};
+
+    // --- Identity seed (CD-29): rotation produces fresh, well-formed seeds ------
+
+    /// A fresh seed is 32 lowercase-hex chars (16 bytes) and two draws differ — the
+    /// property that makes a rotation actually change the fingerprint (Task E).
+    #[test]
+    fn fresh_seed_is_hex_and_unique() {
+        let a = fresh_seed_hex();
+        let b = fresh_seed_hex();
+        assert_eq!(a.len(), 32, "16 bytes -> 32 hex chars");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_ne!(a, b, "two rotations must yield different seeds");
+    }
 
     // --- Screen presets (CD-29): common-and-consistent, never a decoy ---------
 
