@@ -106,3 +106,34 @@ to point users at anything else.
 buildable in software**. The only non-buildable axes are crowd size (mass) and
 audit reputation (time) — internal scope notes, never product limitations to
 advertise.
+
+## Marketing lines — the solved fingerprint surface (CD-29, D-0045/D-0046)
+
+Confident and accurate, one per solved vector (D-0044: never name a competitor,
+never self-deprecate). For the feature list / site.
+
+- **Canvas fingerprint re-randomized every session.** Your canvas reads clean and
+  unlinkable — the same within a session, different the next.
+- **GPU render fingerprint neutralized.** Sites see a generic, ordinary graphics
+  identity, not the make and model of your card.
+- **WebGL readback carries fresh per-session noise** — the pixels a tracker hashes
+  never match from one session to the next.
+- **Audio fingerprint scrambled, inaudibly.** Your sound stack reports a fresh,
+  unlinkable signature every session; playback is untouched.
+- **Your installed fonts are invisible to websites.** Every window returns the same
+  standard font set, whatever you have installed.
+- **Layout and text measurements jittered per session** — the pixel-perfect metrics
+  used to profile you don't line up across sessions.
+- **High-resolution timers blunted against hardware fingerprinting** — CPU-speed and
+  micro-benchmark tricks can't measure your machine finely.
+- **Codec and media support normalized** to a common profile — your exact device
+  media fingerprint stays private; your installed voices are hidden.
+- **Math fingerprint erased.** The tiny per-CPU rounding differences trackers exploit
+  are rounded away to one common answer.
+- **Your screen reads as an ordinary display** — a common resolution, consistent with
+  your real window, never a contradiction that flags you.
+- **CPU cores, memory, touch, battery and network reported in common buckets** — the
+  exact spec of your machine stays yours.
+- **New identity, on demand.** One click re-rolls a window's entire fingerprint and
+  reloads it fresh — plus a fresh identity every launch, and an automatic rotation you
+  can watch count down on the grid.

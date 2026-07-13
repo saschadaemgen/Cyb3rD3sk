@@ -67,6 +67,34 @@ Engineering consequence, not product copy: solve every fingerprint vector
 each solved vector. The two axes no software can build are crowd size (mass)
 and audit reputation (time); they are scope notes here, nothing more.
 
+## CD-29 bounded limits (internal engineering scope, D-0045/D-0046)
+
+**Never surface in product UI, marketing, or demos** (D-0044). These are honest
+implementation boundaries recorded for engineering, not product limitations.
+
+- **Fonts are enforced at the JS measurement surface, not the DirectWrite
+  backend.** A CEF embedder cannot restrict Chromium's system-font backend, so the
+  standard-font guarantee is enforced by stripping non-standard families to the
+  generic fallback (canvas `font`, CSS `font-family`/`font`/`setProperty`,
+  `FontFaceSet.check`) and reporting no local fonts via `queryLocalFonts`. This
+  covers the scripted canvas-measure AND the element-layout (`offsetWidth`) probes
+  because both resolve families through `CSSStyleDeclaration`. The pinned standard set
+  is the stock-Windows-11 font list; on the sole target platform every user returns
+  the same answer. **Remaining step:** bundle the actual font bytes so the guarantee
+  holds on a stripped Windows install or a future non-Win11 target (today it relies on
+  those fonts being OS-present). A page's own `@font-face` web font (served from its
+  origin) is intentionally untouched — only the user's LOCAL fonts are hidden.
+- **Automatic rotation is presentation + basis re-seed, not a live-page reset.** It
+  re-seeds the global identity for subsequent loads / new windows and drives the Pulse
+  Grid countdown, but does not reload live pages (mid-page re-rolling is cosmetic; a
+  live document keeps its create-time seed until it is respawned). The manual "new
+  identity now" and on-restart are the immediate cross-session-linkage killers. This is
+  stated accurately in the UI's honesty copy, so it is not a hidden limit.
+- **Screen size cannot be smaller than the real viewport.** An unusually large
+  single-column layout on a large monitor reports a larger common ladder rung
+  (1440p/2160p) rather than the preset — the exact monitor pixels are withheld, but a
+  very large window cannot be made to look small (that would be a detectable decoy).
+
 ## Supply chain
 
 Pinned dependencies, cargo-audit and cargo-deny in the workflow, no GPL linking (D-0005), CEF version pinned exactly, large binaries never in the repo (fetch script).

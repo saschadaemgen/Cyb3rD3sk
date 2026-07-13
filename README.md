@@ -92,6 +92,27 @@ feathered compositing, and an isolated in-shell settings surface.
   informs and confirms but never forbids: it is also the developer escape hatch (fully
   disable any one protection to debug). Every label stays **tracking-resistance, never
   anonymity**, and no control claims to hide the OS/UA/platform.
+* **The complete fingerprint surface — every vector solved and settable (CD-29,
+  D-0045):** the surface is now exhaustive. Ten independent vectors — canvas, WebGL
+  readback, **GPU identity**, audio, layout & text metrics, **device profile** (CPU,
+  memory, touch, battery, network), **fonts**, **clock precision**, **media & codecs**,
+  **math rounding** — each its **own visible toggle**, settable **globally and
+  per-window**. Stable signals are **clamped to common values** (your installed fonts
+  are hidden behind a standard set so every window returns the same font answer; the GPU
+  reads as a generic card; codecs, math and screen size read as an ordinary machine) and
+  measured signals carry **fresh per-session noise** (canvas, WebGL, audio, text
+  metrics, high-resolution timers). **Screen size** reports a **common real resolution**
+  (default 1920×1080; 1600×900 / 1280×720 presets) that always stays consistent with the
+  real window — never a decoy. Presets stay the coherent primary path; the safety gate
+  still fires on any weakening.
+* **New identity — on demand, on a timer, or every launch (CD-29, D-0046):** a rotation
+  re-seeds the whole farble basis, producing a fresh, unlinkable fingerprint. **New
+  identity now** (in each window's tracking-resistance menu) re-rolls that window — plus
+  its Tor circuit if you like — and reloads it fresh; **automatic rotation** re-rolls on
+  a timer you set, with the **Pulse Grid visibly counting down and re-rolling**; and a
+  **fresh identity each launch** is the default. Honest by design: the manual button and
+  on-restart are the immediate cross-session-linkage breakers, and the automatic
+  countdown re-seeds what you open next while giving the shell its showpiece.
 * **Own start page, no Google, no saved websites (CD-14, D-0025):** every empty/new
   slot opens to an **own start page** served from the binary at `cyberdesk://start/`
   (same isolation as settings, **zero network**) — Google is gone. It is a black
@@ -236,6 +257,8 @@ feathered compositing, and an isolated in-shell settings surface.
   resistance icon** (a fingerprint glyph) that opens this window's hardening level
   chooser and shows its effective level (neutral for Standard, accent for Strict, warn
   for a reduced/off window, with an override marker when it differs from the global).
+  **CD-29** grows that menu into the window's full identity control: **New identity
+  now**, a per-vector **Custom** detail, and a **screen-size** cycler — all per-window.
 
 The accelerated (zero-copy GPU) OSR path was researched; CyberDesk stays on the
 CPU path for now — see `docs/cyberdesk-decisions.md` (D-0009).

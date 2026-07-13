@@ -2,6 +2,83 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0046 - 2026-07-13 - Per-session identity rotation: manual / automatic (countdown showpiece) / on-restart (CD-29 Task D/E)
+
+*Decision.* The farble seed IS the identity; CD-29 makes it **rotatable** in three
+combinable modes. The browser process owns a rotatable global identity seed plus
+per-slot overrides; the EFFECTIVE per-slot seed rides the CreateBrowser `extra_info`
+dict (`cd_seed`) next to the hardening config, so a respawn adopts the new seed (the
+render side prefers `cd_seed`, falling back to the launch-time argv switch).
+- **On restart** (default on): a fresh global seed every launch. Turning it off
+  persists the current seed (`identity_seed` store key) for a deliberately stable
+  cross-launch identity.
+- **Manual** (`new_identity` IPC, a "New identity now" action in each window's
+  tracking-resistance menu): re-rolls THAT window's seed (and its Tor circuit if the
+  "also new circuit" setting is on) and respawns it, so the fresh document loads under
+  the new identity immediately — the "burn it now" control.
+- **Automatic** (settings-driven timer): re-rolls the global identity every N minutes
+  (1..=180) and drives a **Pulse Grid countdown showpiece** — the background glow
+  "charges" over the final stretch of the interval, then bursts on the re-roll
+  (`rotation_glow_factor`, multiplied on top of the user's glow setting).
+
+*Honest engineering note (in code + UI).* Rotation is strongest **between** pages and
+sessions. Manual and on-restart reload with a fresh identity **immediately** (the real
+cross-session-linkage killers). Automatic rotation re-seeds the basis for what the user
+opens **next** and is the visible showpiece — it deliberately does **not** reload live
+pages (mid-page re-rolling is cosmetic, and force-reloading every page on a timer is
+disruptive). Both are correct and are described accurately, never oversold.
+
+*Task E (verified).* `scripts/harden-selftest.mjs` proves a re-seed changes every
+farbled vector (canvas/WebGL/audio/…) while the clamps (GPU strings, math, …) stay put,
+and that the same seed reproduces the same identity (stable within a session). The Rust
+`fresh_seed_is_hex_and_unique` covers the 16-byte hex seed source.
+
+## D-0045 - 2026-07-13 - Full fingerprint surface: every vector solved and individually settable; common-consistent screen presets (CD-29 Task A/B/C)
+
+*Decision.* CyberDesk solves **every** measurable fingerprint vector by clamp (report a
+common value) or per-session farble (fresh coherent noise on a measured signal), and
+exposes each as an **individual, visible toggle settable globally AND per-window**
+(extending CD-25's two-level model), never hidden behind a warning; presets
+(Off/Standard/Strict) remain the coherent primary path. The vector set grows from
+CD-16's six to ten: canvas, WebGL readback, **GPU identity** (split out so vendor/
+renderer clamp and readback noise are independently settable), audio, layout/text
+metrics, device profile (CPU/memory/touch/battery/network), fonts, **clock/timing
+precision**, **media/codec/voice profile**, **math rounding**. `harden::Config` grew
+with serde defaults so a persisted CD-25 config upgrades with the new vectors **ON**
+(an upgrade never silently weakens). Screen metrics report the most common real
+resolution (default **1920x1080**; presets 1600x900 / 1280x720), settable global +
+per-window; the reported size is bucketed up a common-resolution ladder with the
+preset as a floor so it is **never smaller than the actual viewport** — the viewport is
+never faked (a reported/measured contradiction is itself a fingerprint). Each solved
+vector ships a confident, accurate marketing line (`cyberdesk-feature-backlog.md`); no
+competitor references, no self-deprecation (D-0044).
+
+*Why.* The product's core promise is parity-or-better with Tor Browser on every axis
+buildable in software (EC-01). Tor clamps everything into one bucket (breaking sites at
+"Safest"); CyberDesk keeps sites working by farbling measured signals and clamping
+stable ones to common values, and makes every vector visible, settable protection.
+
+*Reasoned deviations (recorded).*
+1. **Fonts — the measurement surface, not the DirectWrite backend.** A CEF embedder
+   cannot patch Chromium's font backend, so the "standard font set" is enforced at the
+   JS **measurement surface**: any font-family a page requests that is not in the pinned
+   standard set is stripped to the generic fallback (canvas `font`, CSS
+   `font-family`/`font`/`setProperty`, `FontFaceSet.check`), and `queryLocalFonts` reports
+   none — so a non-standard local font renders, and therefore MEASURES, exactly as on a
+   machine that lacks it. The pinned set is the fonts shipped with a **stock Windows 11**
+   (the sole target platform, per CLAUDE.md), so on-target every user returns the same
+   font answer regardless of extra installed fonts. Bundling the actual font bytes (to
+   hold the guarantee on stripped installs / a future non-Win11 target) is the remaining
+   step — recorded, internal-only (`cyberdesk-security.md`).
+2. **Screen — common-and-consistent via a ladder, not a decoy.** Rather than a fixed
+   fake size, the reported `screen.*` is the smallest common ladder rung
+   (720p/900p/1080p/1440p/2160p) that is ≥ max(preset, viewport). Ordinary windows on
+   the default report exactly 1920x1080; an unusually large single-column layout bumps
+   to the next common bucket (never the exact pixel size). The viewport is untouched.
+3. **GPU identity split** from the CD-16 `webgl` vector into its own `gpu` vector, so a
+   user can farble WebGL readback while keeping (or dropping) the vendor/renderer clamp,
+   and vice-versa. WebGPU adapter info is clamped under the same `gpu` vector.
+
 ## D-0044 - 2026-07-13 - Product UI is confident and honest: no competitor references, no self-deprecation; bounded limits are internal-only (CD-28)
 
 *Decision.* User-facing surfaces state what CyberDesk does, accurately and
