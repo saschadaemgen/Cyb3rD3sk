@@ -242,7 +242,7 @@ struct Shell {
     disp_left: slots::Rect,
     disp_right: slots::Rect,
     /// The eased width of the flexible LEFT (Spine) zone (D-0022). The right MF
-    /// zone is permanent (constant `mf_zone_width`), so only the left animates.
+    /// zone is permanent (its stepped CD-31 width), so only the left animates.
     disp_left_width: f32,
     /// False until the first frame snaps the animated frame to the target (so the
     /// startup layout does not animate in from zero).
@@ -347,8 +347,8 @@ impl Shell {
         self.order.iter().map(|&id| self.width_units[id]).collect()
     }
 
-    /// The full target frame layout for a given surface size (CD-30: one source
-    /// of truth — includes the wide-terminal MF state, column compression, and
+    /// The full target frame layout for a given surface size (CD-30/CD-31: one
+    /// source of truth — includes the stepped MF width, column compression, and
     /// the red-mode viewport locks).
     fn frame_target(&self, w: u32, h: u32) -> slots::FrameLayout {
         slots::frame_layout(
@@ -357,7 +357,6 @@ impl Shell {
             &self.units_in_order(),
             self.scale,
             &self.theme.slots,
-            browser::mf_wide(),
             &self.red_locks(w, h),
         )
     }
@@ -379,7 +378,17 @@ impl Shell {
         let t = &self.theme.slots;
         let (_, zh) = slots::zone_vertical(h, self.scale, t);
         let g = (t.gutter * self.scale).round();
-        let mf = slots::mf_width_px(self.scale, t, browser::mf_wide());
+        // The MF zone's stepped width follows the NOMINAL layout (CD-31), so
+        // entering Red never resizes the zone; the lock ladder works within
+        // what remains (it may land one standard size below the preset on
+        // displays where the large step eats the difference — still a common
+        // size, still viewport ≤ reported screen).
+        let mf = slots::mf_step_width(
+            w,
+            slots::nominal_group_width(&self.units_in_order(), self.scale, t),
+            self.scale,
+            t,
+        );
         let rail = (t.side_rail_width * self.scale).round();
         let floor = (t.slot_min_width * self.scale).round();
         let base_avail = w as f32 - rail - mf - 2.0 * g - g * (self.order.len() as f32 - 1.0);
@@ -1034,8 +1043,9 @@ impl Shell {
 
     /// Toggle the active slot between 1 and 2 width units (Ctrl+Shift+D). Doubling
     /// adds one unit and is a no-op if it would overflow the width capacity;
-    /// halving always works. Only the toggled slot's view resizes (its page
-    /// reflows to the new width); the others merely recenter (CD-10).
+    /// halving always works. Since CD-31 a nominal-layout change can also step
+    /// the MF zone (and compress neighbors), so EVERY view is re-notified, not
+    /// just the toggled slot.
     fn toggle_active_width(&mut self) {
         let id = self.active_slot;
         // CD-30 Task D: while a window is at Red its size is LOCKED — resizing
@@ -1053,7 +1063,7 @@ impl Shell {
             return; // doubling would overflow — no-op
         }
         self.push_geometry();
-        browser::notify_resized(Role::Slot(id));
+        self.notify_all_resized();
     }
 
     /// The internal view's rectangle (device px) for the current overlay: the
@@ -1594,10 +1604,10 @@ impl Shell {
             }
             let (_, _, iw, ih) = self.internal_rect(w, h);
             browser::set_view_geometry(Role::Internal, iw as u32, ih as u32, self.scale);
-            // MF-zone view (CD-18): its texture is sized to the zone (mf width ×
-            // slot height — 2× wide while the Terminal tab shows, CD-30); only its
+            // MF-zone view (CD-18): its texture is sized to the zone (the CD-31
+            // stepped width × slot height — identical for every tab); only its
             // X animates during reflow (carried by the render NDC rect), so
-            // geometry is set here on resize / relayout, not per frame.
+            // geometry is set here on resize / layout changes, not per frame.
             let mf = self.frame_target(w, h).right;
             browser::set_view_geometry(Role::MfZone, mf.w as u32, mf.h as u32, self.scale);
             // HUD strip (CD-30): the transparent top-right info view.
@@ -2352,16 +2362,6 @@ impl ApplicationHandler for Shell {
             && self.overlay != Overlay::Settings
         {
             self.toggle_settings();
-        }
-
-        // MF-zone wide-terminal relayout (CD-30 Task A): the Terminal tab toggled,
-        // so the MF texture doubles / halves and every column's width target moved
-        // (compression). Re-push view geometry + notify; the animated frame glides
-        // to the new targets on its own.
-        if self.views_started && browser::take_pending_mf_relayout() {
-            self.push_geometry();
-            self.notify_all_resized();
-            self.push_frame(false);
         }
 
         // Per-window closes queued by the ensemble's close icon (CD-18). The

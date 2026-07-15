@@ -207,9 +207,13 @@ pub struct Slots {
     /// when the slots demand the width and it retreats to a rail.
     pub side_zone_width: f32,
     pub side_rail_width: f32,
-    /// The **right** Multifunctional (MF) zone width (D-0022). This zone is
-    /// permanent — it never rails and is present at every resolution.
-    pub mf_zone_width: f32,
+    /// The **right** Multifunctional (MF) zone width steps (D-0022 permanent —
+    /// never rails; CD-31/D-0048 discrete sizing): identical for every tab,
+    /// stable, and reduced only when the window is too small to hold the step
+    /// alongside the nominal columns — large → medium → small, never fluid.
+    pub mf_zone_large: f32,
+    pub mf_zone_medium: f32,
+    pub mf_zone_small: f32,
 }
 
 /// Update awareness (CD-13, D-0023). The `feed_url` is the host's ONE allowlisted

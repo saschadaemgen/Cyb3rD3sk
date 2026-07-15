@@ -303,24 +303,6 @@ pub fn bar_typing() -> bool {
     BAR_TYPING.load(Ordering::Relaxed)
 }
 
-// --- MF-zone wide-terminal state (CD-30 Task A) ------------------------------
-/// True while the MF-zone viewer shows its Terminal tab: the zone renders 2× wide
-/// and the slot columns reflow narrower (`slots::frame_layout`). Reported by the
-/// page over the `mf_tab` IPC; read by the shell's layout every frame.
-static MF_WIDE: AtomicBool = AtomicBool::new(false);
-/// One-shot "the MF width changed" flag: the main thread re-pushes view geometry
-/// (the MF texture doubles / halves) and the frame state when it fires.
-static MF_RELAYOUT: AtomicBool = AtomicBool::new(false);
-
-/// Is the MF zone in its 2×-wide Terminal state?
-pub fn mf_wide() -> bool {
-    MF_WIDE.load(Ordering::Relaxed)
-}
-/// Drain the MF relayout flag (main thread).
-pub fn take_pending_mf_relayout() -> bool {
-    MF_RELAYOUT.swap(false, Ordering::Relaxed)
-}
-
 /// "Open the settings card" requested by a page (CD-30: the HUD Ampel's
 /// "Custom…" points at the per-vector view, which lives in the settings card).
 /// Drained by the main thread, which owns the overlay state.
@@ -2107,18 +2089,11 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
             OPEN_SETTINGS.store(true, Ordering::Relaxed);
             Ok(serde_json::json!({ "ok": true }).to_string())
         }
-        // The MF-zone viewer reports its active tab (CD-30 Task A): while the
-        // Terminal tab is shown the MF zone renders 2× wide and the slot columns
-        // reflow narrower; any other tab returns it to the permanent width. The
-        // main thread drains the relayout flag (view geometry is main-thread work).
-        "mf_tab" => {
-            let tab = v.get("tab").and_then(|t| t.as_str()).unwrap_or("");
-            let wide = tab == "term";
-            if MF_WIDE.swap(wide, Ordering::Relaxed) != wide {
-                MF_RELAYOUT.store(true, Ordering::Relaxed);
-            }
-            Ok(serde_json::json!({ "ok": true }).to_string())
-        }
+        // `mf_tab` (CD-30) was RETIRED in CD-31 (D-0048): the MF zone's width is
+        // a property of the zone, never of the active tab, so the viewer no
+        // longer reports tab switches. Accepted as a harmless no-op so a stale
+        // (cached) page never surfaces an error.
+        "mf_tab" => Ok(serde_json::json!({ "ok": true }).to_string()),
         other => Err((4, format!("unknown cmd: {other}"))),
     }
 }

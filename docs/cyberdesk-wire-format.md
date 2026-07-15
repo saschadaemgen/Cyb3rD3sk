@@ -447,17 +447,14 @@ The MF-zone viewer (`cyberdesk://mfzone/`) uses the same message-router bridge a
 settings/info. Its Tor tab reuses `tor_status`; its Tor + Log tabs stream the log
 ring buffer via one command.
 
-### `mf_tab` (view -> host, CD-30)
+### `mf_tab` (view -> host, CD-30) — RETIRED in CD-31 (D-0048)
 
-- Request: `{"cmd":"mf_tab","tab":"<tor|log|term>"}` — the MF-zone viewer reports
-  its active tab on every switch (and once on load, so a reloaded view re-syncs).
-- Effect: while the tab is `term` (Terminal) the MF zone lays out **2× wide**
-  (`slots::frame_layout` mf_wide) and the slot columns reflow narrower
-  (proportional compression, floored at `slot_min_width` — a column never closes
-  for this transient state); any other tab returns the permanent width. The main
-  thread re-pushes view geometry + frame state when the state changes.
-- Success: `{"ok":true}`. Failure: code 1 (malformed request JSON). An unknown /
-  missing `tab` is treated as "not the terminal" (narrow).
+The MF zone's width is a property of the ZONE, never of the active tab: Tor,
+Log and Terminal all render at the same width, which sizes in DISCRETE steps
+(large/medium/small — `slots::mf_step_width`) and reduces only when the window
+is too small to hold the step alongside the nominal columns. The viewer no
+longer reports tab switches; the host accepts a stale page's `mf_tab` as a
+harmless no-op (`{"ok":true}`) so a cached document never surfaces an error.
 
 ### `get_log_lines` (view -> host)
 

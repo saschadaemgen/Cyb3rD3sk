@@ -127,7 +127,7 @@ pub fn slot_rects_units(width: u32, height: u32, units: &[u32], scale: f32, t: &
 // The slot group does not own the full width: a zone flanks it on each side. The
 // REVISED law (D-0022) makes the frame ASYMMETRIC:
 //   * The RIGHT zone is the **Multifunctional (MF) zone** — PERMANENT. It is
-//     always `mf_zone_width`, at every resolution; it never rails.
+//     always present at its CD-31 step (large/medium/small); it never rails.
 //   * The LEFT zone (future Spine) is the **flexible** one: `side_zone_width`
 //     (Full) when the slots leave room for it alongside the permanent MF zone,
 //     else it retreats to a thin `side_rail_width` (Rail). The CD-11 reflow law
@@ -135,10 +135,11 @@ pub fn slot_rects_units(width: u32, height: u32, units: &[u32], scale: f32, t: &
 // The whole frame — left | gutter | slots | gutter | MF — is centered in the
 // window. Because it is asymmetric, the slot group is NOT window-centered: it
 // sits offset toward the smaller zone (equivalently: the frame block is centered
-// and the group laid inside it). CD-30: the MF zone doubles while the Terminal
-// tab is active, and the columns compress (floored) rather than close when the
-// frame would overflow. One call → all rects, so rendering and input read the
-// same geometry (desync-safe).
+// and the group laid inside it). CD-31 (D-0048): the MF zone's width is a
+// property of the ZONE — identical for all three tabs — and steps DISCRETELY
+// (large/medium/small) as the window shrinks; the columns compress (floored)
+// rather than close only as the safety valve below the small step. One call →
+// all rects, so rendering and input read the same geometry (desync-safe).
 
 /// Whether the flexible (left / Spine) zone is shown at full width or retreated
 /// to a thin rail. The right MF zone is permanent and has no such state.
@@ -150,7 +151,7 @@ pub enum SideState {
 
 /// The full frame geometry for a given window size and slot-unit sequence. The
 /// shell drives the reflow off `left_width` + the rects (the MF/right zone is a
-/// constant `mf_zone_width`); `left_state` is read by the tests and the control
+/// stepped CD-31 width, constant between layout changes); `left_state` is read by the tests and the control
 /// surface (hence the allow).
 #[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)]
@@ -158,12 +159,12 @@ pub struct FrameLayout {
     /// The flexible left (Spine) zone's state.
     pub left_state: SideState,
     /// The flexible left (Spine) zone's width (the animated one). The MF/right
-    /// zone width is the constant `mf_zone_width` (read off `right.w`).
+    /// zone width is the stepped CD-31 width (read off `right.w`).
     pub left_width: f32,
     pub slots: Vec<Rect>,
     /// The left (Spine) zone rect — flexes Full ↔ Rail.
     pub left: Rect,
-    /// The right (MF) zone rect — permanent, always `mf_zone_width` wide.
+    /// The right (MF) zone rect — permanent, at its stepped CD-31 width.
     pub right: Rect,
 }
 
@@ -172,31 +173,68 @@ pub struct FrameLayout {
 /// its permanent width), so the shell caps slots against the maximum the frame
 /// will ever fit. At least 1, capped at the `slot_max` unit ceiling.
 pub fn frame_capacity(width: u32, scale: f32, t: &Slots) -> usize {
+    // The roomiest legal state: left zone at rail, MF zone at its SMALL step
+    // (CD-31 — the zone steps down before columns would have to close).
     let budget = width as f32
-        - (t.mf_zone_width + t.side_rail_width) * scale
+        - (t.mf_zone_small + t.side_rail_width) * scale
         - 2.0 * t.gutter * scale;
     let unit_ceiling = (t.slot_max as usize).clamp(1, MAX_SLOTS) * 2;
     units_fitting(budget, scale, t).clamp(1, unit_ceiling)
 }
 
-/// The MF zone's current width in device px: the permanent `mf_zone_width`,
-/// doubled while the Terminal tab is active (CD-30 Task A — "terminal twice as
-/// wide"). The doubling is a live layout state, not a token, so `frame_capacity`
-/// deliberately keeps using the NARROW width: opening the terminal must never
-/// close a column, it only compresses them (see [`frame_layout`]).
-pub fn mf_width_px(scale: f32, t: &Slots, mf_wide: bool) -> f32 {
-    let w = if mf_wide { t.mf_zone_width * 2.0 } else { t.mf_zone_width };
-    (w * scale).round()
+/// The nominal (uncompressed, unlocked) slot-group width in device px for the
+/// given per-slot `units`: Σ per-column nominal widths + the inter-column
+/// gutters (the CD-10 U-unit invariant). Shared by [`frame_layout`] and the
+/// MF step selection so both always agree on "what the user's layout needs".
+pub fn nominal_group_width(units: &[u32], scale: f32, t: &Slots) -> f32 {
+    let unit = (t.width * scale).round();
+    let g = (t.gutter * scale).round();
+    let n = units.len().max(1) as f32;
+    let slots_w: f32 = if units.is_empty() {
+        unit
+    } else {
+        units
+            .iter()
+            .map(|&u| {
+                let u = u.max(1) as f32;
+                u * unit + (u - 1.0) * g
+            })
+            .sum()
+    };
+    slots_w + g * (n - 1.0)
+}
+
+/// The MF zone's stepped width in device px (CD-31, D-0048). The width is a
+/// property of the ZONE — identical for the Tor / Log / Terminal tabs, never
+/// tab-dependent (the CD-30 terminal-only doubling was the bug) — and sizes in
+/// DISCRETE prefab steps: the largest of large / medium / small that fits the
+/// window alongside the NOMINAL slot group and the left rail (the roomiest
+/// legal left state). Nominal — not compressed, not red-locked — so the step is
+/// stable: it changes only with the window size or the user's column layout,
+/// never with tab switches, content, or a transient lock. Small is the floor
+/// (the zone is permanent, D-0022); below that the columns compress as the
+/// safety valve.
+pub fn mf_step_width(width: u32, nominal_group_w: f32, scale: f32, t: &Slots) -> f32 {
+    let g = (t.gutter * scale).round();
+    let rail = (t.side_rail_width * scale).round();
+    for step in [t.mf_zone_large, t.mf_zone_medium, t.mf_zone_small] {
+        let mf = (step * scale).round();
+        if rail + g + nominal_group_w + g + mf <= width as f32 {
+            return mf;
+        }
+    }
+    (t.mf_zone_small * scale).round()
 }
 
 /// Decide the left-zone state and lay out the whole (asymmetric) frame for
-/// `slot_units`: the LEFT zone is **Full** if the slot group plus the full left
-/// zone, the MF zone (2× wide while the terminal is shown — `mf_wide`), and
-/// their flanking gutters fit the window, else **Rail**. The frame block
-/// (left | gutter | slots | gutter | MF) is centered in the window; when even
-/// the Rail state cannot hold the nominal columns (the wide terminal), the
-/// columns COMPRESS proportionally toward `slot_min_width` instead of closing
-/// (CD-30) — they return to nominal width when the terminal hides.
+/// `slot_units`. The MF zone takes its STEPPED width (CD-31, [`mf_step_width`]
+/// — tab-independent, large/medium/small); the LEFT zone is **Full** if the
+/// slot group plus the full left zone, the MF zone, and their flanking gutters
+/// fit the window, else **Rail**. The frame block (left | gutter | slots |
+/// gutter | MF) is centered in the window; when even the Rail state + the small
+/// MF step cannot hold the nominal columns, the columns COMPRESS proportionally
+/// toward `slot_min_width` instead of closing (CD-30) — the safety valve, not a
+/// sizing mode.
 ///
 /// `locked` (CD-30 Task D, the red "bunker" mode) carries an optional FIXED
 /// `(w, h)` in device px per display position: a locked column keeps exactly
@@ -204,7 +242,9 @@ pub fn mf_width_px(scale: f32, t: &Slots, mf_wide: bool) -> f32 {
 /// in the zone; only the UNLOCKED columns absorb compression. A lock the frame
 /// genuinely cannot hold is clamped to what fits (the caller ladders the
 /// requested size down so this is the last resort, not the norm). Missing
-/// trailing entries mean "not locked".
+/// trailing entries mean "not locked". Locks do NOT move the MF step — the
+/// step follows the nominal layout, so entering/leaving Red never resizes the
+/// zone.
 ///
 /// One call → all rects, so the animated reflow drives the interpolated
 /// `left_width` and both rendering and input read the same per-frame geometry
@@ -215,12 +255,11 @@ pub fn frame_layout(
     slot_units: &[u32],
     scale: f32,
     t: &Slots,
-    mf_wide: bool,
     locked: &[Option<(f32, f32)>],
 ) -> FrameLayout {
     let unit = (t.width * scale).round();
     let g = (t.gutter * scale).round();
-    let mf_width = mf_width_px(scale, t, mf_wide);
+    let mf_width = mf_step_width(width, nominal_group_width(slot_units, scale, t), scale, t);
     let (zy, zh) = zone_vertical(height, scale, t);
     let lock_at = |i: usize| locked.get(i).copied().flatten();
 
@@ -377,7 +416,9 @@ mod tests {
             placeholder_glyph: 0.18,
             side_zone_width: 320.0,
             side_rail_width: 48.0,
-            mf_zone_width: 320.0,
+            mf_zone_large: 640.0,
+            mf_zone_medium: 480.0,
+            mf_zone_small: 320.0,
         }
     }
 
@@ -636,21 +677,23 @@ mod tests {
         let t = slots();
         // One slot: the full left zone + permanent MF doesn't fit at 1920 (Rail),
         // but does at 2560 (Full).
-        assert_eq!(frame_layout(1920, 1440, &units(1), 1.0, &t, false, &[]).left_state, SideState::Rail);
-        assert_eq!(frame_layout(2560, 1440, &units(1), 1.0, &t, false, &[]).left_state, SideState::Full);
+        assert_eq!(frame_layout(1920, 1440, &units(1), 1.0, &t, &[]).left_state, SideState::Rail);
+        assert_eq!(frame_layout(2560, 1440, &units(1), 1.0, &t, &[]).left_state, SideState::Full);
         // On the ultrawide all three slots leave room for the full left zone.
-        assert_eq!(frame_layout(5120, 1440, &units(1), 1.0, &t, false, &[]).left_state, SideState::Full);
-        assert_eq!(frame_layout(5120, 1440, &units(2), 1.0, &t, false, &[]).left_state, SideState::Full);
-        assert_eq!(frame_layout(5120, 1440, &units(3), 1.0, &t, false, &[]).left_state, SideState::Full);
+        assert_eq!(frame_layout(5120, 1440, &units(1), 1.0, &t, &[]).left_state, SideState::Full);
+        assert_eq!(frame_layout(5120, 1440, &units(2), 1.0, &t, &[]).left_state, SideState::Full);
+        assert_eq!(frame_layout(5120, 1440, &units(3), 1.0, &t, &[]).left_state, SideState::Full);
     }
 
     #[test]
     fn mf_zone_is_permanent_at_every_resolution() {
         let t = slots();
-        // The right MF zone is always mf_zone_width, whatever the left zone does.
-        for w in [1920u32, 2560, 3440, 5120] {
-            let f = frame_layout(w, 1440, &units(1), 1.0, &t, false, &[]);
-            assert_eq!(f.right.w, 320.0, "MF permanent at {w}");
+        // The right MF zone is always present (never rails, D-0022) at its
+        // CD-31 step — large wherever it fits alongside a nominal column,
+        // medium at 1920 — whatever the left zone does.
+        for (w, mf) in [(1920u32, 480.0), (2560, 640.0), (3440, 640.0), (5120, 640.0)] {
+            let f = frame_layout(w, 1440, &units(1), 1.0, &t, &[]);
+            assert_eq!(f.right.w, mf, "MF step at {w}");
             assert!(f.right.x + f.right.w <= w as f32, "MF on-screen at {w}");
         }
     }
@@ -660,8 +703,8 @@ mod tests {
         let t = slots();
         // At 3000 a single slot's full left zone fits, but a double's (2 units)
         // does not — so it depends on the unit total, not the column count.
-        assert_eq!(frame_layout(3000, 1440, &units(1), 1.0, &t, false, &[]).left_state, SideState::Full);
-        assert_eq!(frame_layout(3000, 1440, &[2], 1.0, &t, false, &[]).left_state, SideState::Rail);
+        assert_eq!(frame_layout(3000, 1440, &units(1), 1.0, &t, &[]).left_state, SideState::Full);
+        assert_eq!(frame_layout(3000, 1440, &[2], 1.0, &t, &[]).left_state, SideState::Rail);
     }
 
     #[test]
@@ -687,30 +730,34 @@ mod tests {
     #[test]
     fn three_slots_and_both_full_zones_fit_the_ultrawide() {
         let t = slots();
-        let f = frame_layout(5120, 1440, &units(3), 1.0, &t, false, &[]);
+        let f = frame_layout(5120, 1440, &units(3), 1.0, &t, &[]);
         assert_eq!(f.left_state, SideState::Full);
         assert_eq!(f.left.w, 320.0);
-        assert_eq!(f.right.w, 320.0);
+        assert_eq!(f.right.w, 640.0, "the ultrawide holds the LARGE MF step");
         // The whole frame (left | gutter | 3 slots | gutter | MF) is on-screen.
         assert!(f.left.x >= 0.0, "left zone on-screen: x={}", f.left.x);
         assert!(f.right.x + f.right.w <= 5120.0, "MF on-screen");
-        // Prove the token budget the briefing asked for: 320 + 56 + 3712 + 56 +
-        // 320 = 4464 ≤ 5120.
+        // Prove the token budget (CD-31 large step): 320 + 56 + 3712 + 56 +
+        // 640 = 4784 ≤ 5120.
         let group = 3.0 * t.width + 2.0 * t.gutter;
-        assert_eq!(t.side_zone_width + t.gutter + group + t.gutter + t.mf_zone_width, 4464.0);
-        assert!(4464.0 <= 5120.0);
+        assert_eq!(t.side_zone_width + t.gutter + group + t.gutter + t.mf_zone_large, 4784.0);
+        assert!(4784.0 <= 5120.0);
     }
 
     #[test]
     fn floor_law_one_slot_mf_and_left_rail_at_1920() {
         let t = slots();
-        // The minimum working set (D-0022): exactly one slot + the MF zone + the
-        // left rail, all on-screen at 1920 with balanced margins.
+        // The minimum working set (D-0022): exactly one slot + the MF zone (at
+        // its MEDIUM step — 1920 holds 480 but not 640 alongside a nominal
+        // column, CD-31) + the left rail, all on-screen with balanced margins.
         assert_eq!(frame_capacity(1920, 1.0, &t), 1);
-        let f = frame_layout(1920, 1440, &units(1), 1.0, &t, false, &[]);
+        let f = frame_layout(1920, 1440, &units(1), 1.0, &t, &[]);
         assert_eq!(f.left_state, SideState::Rail);
         assert_eq!(f.left.w, 48.0);
-        assert_eq!(f.right.w, 320.0);
+        assert_eq!(f.right.w, 480.0);
+        // The column keeps its NOMINAL width — the zone stepped down instead of
+        // compressing the column (the CD-31 principle).
+        assert_eq!(f.slots[0].w, 1200.0);
         assert!(f.left.x >= 0.0, "left rail on-screen: x={}", f.left.x);
         assert!(f.right.x + f.right.w <= 1920.0, "MF on-screen");
         // The frame block is centered, so the outer margins balance.
@@ -722,7 +769,7 @@ mod tests {
     #[test]
     fn zones_flank_the_group_one_gutter_away_at_the_slot_height() {
         let t = slots();
-        let f = frame_layout(5120, 1440, &units(2), 1.0, &t, false, &[]);
+        let f = frame_layout(5120, 1440, &units(2), 1.0, &t, &[]);
         let group_left = f.slots.first().unwrap().x;
         let group_right = f.slots.last().map(|r| r.x + r.w).unwrap();
         // One gutter between each zone and the slot group.
@@ -738,17 +785,21 @@ mod tests {
     #[test]
     fn asymmetric_frame_shifts_the_group_toward_the_smaller_zone() {
         let t = slots();
-        // With the left at rail (48) and the MF permanent (320), the group shifts
-        // LEFT of window-center by (left_width - mf_width)/2 = -136.
-        let f = frame_layout(1920, 1440, &units(1), 1.0, &t, false, &[]);
+        // With the left at rail (48) and the MF at its medium step (480, CD-31),
+        // the group shifts LEFT of window-center by (left - mf)/2 = -216.
+        let f = frame_layout(1920, 1440, &units(1), 1.0, &t, &[]);
         let centered = slot_rects_units(1920, 1440, &units(1), 1.0, &t);
-        let dx = (f.left_width - f.right.w) * 0.5; // (48 - 320)/2 = -136
-        assert_eq!(dx, -136.0);
+        let dx = (f.left_width - f.right.w) * 0.5; // (48 - 480)/2 = -216
+        assert_eq!(dx, -216.0);
         assert_eq!(f.slots[0].x, centered[0].x + dx);
-        // With both zones full (5120, 3 slots) the difference is zero → centered.
-        let ff = frame_layout(5120, 1440, &units(3), 1.0, &t, false, &[]);
+        // Full left (320) + large MF (640) on the ultrawide → shift -160.
+        let ff = frame_layout(5120, 1440, &units(3), 1.0, &t, &[]);
         let cc = slot_rects_units(5120, 1440, &units(3), 1.0, &t);
-        assert_eq!(ff.slots, cc);
+        let dxx = (ff.left_width - ff.right.w) * 0.5;
+        assert_eq!(dxx, -160.0);
+        for (a, b) in ff.slots.iter().zip(cc.iter()) {
+            assert_eq!(a.x, b.x + dxx);
+        }
     }
 
     #[test]
@@ -757,15 +808,15 @@ mod tests {
         // At 3000 the boundary is reachable within capacity (2 units): a single
         // slot is Full, a two-unit group is Rail.
         assert!(frame_capacity(3000, 1.0, &t) >= 2);
-        assert_eq!(frame_layout(3000, 1440, &units(1), 1.0, &t, false, &[]).left_state, SideState::Full);
-        assert_eq!(frame_layout(3000, 1440, &[2], 1.0, &t, false, &[]).left_state, SideState::Rail);
+        assert_eq!(frame_layout(3000, 1440, &units(1), 1.0, &t, &[]).left_state, SideState::Full);
+        assert_eq!(frame_layout(3000, 1440, &[2], 1.0, &t, &[]).left_state, SideState::Rail);
     }
 
     #[test]
     fn frame_slots_are_the_centered_group_translated_by_the_zone_difference() {
         let t = slots();
         for n in 1..=3 {
-            let f = frame_layout(5120, 1440, &units(n), 1.0, &t, false, &[]);
+            let f = frame_layout(5120, 1440, &units(n), 1.0, &t, &[]);
             let centered = slot_rects_units(5120, 1440, &units(n), 1.0, &t);
             let dx = ((f.left_width - f.right.w) * 0.5).round();
             for (a, b) in f.slots.iter().zip(centered.iter()) {
@@ -777,38 +828,65 @@ mod tests {
         }
     }
 
-    // --- CD-30 Task A: wide terminal + column compression --------------------
+    // --- CD-31: stepped, tab-independent MF width + column compression -------
 
     #[test]
-    fn wide_mf_doubles_the_zone_and_compresses_columns_instead_of_closing() {
+    fn mf_width_steps_discretely_large_medium_small() {
         let t = slots();
-        // At 1920 a single 1200 column + narrow MF fits; the 2×-wide terminal
-        // does not — the column compresses (1920 - 48 rail - 640 MF - 2 gutters
-        // = 1120), it does NOT close, and the whole frame stays on-screen.
-        let f = frame_layout(1920, 1440, &units(1), 1.0, &t, true, &[]);
-        assert_eq!(f.right.w, 640.0, "MF zone is 2x wide while the terminal shows");
-        assert_eq!(f.slots.len(), 1, "no column closes for a transient layout state");
-        assert_eq!(f.slots[0].w, 1120.0);
-        assert!(f.left.x >= 0.0);
-        assert!(f.right.x + f.right.w <= 1920.0, "frame on-screen");
-        // Hiding the terminal returns the column to its nominal width.
-        let back = frame_layout(1920, 1440, &units(1), 1.0, &t, false, &[]);
-        assert_eq!(back.right.w, 320.0);
-        assert_eq!(back.slots[0].w, 1200.0);
+        // The step follows only (window, nominal group): large where it fits,
+        // then medium, then small — never a fluid in-between width. Boundaries
+        // for a single nominal column (rail 48 + 2·56 gutters + 1200 group):
+        // large 640 needs 2000, medium 480 needs 1840, small 320 needs 1680.
+        let g1 = nominal_group_width(&units(1), 1.0, &t);
+        assert_eq!(g1, 1200.0);
+        assert_eq!(mf_step_width(2000, g1, 1.0, &t), 640.0);
+        assert_eq!(mf_step_width(1999, g1, 1.0, &t), 480.0);
+        assert_eq!(mf_step_width(1840, g1, 1.0, &t), 480.0);
+        assert_eq!(mf_step_width(1839, g1, 1.0, &t), 320.0);
+        assert_eq!(mf_step_width(1680, g1, 1.0, &t), 320.0);
+        // Below even the small step's fit the zone stays at small (permanent,
+        // D-0022) and the columns compress as the safety valve.
+        assert_eq!(mf_step_width(1200, g1, 1.0, &t), 320.0);
+        // The step never takes a value between the prefab sizes.
+        for w in (1200..5200).step_by(37) {
+            let mf = mf_step_width(w, g1, 1.0, &t);
+            assert!(mf == 640.0 || mf == 480.0 || mf == 320.0, "non-step width {mf} at {w}");
+        }
     }
 
     #[test]
-    fn wide_mf_leaves_columns_untouched_when_there_is_room() {
+    fn mf_step_reduces_only_when_the_window_shrinks() {
         let t = slots();
-        // The ultrawide holds three 1200 columns + the full left zone + the wide
-        // terminal — nothing compresses.
-        let f = frame_layout(5120, 1440, &units(3), 1.0, &t, true, &[]);
-        assert_eq!(f.left_state, SideState::Full);
-        assert_eq!(f.right.w, 640.0);
-        for s in &f.slots {
+        // Monotonic in the window width for a fixed layout — the zone never
+        // steps for any other reason (tabs and content are not inputs at all).
+        let g = nominal_group_width(&units(1), 1.0, &t);
+        let mut last = 0.0f32;
+        for w in (1200..5200).step_by(10) {
+            let mf = mf_step_width(w, g, 1.0, &t);
+            assert!(mf >= last, "step shrank while the window GREW at {w}");
+            last = mf;
+        }
+    }
+
+    #[test]
+    fn stepping_spares_the_columns_before_compressing_them() {
+        let t = slots();
+        // At 1920 the zone steps down to medium (480) and the single column
+        // keeps its full nominal 1200 — under CD-30's tab-wide 640 it would
+        // have compressed to 1120. Compression is now only the below-small
+        // safety valve.
+        let f = frame_layout(1920, 1440, &units(1), 1.0, &t, &[]);
+        assert_eq!(f.right.w, 480.0);
+        assert_eq!(f.slots[0].w, 1200.0);
+        assert!(f.left.x >= 0.0 && f.right.x + f.right.w <= 1920.0);
+        // The ultrawide holds the large step + three nominal columns.
+        let ff = frame_layout(5120, 1440, &units(3), 1.0, &t, &[]);
+        assert_eq!(ff.left_state, SideState::Full);
+        assert_eq!(ff.right.w, 640.0);
+        for s in &ff.slots {
             assert_eq!(s.w, 1200.0);
         }
-        assert!(f.right.x + f.right.w <= 5120.0);
+        assert!(ff.right.x + ff.right.w <= 5120.0);
     }
 
     #[test]
@@ -816,7 +894,7 @@ mod tests {
         let t = slots();
         // Degenerately narrow: two columns squeeze to the floor, never below,
         // and the frame clamps to the left edge instead of going negative.
-        let f = frame_layout(1400, 900, &units(2), 1.0, &t, false, &[]);
+        let f = frame_layout(1400, 900, &units(2), 1.0, &t, &[]);
         assert_eq!(f.slots.len(), 2);
         for s in &f.slots {
             assert_eq!(s.w, 480.0, "compression floors at slot_min_width");
@@ -829,18 +907,25 @@ mod tests {
     #[test]
     fn red_lock_pins_the_column_to_the_standard_size() {
         let t = slots();
-        // One window at Red on a 2560×1440 display: the viewport locks to
-        // exactly 1920×1080, vertically centered in the zone; the frame stays
-        // on-screen with the left rail + permanent MF around it.
+        // One window at Red on a 3000-wide display: the large MF step (640)
+        // still leaves room, so the viewport locks to exactly 1920×1080,
+        // vertically centered in the zone; the frame stays on-screen.
         let lock = [Some((1920.0, 1080.0))];
-        let f = frame_layout(2560, 1440, &units(1), 1.0, &t, false, &lock);
+        let f = frame_layout(3000, 1440, &units(1), 1.0, &t, &lock);
+        assert_eq!(f.right.w, 640.0, "locks never move the MF step (CD-31)");
         assert_eq!(f.slots[0].w, 1920.0);
         assert_eq!(f.slots[0].h, 1080.0);
         // Vertically centered in the zone (zy 118, zh 1278).
         assert_eq!(f.slots[0].y, 118.0 + ((1278.0 - 1080.0) / 2.0f32).round());
-        assert!(f.left.x >= 0.0 && f.right.x + f.right.w <= 2560.0);
+        assert!(f.left.x >= 0.0 && f.right.x + f.right.w <= 3000.0);
         // The zones keep the full zone height — only the locked column shrinks.
         assert_eq!(f.right.h, 1278.0);
+        // At 2560 the large MF step leaves 2560−48−640−112 = 1760 < 1920 — the
+        // app's ladder picks the next standard size DOWN (1600×900), which the
+        // frame holds exactly (the lock is never fluidly squeezed).
+        let f2 = frame_layout(2560, 1440, &units(1), 1.0, &t, &[Some((1600.0, 900.0))]);
+        assert_eq!(f2.slots[0].w, 1600.0);
+        assert_eq!(f2.slots[0].h, 900.0);
     }
 
     #[test]
@@ -848,14 +933,16 @@ mod tests {
         let t = slots();
         // Two columns at 3440, the first locked to 1920×1080: the locked column
         // keeps its exact size, the unlocked neighbor compresses to what remains
-        // (never the locked one), nothing closes.
+        // (never the locked one), nothing closes. The MF step follows the
+        // NOMINAL layout (2456 group → large 640 fits at 3440).
         let lock = [Some((1920.0, 1080.0)), None];
-        let f = frame_layout(3440, 1440, &units(2), 1.0, &t, false, &lock);
+        let f = frame_layout(3440, 1440, &units(2), 1.0, &t, &lock);
         assert_eq!(f.slots.len(), 2);
+        assert_eq!(f.right.w, 640.0);
         assert_eq!(f.slots[0].w, 1920.0, "locked column never compresses");
         assert_eq!(f.slots[0].h, 1080.0);
-        // avail = 3440 − rail 48 − MF 320 − 2·56 − 56 = 2904; neighbor = 984.
-        assert_eq!(f.slots[1].w, 984.0);
+        // avail = 3440 − rail 48 − MF 640 − 2·56 − 56 = 2584; neighbor = 664.
+        assert_eq!(f.slots[1].w, 664.0);
         assert_eq!(f.slots[1].h, 1278.0, "unlocked column keeps the zone height");
         assert!(f.right.x + f.right.w <= 3440.0);
     }
@@ -866,8 +953,10 @@ mod tests {
         // A lock the display genuinely cannot hold (the caller's ladder normally
         // prevents this) is clamped to what fits instead of overflowing.
         let lock = [Some((1920.0, 1080.0))];
-        let f = frame_layout(1500, 900, &units(1), 1.0, &t, false, &lock);
-        // avail = 1500 − 48 − 320 − 112 = 1020; zone height = 738.
+        let f = frame_layout(1500, 900, &units(1), 1.0, &t, &lock);
+        // MF steps to small (320); avail = 1500 − 48 − 320 − 112 = 1020; zone
+        // height = 738.
+        assert_eq!(f.right.w, 320.0);
         assert_eq!(f.slots[0].w, 1020.0);
         assert_eq!(f.slots[0].h, 738.0);
         assert!(f.left.x >= 0.0 && f.right.x + f.right.w <= 1500.0);
@@ -877,23 +966,29 @@ mod tests {
     fn unlocking_restores_the_nominal_layout_exactly() {
         let t = slots();
         // The lock is layout-only: the same units with no lock reproduce the
-        // pre-Red geometry bit-for-bit (stepping down restores the layout).
-        let before = frame_layout(2560, 1440, &units(1), 1.0, &t, false, &[]);
-        let locked = frame_layout(2560, 1440, &units(1), 1.0, &t, false, &[Some((1920.0, 1080.0))]);
-        let after = frame_layout(2560, 1440, &units(1), 1.0, &t, false, &[]);
+        // pre-Red geometry bit-for-bit (stepping down restores the layout) —
+        // and the MF step is identical locked or not.
+        let before = frame_layout(2560, 1440, &units(1), 1.0, &t, &[]);
+        let locked = frame_layout(2560, 1440, &units(1), 1.0, &t, &[Some((1600.0, 900.0))]);
+        let after = frame_layout(2560, 1440, &units(1), 1.0, &t, &[]);
         assert_ne!(before.slots[0], locked.slots[0]);
+        // The STEP (width) never moves with a lock; the zone's x naturally
+        // follows the group's edge.
+        assert_eq!(before.right.w, locked.right.w, "the lock never moves the MF step");
         assert_eq!(before, after);
     }
 
     #[test]
     fn compression_proportional_between_floor_and_nominal() {
         let t = slots();
-        // Wide terminal at 3000 with a double+single group (3 units): avail =
-        // 3000 - 48 - 640 - 2·56 - 56 = 2144, nominal 2456+1200 = 3656 → both
-        // compress proportionally (f ≈ 0.5865) above the 480 floor.
-        let f = frame_layout(3000, 1440, &[2, 1], 1.0, &t, true, &[]);
+        // A double+single group (3 units, nominal 3712) at 3000: even the small
+        // MF step (320) can't spare the columns, so the safety valve compresses
+        // them proportionally — avail = 3000 - 48 rail - 320 MF - 2·56 - 56 =
+        // 2464 (f ≈ 0.674), both above the 480 floor.
+        let f = frame_layout(3000, 1440, &[2, 1], 1.0, &t, &[]);
+        assert_eq!(f.right.w, 320.0);
         let total: f32 = f.slots.iter().map(|r| r.w).sum();
-        assert!(total <= 2144.0 + 2.0, "group fits the available span");
+        assert!(total <= 2464.0 + 2.0, "group fits the available span");
         assert!(f.slots[0].w > f.slots[1].w, "proportional: the double stays wider");
         for s in &f.slots {
             assert!(s.w >= 480.0);

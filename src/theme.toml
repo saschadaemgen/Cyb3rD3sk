@@ -195,7 +195,14 @@ placeholder_fill = 0.05    # placeholder fill lift above the base color (additiv
 placeholder_glyph = 0.18   # placeholder core-glyph brightness (0..1 of brand)
 side_zone_width  = 320.0   # LEFT (Spine) zone width, Full state (D-0022) — flexes to the rail below
 side_rail_width  = 48.0    # LEFT (Spine) zone width, Rail state — the retreated thin strip
-mf_zone_width    = 320.0   # RIGHT Multifunctional zone width (D-0022) — PERMANENT, never rails
+# RIGHT Multifunctional zone (D-0022: permanent, never rails). CD-31 (D-0048):
+# its width is a property of the ZONE (identical for the Tor / Log / Terminal
+# tabs — never tab-dependent) and sizes in DISCRETE prefab steps, large /
+# medium / small (groß / mittel / klein), stepping down only when the window is
+# too small to hold the step alongside the nominal columns — never fluidly.
+mf_zone_large    = 640.0
+mf_zone_medium   = 480.0
+mf_zone_small    = 320.0
 
 # Update awareness (CD-13, D-0023). `feed_url` is the host's ONE allowlisted
 # outbound endpoint — the pinned CARVILON update manifest (public product config,
