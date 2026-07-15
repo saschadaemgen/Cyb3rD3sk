@@ -378,16 +378,22 @@ impl Shell {
         let t = &self.theme.slots;
         let (_, zh) = slots::zone_vertical(h, self.scale, t);
         let g = (t.gutter * self.scale).round();
-        // The MF zone's stepped width follows the NOMINAL layout (CD-31), so
-        // entering Red never resizes the zone; the lock ladder works within
-        // what remains (it may land one standard size below the preset on
-        // displays where the large step eats the difference — still a common
-        // size, still viewport ≤ reported screen).
+        // CD-32 Task A (D-0049): while ANY window is at Red, protection outranks
+        // the MF zone — it yields to its small step so the ladder below can reach
+        // the largest common resolution the display holds (1920×1080 from ~2400px
+        // wide, where CD-31's nominal step capped the same display at 1600×900).
+        // `frame_layout` re-derives the same yield from the locks this returns, so
+        // the two never disagree; the zone springs back when Red is released.
+        let red_active = self
+            .order
+            .iter()
+            .any(|&id| browser::slot_effective_level(id) == crate::harden::Level::Red);
         let mf = slots::mf_step_width(
             w,
             slots::nominal_group_width(&self.units_in_order(), self.scale, t),
             self.scale,
             t,
+            red_active,
         );
         let rail = (t.side_rail_width * self.scale).round();
         let floor = (t.slot_min_width * self.scale).round();

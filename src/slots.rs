@@ -204,17 +204,28 @@ pub fn nominal_group_width(units: &[u32], scale: f32, t: &Slots) -> f32 {
     slots_w + g * (n - 1.0)
 }
 
-/// The MF zone's stepped width in device px (CD-31, D-0048). The width is a
-/// property of the ZONE — identical for the Tor / Log / Terminal tabs, never
-/// tab-dependent (the CD-30 terminal-only doubling was the bug) — and sizes in
-/// DISCRETE prefab steps: the largest of large / medium / small that fits the
+/// The MF zone's stepped width in device px (CD-31, D-0048; CD-32, D-0049). The
+/// width is a property of the ZONE — identical for the Tor / Log / Terminal tabs,
+/// never tab-dependent (the CD-30 terminal-only doubling was the bug) — and sizes
+/// in DISCRETE prefab steps: the largest of large / medium / small that fits the
 /// window alongside the NOMINAL slot group and the left rail (the roomiest
 /// legal left state). Nominal — not compressed, not red-locked — so the step is
 /// stable: it changes only with the window size or the user's column layout,
 /// never with tab switches, content, or a transient lock. Small is the floor
 /// (the zone is permanent, D-0022); below that the columns compress as the
 /// safety valve.
-pub fn mf_step_width(width: u32, nominal_group_w: f32, scale: f32, t: &Slots) -> f32 {
+///
+/// `red` (CD-32 Task A, D-0049) inverts the priority: while a viewport lock is
+/// live, **protection outranks the zone**. The MF yields straight to its small
+/// step so the lock ladder can reach the largest common resolution the display
+/// holds (1920×1080 from ~2400px wide, rather than the ~2720px the large step
+/// would have demanded — the CD-31 interplay). The zone returns to its normal
+/// step the moment Red is released; the step is never *stuck* small.
+pub fn mf_step_width(width: u32, nominal_group_w: f32, scale: f32, t: &Slots, red: bool) -> f32 {
+    let small = (t.mf_zone_small * scale).round();
+    if red {
+        return small;
+    }
     let g = (t.gutter * scale).round();
     let rail = (t.side_rail_width * scale).round();
     for step in [t.mf_zone_large, t.mf_zone_medium, t.mf_zone_small] {
@@ -223,7 +234,7 @@ pub fn mf_step_width(width: u32, nominal_group_w: f32, scale: f32, t: &Slots) ->
             return mf;
         }
     }
-    (t.mf_zone_small * scale).round()
+    small
 }
 
 /// Decide the left-zone state and lay out the whole (asymmetric) frame for
@@ -242,9 +253,12 @@ pub fn mf_step_width(width: u32, nominal_group_w: f32, scale: f32, t: &Slots) ->
 /// in the zone; only the UNLOCKED columns absorb compression. A lock the frame
 /// genuinely cannot hold is clamped to what fits (the caller ladders the
 /// requested size down so this is the last resort, not the norm). Missing
-/// trailing entries mean "not locked". Locks do NOT move the MF step — the
-/// step follows the nominal layout, so entering/leaving Red never resizes the
-/// zone.
+/// trailing entries mean "not locked". A live lock DOES move the MF step since
+/// CD-32 (D-0049): protection outranks the zone, so the MF yields to its small
+/// step for as long as any column is locked, and springs back to its nominal
+/// step when Red is released. The zone only yields when it BUYS something — if
+/// no lock landed (nothing standard fits this display), `locked` is all-`None`
+/// and the step follows the nominal layout exactly as before.
 ///
 /// One call → all rects, so the animated reflow drives the interpolated
 /// `left_width` and both rendering and input read the same per-frame geometry
@@ -259,9 +273,13 @@ pub fn frame_layout(
 ) -> FrameLayout {
     let unit = (t.width * scale).round();
     let g = (t.gutter * scale).round();
-    let mf_width = mf_step_width(width, nominal_group_width(slot_units, scale, t), scale, t);
-    let (zy, zh) = zone_vertical(height, scale, t);
     let lock_at = |i: usize| locked.get(i).copied().flatten();
+    // CD-32: a live lock makes the zone yield (protection outranks the MF). The
+    // caller sized its ladder against exactly this small step, so reading the
+    // locks back here keeps the two computations in lockstep by construction.
+    let red = locked.iter().any(|l| l.is_some());
+    let mf_width = mf_step_width(width, nominal_group_width(slot_units, scale, t), scale, t, red);
+    let (zy, zh) = zone_vertical(height, scale, t);
 
     // Nominal per-slot widths by the U-unit invariant (CD-10): a u-unit column
     // spans u·unit + (u-1)·gutter, so a U-unit group spans as much as U singles.
@@ -839,17 +857,17 @@ mod tests {
         // large 640 needs 2000, medium 480 needs 1840, small 320 needs 1680.
         let g1 = nominal_group_width(&units(1), 1.0, &t);
         assert_eq!(g1, 1200.0);
-        assert_eq!(mf_step_width(2000, g1, 1.0, &t), 640.0);
-        assert_eq!(mf_step_width(1999, g1, 1.0, &t), 480.0);
-        assert_eq!(mf_step_width(1840, g1, 1.0, &t), 480.0);
-        assert_eq!(mf_step_width(1839, g1, 1.0, &t), 320.0);
-        assert_eq!(mf_step_width(1680, g1, 1.0, &t), 320.0);
+        assert_eq!(mf_step_width(2000, g1, 1.0, &t, false), 640.0);
+        assert_eq!(mf_step_width(1999, g1, 1.0, &t, false), 480.0);
+        assert_eq!(mf_step_width(1840, g1, 1.0, &t, false), 480.0);
+        assert_eq!(mf_step_width(1839, g1, 1.0, &t, false), 320.0);
+        assert_eq!(mf_step_width(1680, g1, 1.0, &t, false), 320.0);
         // Below even the small step's fit the zone stays at small (permanent,
         // D-0022) and the columns compress as the safety valve.
-        assert_eq!(mf_step_width(1200, g1, 1.0, &t), 320.0);
+        assert_eq!(mf_step_width(1200, g1, 1.0, &t, false), 320.0);
         // The step never takes a value between the prefab sizes.
         for w in (1200..5200).step_by(37) {
-            let mf = mf_step_width(w, g1, 1.0, &t);
+            let mf = mf_step_width(w, g1, 1.0, &t, false);
             assert!(mf == 640.0 || mf == 480.0 || mf == 320.0, "non-step width {mf} at {w}");
         }
     }
@@ -862,7 +880,7 @@ mod tests {
         let g = nominal_group_width(&units(1), 1.0, &t);
         let mut last = 0.0f32;
         for w in (1200..5200).step_by(10) {
-            let mf = mf_step_width(w, g, 1.0, &t);
+            let mf = mf_step_width(w, g, 1.0, &t, false);
             assert!(mf >= last, "step shrank while the window GREW at {w}");
             last = mf;
         }
@@ -907,12 +925,12 @@ mod tests {
     #[test]
     fn red_lock_pins_the_column_to_the_standard_size() {
         let t = slots();
-        // One window at Red on a 3000-wide display: the large MF step (640)
-        // still leaves room, so the viewport locks to exactly 1920×1080,
-        // vertically centered in the zone; the frame stays on-screen.
+        // One window at Red on a 3000-wide display: the viewport locks to exactly
+        // 1920×1080, vertically centered in the zone; the frame stays on-screen.
+        // CD-32: the zone YIELDS to its small step while the lock is live.
         let lock = [Some((1920.0, 1080.0))];
         let f = frame_layout(3000, 1440, &units(1), 1.0, &t, &lock);
-        assert_eq!(f.right.w, 640.0, "locks never move the MF step (CD-31)");
+        assert_eq!(f.right.w, 320.0, "protection outranks the MF zone (CD-32)");
         assert_eq!(f.slots[0].w, 1920.0);
         assert_eq!(f.slots[0].h, 1080.0);
         // Vertically centered in the zone (zy 118, zh 1278).
@@ -920,12 +938,49 @@ mod tests {
         assert!(f.left.x >= 0.0 && f.right.x + f.right.w <= 3000.0);
         // The zones keep the full zone height — only the locked column shrinks.
         assert_eq!(f.right.h, 1278.0);
-        // At 2560 the large MF step leaves 2560−48−640−112 = 1760 < 1920 — the
-        // app's ladder picks the next standard size DOWN (1600×900), which the
-        // frame holds exactly (the lock is never fluidly squeezed).
-        let f2 = frame_layout(2560, 1440, &units(1), 1.0, &t, &[Some((1600.0, 900.0))]);
-        assert_eq!(f2.slots[0].w, 1600.0);
-        assert_eq!(f2.slots[0].h, 900.0);
+    }
+
+    #[test]
+    fn red_reaches_full_1080p_wherever_1920_plus_the_small_zone_fits() {
+        let t = slots();
+        // CD-32 Task A (D-0049) — the headline. Protection outranks the zone, so
+        // the bunker reaches the FULL 1920×1080 lock from 2400px on (rail 48 +
+        // 2·56 gutters + 1920 + the small zone 320), not from the ~2720 the large
+        // step used to demand.
+        let lock = [Some((1920.0, 1080.0))];
+        for w in [2400u32, 2560, 3000, 3440] {
+            let f = frame_layout(w, 1440, &units(1), 1.0, &t, &lock);
+            assert_eq!(f.right.w, 320.0, "the zone must yield at {w}");
+            assert_eq!(f.slots[0].w, 1920.0, "the lock must land uncompressed at {w}");
+            assert_eq!(f.slots[0].h, 1080.0);
+            assert!(f.left.x >= 0.0 && f.right.x + f.right.w <= w as f32, "off-screen at {w}");
+        }
+        // The 2560 case CD-31 flagged: the large step (640) left 1760 < 1920 and
+        // forced the ladder down to 1600×900; the yielded step leaves 2080.
+        assert_eq!(mf_step_width(2560, 1200.0, 1.0, &t, false), 640.0);
+        assert_eq!(mf_step_width(2560, 1200.0, 1.0, &t, true), 320.0);
+    }
+
+    #[test]
+    fn a_live_lock_pins_the_zone_to_small_at_every_width() {
+        let t = slots();
+        // The yield is unconditional while Red is live — never a fluid width, and
+        // never a step the window size can talk back up.
+        let g1 = nominal_group_width(&units(1), 1.0, &t);
+        for w in (1200..5200).step_by(37) {
+            assert_eq!(mf_step_width(w, g1, 1.0, &t, true), 320.0, "zone must yield at {w}");
+        }
+    }
+
+    #[test]
+    fn a_lock_that_never_landed_leaves_the_zone_alone() {
+        let t = slots();
+        // The yield is derived from the LOCKS, not from the level: where no
+        // standard size fits at all the app records no lock, and the zone keeps
+        // its nominal step — it yields only when that buys the lock something.
+        let f = frame_layout(2560, 1440, &units(1), 1.0, &t, &[None]);
+        assert_eq!(f.right.w, 640.0);
+        assert_eq!(f, frame_layout(2560, 1440, &units(1), 1.0, &t, &[]));
     }
 
     #[test]
@@ -933,16 +988,16 @@ mod tests {
         let t = slots();
         // Two columns at 3440, the first locked to 1920×1080: the locked column
         // keeps its exact size, the unlocked neighbor compresses to what remains
-        // (never the locked one), nothing closes. The MF step follows the
-        // NOMINAL layout (2456 group → large 640 fits at 3440).
+        // (never the locked one), nothing closes. CD-32: the MF has yielded to
+        // small (320), so the squeeze the neighbor absorbs is the gentler one.
         let lock = [Some((1920.0, 1080.0)), None];
         let f = frame_layout(3440, 1440, &units(2), 1.0, &t, &lock);
         assert_eq!(f.slots.len(), 2);
-        assert_eq!(f.right.w, 640.0);
+        assert_eq!(f.right.w, 320.0);
         assert_eq!(f.slots[0].w, 1920.0, "locked column never compresses");
         assert_eq!(f.slots[0].h, 1080.0);
-        // avail = 3440 − rail 48 − MF 640 − 2·56 − 56 = 2584; neighbor = 664.
-        assert_eq!(f.slots[1].w, 664.0);
+        // avail = 3440 − rail 48 − MF 320 − 2·56 − 56 = 2904; neighbor = 984.
+        assert_eq!(f.slots[1].w, 984.0);
         assert_eq!(f.slots[1].h, 1278.0, "unlocked column keeps the zone height");
         assert!(f.right.x + f.right.w <= 3440.0);
     }
@@ -967,14 +1022,16 @@ mod tests {
         let t = slots();
         // The lock is layout-only: the same units with no lock reproduce the
         // pre-Red geometry bit-for-bit (stepping down restores the layout) —
-        // and the MF step is identical locked or not.
+        // the yielded MF zone included.
         let before = frame_layout(2560, 1440, &units(1), 1.0, &t, &[]);
-        let locked = frame_layout(2560, 1440, &units(1), 1.0, &t, &[Some((1600.0, 900.0))]);
+        let locked = frame_layout(2560, 1440, &units(1), 1.0, &t, &[Some((1920.0, 1080.0))]);
         let after = frame_layout(2560, 1440, &units(1), 1.0, &t, &[]);
         assert_ne!(before.slots[0], locked.slots[0]);
-        // The STEP (width) never moves with a lock; the zone's x naturally
-        // follows the group's edge.
-        assert_eq!(before.right.w, locked.right.w, "the lock never moves the MF step");
+        // CD-32 (D-0049) REVERSES the CD-31 rule: the lock DOES move the step —
+        // the zone yields to small while Red is live…
+        assert_eq!(before.right.w, 640.0);
+        assert_eq!(locked.right.w, 320.0, "the zone yields to the lock (CD-32)");
+        // …and springs back the moment it is released. The step is never stuck.
         assert_eq!(before, after);
     }
 
