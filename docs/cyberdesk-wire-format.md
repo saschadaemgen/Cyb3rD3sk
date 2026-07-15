@@ -464,6 +464,43 @@ ring buffer via one command.
   separate). The ring copies only the message field — never other structured fields,
   so no secrets leak into the viewer. Failure: code 1 (malformed request JSON).
 
+## HUD strip IPC (CD-30, live)
+
+The floating HUD view (`cyberdesk://hud/`, the permanent transparent top-right
+strip: digital clock + live info fields) uses the same message-router bridge.
+Push-driven like the command band: the host calls `window.cdHud(<json>)` on
+change (never per frame); the page pulls once on load and ticks only the clock
+and the countdown locally, off absolute anchors.
+
+### `cdHud(json)` (host -> view, push)
+
+- Payload:
+  `{"sent_ms":<unix ms>,"tz_offset_min":<int>,"level":<str>,"vectors_on":<int>,"vectors_total":<int>,"reduced":<bool>,"route":{"window":<1-based pos>,"slot":<id>,"tor":<bool>},"rotate":{"auto":<bool>,"interval_min":<int>,"elapsed_ms":<int>},"identity_age_ms":<int>}`
+  - `sent_ms` — the host's send time; the page converts the elapsed-based fields
+    into ABSOLUTE anchors at receive time (`deadline = sent_ms + interval −
+    elapsed`, `born = sent_ms − identity_age_ms`), so a re-pulled cache can never
+    show a drifted countdown.
+  - `tz_offset_min` — the OS timezone's UTC offset. The process runs under
+    `TZ=UTC` (CD-16), so the clock derives local time from this, never from the
+    clamped C-runtime timezone.
+  - `level` / `vectors_on` / `vectors_total` / `reduced` — the GLOBAL effective
+    hardening preset, its honest live vector count (`N/10`), and whether it sits
+    below the safe floor (drives the warn tint). Truthful by construction: read
+    from the same resolved config the render processes receive.
+  - `route` — the ACTIVE window's route (`tor` bool; window is its 1-based
+    display position). Real CD-15 state; there is no other route kind.
+  - `rotate` — the CD-29 auto-rotation state driving the countdown field; when
+    `auto` is false the page shows the identity age instead.
+- Push signature: level, vector count, reduced, active window/route, rotate
+  settings, the global rotation EPOCH (bumped per re-roll, so a re-roll
+  re-anchors the page exactly when it lands), and the tz offset. The moving
+  milliseconds are excluded (page-local ticking).
+
+### `get_hud_state` (view -> host)
+
+- Request: `{"cmd":"get_hud_state"}` — pull-on-load; returns the cached `cdHud`
+  payload (`{}` before the first push). Failure: code 1 (malformed request).
+
 ## Update-awareness IPC (CD-13 → CD-22, live)
 
 The info panel (`cyberdesk://info/`) uses the same message-router bridge

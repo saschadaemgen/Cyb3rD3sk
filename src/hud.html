@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CyberDesk HUD</title>
+<link rel="icon" href="data:,">
+<style>
+/*__TOKENS__*/
+/*__CSS__*/
+</style>
+</head>
+<body>
+  <!-- Floating info strip (CD-30 Task B): a TRANSPARENT top-right cluster in the
+       CD-12 floating idiom — no bars, only these elements paint. Every field is
+       a live host-pushed value (window.cdHud); the page only ticks the clock and
+       the countdown locally between pushes (rule 0.1: status is truthful). -->
+  <main class="hud">
+    <div class="clock" id="clock" aria-label="Clock">--:--:--</div>
+    <div class="fields">
+      <span class="field" id="f-level">
+        <span class="k">Protection</span><span class="v" id="level-v">—</span>
+      </span>
+      <span class="field">
+        <span class="k">Vectors</span><span class="v" id="vectors-v">—</span>
+      </span>
+      <span class="field">
+        <span class="k" id="route-k">Route</span><span class="v" id="route-v">—</span>
+      </span>
+      <span class="field">
+        <span class="k" id="identity-k">Identity</span><span class="v" id="identity-v">—</span>
+      </span>
+    </div>
+  </main>
+<script>
+/*__JS__*/
+</script>
+</body>
+</html>

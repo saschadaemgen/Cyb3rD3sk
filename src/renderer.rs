@@ -1630,6 +1630,10 @@ pub struct SurfaceRenderer {
     /// The permanent MF-zone content view (CD-18): an opaque page composited into
     /// the right zone rect, replacing the placeholder glyph once it has a texture.
     mfzone: PageTarget,
+    /// The permanent floating HUD view (CD-30 Task B): a TRANSPARENT strip in the
+    /// top-right (clock + live info fields), composited over the Pulse Grid like
+    /// the command band — only its floating elements paint, no zone shadow.
+    hud: PageTarget,
     placeholder: SlotPlaceholder,
     slotlines: SlotLines,
     drag: DragOverlay,
@@ -1683,6 +1687,7 @@ impl SurfaceRenderer {
             .collect();
         let panel = PageTarget::new(&device, &page_pipeline);
         let mfzone = PageTarget::new(&device, &page_pipeline);
+        let hud = PageTarget::new(&device, &page_pipeline);
         // Placeholder instances: up to MAX_SLOTS empty slots + 2 side zones.
         let placeholder = SlotPlaceholder::new(&device, SURFACE_FORMAT, MAX_SLOTS as u32 + 2);
         let slotlines = SlotLines::new(&device, SURFACE_FORMAT, MAX_SLOTS as u32);
@@ -1704,6 +1709,7 @@ impl SurfaceRenderer {
             slots,
             panel,
             mfzone,
+            hud,
             placeholder,
             slotlines,
             drag,
@@ -1746,6 +1752,12 @@ impl SurfaceRenderer {
             .upload(&self.device, &self.queue, &self.page_pipeline, data, w, h);
     }
 
+    /// Upload a freshly painted HUD frame (BGRA) into the HUD texture (CD-30).
+    pub fn upload_hud(&mut self, data: &[u8], w: u32, h: u32) {
+        self.hud
+            .upload(&self.device, &self.queue, &self.page_pipeline, data, w, h);
+    }
+
     /// Drop slot `i`'s page texture so a closed/re-lazy slot shows the placeholder
     /// again instead of a stale page (CD-09 Ctrl+W / resize shrink).
     pub fn clear_slot(&mut self, i: usize) {
@@ -1772,6 +1784,7 @@ impl SurfaceRenderer {
         sides: &[(f32, f32, f32, f32)],
         drag: &[DragQuad],
         panel: (f32, f32, f32, f32),
+        hud: (f32, f32, f32, f32),
         gear: (f32, f32, f32),
         feather: bool,
         background_on: bool,
@@ -2003,6 +2016,28 @@ impl SurfaceRenderer {
                 .write_buffer(&self.panel.uniform_buf, 0, bytemuck::bytes_of(&panel_u));
         }
 
+        // HUD uniforms (CD-30): the permanent transparent info strip, top-right.
+        // Like the command band it paints only its floating elements (no zone
+        // shadow, no rounded clip — corner_radius 0, never feathered).
+        if self.hud.has_texture() {
+            let (hx, hy, hw, hh) = hud;
+            let hud_u = PageUniforms {
+                rect_ndc: [
+                    to_ndc_x(hx),
+                    to_ndc_y(hy),
+                    to_ndc_x(hx + hw),
+                    to_ndc_y(hy + hh),
+                ],
+                px_size: [self.hud.width.max(1) as f32, self.hud.height.max(1) as f32],
+                corner_radius: 0.0,
+                feather: 0.0,
+                feather_exp,
+                _pad: [0.0; 3],
+            };
+            self.queue
+                .write_buffer(&self.hud.uniform_buf, 0, bytemuck::bytes_of(&hud_u));
+        }
+
         // Gear button uniforms (always drawn, brand-colored, hover-lit).
         let (gcx, gcy, gr) = gear;
         let gear_u = GearUniforms {
@@ -2189,6 +2224,15 @@ impl SurfaceRenderer {
             {
                 pass.set_pipeline(&self.page_pipeline.pipeline);
                 pass.set_bind_group(0, &self.panel.uniform_bind_group, &[]);
+                pass.set_bind_group(1, tex_bind_group, &[]);
+                pass.draw(0..6, 0..1);
+            }
+
+            // Floating HUD strip (CD-30): clock + live info fields, transparent,
+            // over the pages but under the gear/info glyphs.
+            if let Some(tex_bind_group) = self.hud.tex_bind_group.as_ref() {
+                pass.set_pipeline(&self.page_pipeline.pipeline);
+                pass.set_bind_group(0, &self.hud.uniform_bind_group, &[]);
                 pass.set_bind_group(1, tex_bind_group, &[]);
                 pass.draw(0..6, 0..1);
             }

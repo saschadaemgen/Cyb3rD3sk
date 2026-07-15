@@ -28,7 +28,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::os::raw::c_int;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use cef::wrapper::message_router::{
@@ -50,6 +50,7 @@ const COMMAND_URL: &str = "cyberdesk://command/";
 const INFO_URL: &str = "cyberdesk://info/";
 const START_URL: &str = "cyberdesk://start/";
 const MFZONE_URL: &str = "cyberdesk://mfzone/";
+const HUD_URL: &str = "cyberdesk://hud/";
 
 // cef_event_flags_t bits (modifiers for mouse/key events).
 const EVENTFLAG_SHIFT_DOWN: u32 = 1 << 1;
@@ -62,14 +63,16 @@ pub const EVENTFLAG_RIGHT_MOUSE_BUTTON: u32 = 1 << 6;
 /// Which OSR view a call targets. `Slot(i)` is one of the up-to-[`MAX_SLOTS`]
 /// surf columns (CD-09); `Internal` is the single shared overlay view (settings
 /// card / command bar / info / start); `MfZone` is the permanent right
-/// Multifunctional-zone content view (CD-18, `cyberdesk://mfzone/`). `i` is always
-/// `< MAX_SLOTS` (the shell clamps the live slot count), so the indices never
-/// collide.
+/// Multifunctional-zone content view (CD-18, `cyberdesk://mfzone/`); `Hud` is the
+/// permanent transparent top-right info strip (CD-30, `cyberdesk://hud/` — clock
+/// + live protection fields). `i` is always `< MAX_SLOTS` (the shell clamps the
+/// live slot count), so the indices never collide.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Slot(usize),
     Internal,
     MfZone,
+    Hud,
 }
 
 impl Role {
@@ -78,6 +81,7 @@ impl Role {
             Role::Slot(i) => i,
             Role::Internal => MAX_SLOTS,
             Role::MfZone => MAX_SLOTS + 1,
+            Role::Hud => MAX_SLOTS + 2,
         }
     }
 }
@@ -137,10 +141,10 @@ impl ViewState {
 }
 
 /// The per-view state array: `MAX_SLOTS` surf slots at indices `0..MAX_SLOTS`,
-/// then the internal overlay view at `MAX_SLOTS`, then the permanent MF-zone view
-/// at `MAX_SLOTS + 1` (CD-18).
-fn views() -> &'static [ViewState; MAX_SLOTS + 2] {
-    static V: OnceLock<[ViewState; MAX_SLOTS + 2]> = OnceLock::new();
+/// then the internal overlay view at `MAX_SLOTS`, the permanent MF-zone view at
+/// `MAX_SLOTS + 1` (CD-18), and the permanent HUD strip at `MAX_SLOTS + 2` (CD-30).
+fn views() -> &'static [ViewState; MAX_SLOTS + 3] {
+    static V: OnceLock<[ViewState; MAX_SLOTS + 3]> = OnceLock::new();
     V.get_or_init(|| std::array::from_fn(|_| ViewState::new()))
 }
 fn view(role: Role) -> &'static ViewState {
@@ -384,6 +388,7 @@ pub fn create_browser(role: Role, parent_hwnd: isize) {
         Role::Slot(_) => START_URL,
         Role::Internal => SETTINGS_URL,
         Role::MfZone => MFZONE_URL,
+        Role::Hud => HUD_URL,
     };
     create_browser_url(role, parent_hwnd, url);
 }
@@ -402,7 +407,7 @@ pub fn create_browser_url(role: Role, parent_hwnd: isize, url: &str) {
     // generation and a later close/respawn will supersede it.
     let generation = match role {
         Role::Slot(i) => slot_gen(i),
-        Role::Internal | Role::MfZone => 0,
+        Role::Internal | Role::MfZone | Role::Hud => 0,
     };
     if let Role::Slot(i) = role
         && slot_is_tor(i)
@@ -426,8 +431,9 @@ pub fn create_browser_url(role: Role, parent_hwnd: isize, url: &str) {
         // Internal: TRANSPARENT backing (CD-12, D-0021) — the command band paints
         // only its floating elements over the Pulse Grid; the settings page draws
         // its own opaque panel background in CSS. OSR delivers premultiplied BGRA
-        // with alpha, which the compositor blends OVER.
-        Role::Internal => 0x0000_0000u32,
+        // with alpha, which the compositor blends OVER. The HUD strip (CD-30) is
+        // the same floating idiom: transparent, only its capsules paint.
+        Role::Internal | Role::Hud => 0x0000_0000u32,
         // MF zone: OPAQUE — it is permanent content filling its rect (CD-18), not a
         // floating overlay; an opaque backing keeps the Pulse Grid from bleeding.
         Role::MfZone => 0xFFFF_FFFFu32,
@@ -439,11 +445,11 @@ pub fn create_browser_url(role: Role, parent_hwnd: isize, url: &str) {
     };
 
     // CD-25: carry this slot's effective hardening config to its render process via
-    // extra_info. Internal / MF-zone views load cyberdesk:// (never hardened), so
-    // only slots get a config dict.
+    // extra_info. Internal / MF-zone / HUD views load cyberdesk:// (never hardened),
+    // so only slots get a config dict.
     let mut extra = match role {
         Role::Slot(i) => harden_extra_info(i),
-        Role::Internal | Role::MfZone => None,
+        Role::Internal | Role::MfZone | Role::Hud => None,
     };
     let created = browser_host_create_browser(
         Some(&window_info),
@@ -882,6 +888,29 @@ pub fn set_frame_state(json: &str) {
     }
 }
 
+/// The current HUD state JSON (CD-30 Task B), so the HUD page can pull it on load
+/// (`get_hud_state`) in addition to the host's on-change push.
+fn hud_state() -> &'static Mutex<String> {
+    static F: OnceLock<Mutex<String>> = OnceLock::new();
+    F.get_or_init(|| Mutex::new("{}".to_string()))
+}
+
+/// Store the HUD state and push it to the HUD page (`window.cdHud(json)`), the
+/// same on-change cadence as [`set_frame_state`]. Every field is a REAL live
+/// value (rule 0.1 of CD-30: the display never claims a state that isn't active);
+/// the page only ticks the clock and the countdown locally between pushes.
+pub fn set_hud_state(json: &str) {
+    *hud_state().lock().unwrap() = json.to_string();
+    let browser = view(Role::Hud).browser.lock().unwrap().clone();
+    if let Some(browser) = browser
+        && let Some(frame) = browser.main_frame()
+    {
+        let escaped = json.replace('\\', "\\\\").replace('\'', "\\'");
+        let code = format!("window.cdHud&&window.cdHud('{escaped}')");
+        frame.execute_java_script(Some(&CefString::from(code.as_str())), None, 0);
+    }
+}
+
 /// Navigate a view (used by the isolation self-test). The internal view's
 /// RequestHandler will refuse anything that is not `cyberdesk://`.
 pub fn load_url(role: Role, url: &str) {
@@ -962,24 +991,64 @@ fn identity_seed() -> &'static Mutex<String> {
 /// per-window rotation; cleared by a global rotation and on slot reuse.
 static SLOT_SEED: [Mutex<Option<String>>; MAX_SLOTS] = [const { Mutex::new(None) }; MAX_SLOTS];
 
+/// When the GLOBAL identity was minted, as unix epoch ms (CD-30 Task B: the honest
+/// "identity age" field). Set at startup and on every global rotation; persisted
+/// alongside the seed so a stable cross-launch identity reports its REAL age, not
+/// the process uptime.
+static IDENTITY_BORN_MS: AtomicU64 = AtomicU64::new(0);
+/// Bumped on every GLOBAL identity rotation (CD-30): part of the HUD push
+/// signature, so the countdown/age display re-syncs exactly when a re-roll lands.
+static ROTATION_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Milliseconds since the unix epoch (never panics; clamps to 0 pre-epoch).
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// How long the current GLOBAL identity has existed, in ms.
+pub fn identity_age_ms() -> u64 {
+    now_unix_ms().saturating_sub(IDENTITY_BORN_MS.load(Ordering::Relaxed))
+}
+/// The global-rotation epoch counter (see [`ROTATION_EPOCH`]).
+pub fn rotation_epoch() -> u64 {
+    ROTATION_EPOCH.load(Ordering::Relaxed)
+}
+
 /// Initialize the global identity seed at startup (browser process, after settings
 /// load). Fresh each launch when "new identity on restart" is on (the default), else
 /// the persisted seed (a stable cross-launch identity) — minting + storing one the
-/// first time.
+/// first time. The seed's mint time is tracked (and persisted with a persisted
+/// seed), so the HUD's "identity age" is real in both modes.
 pub fn init_identity_seed() {
-    let seed = if crate::settings::rotate_on_restart() {
-        fresh_seed_hex()
+    let (seed, born) = if crate::settings::rotate_on_restart() {
+        (fresh_seed_hex(), now_unix_ms())
     } else {
         match crate::settings::persisted_identity_seed() {
-            Some(s) if !s.is_empty() => s,
+            Some(s) if !s.is_empty() => {
+                // A persisted seed's age spans launches: prefer its stored mint
+                // time; a pre-CD-30 store has none, so stamp (and persist) now —
+                // an age UNDER-statement once, never an overstatement.
+                let born = crate::settings::persisted_identity_born().unwrap_or_else(|| {
+                    let b = now_unix_ms();
+                    crate::settings::store_identity_born(b);
+                    b
+                });
+                (s, born)
+            }
             _ => {
                 let s = fresh_seed_hex();
+                let b = now_unix_ms();
                 crate::settings::store_identity_seed(&s);
-                s
+                crate::settings::store_identity_born(b);
+                (s, b)
             }
         }
     };
     *identity_seed().lock().unwrap() = seed;
+    IDENTITY_BORN_MS.store(born, Ordering::Relaxed);
 }
 
 /// A snapshot of the current global identity seed (for the argv fallback switch).
@@ -1021,6 +1090,15 @@ pub fn rotate_global_identity() {
     for s in SLOT_SEED.iter() {
         *s.lock().unwrap() = None;
     }
+    let born = now_unix_ms();
+    IDENTITY_BORN_MS.store(born, Ordering::Relaxed);
+    ROTATION_EPOCH.fetch_add(1, Ordering::Relaxed);
+    // A stable cross-launch identity that gets rotated is a NEW identity — keep
+    // the persisted seed + mint time in step so the next launch restores it.
+    if !crate::settings::rotate_on_restart() {
+        crate::settings::store_identity_seed(&identity_seed_snapshot());
+        crate::settings::store_identity_born(born);
+    }
     if crate::settings::rotate_new_circuit() {
         crate::tor::new_identity();
     }
@@ -1037,9 +1115,11 @@ pub fn clear_slot_identity(i: usize) {
 
 /// Persist the CURRENT global identity seed (called when the user turns OFF "new
 /// identity on restart", so the very identity they are using now is the one restored
-/// next launch — not a fresh one).
+/// next launch — not a fresh one). Its mint time rides along so the restored
+/// identity reports its real age (CD-30).
 pub fn persist_current_identity() {
     crate::settings::store_identity_seed(&identity_seed_snapshot());
+    crate::settings::store_identity_born(IDENTITY_BORN_MS.load(Ordering::Relaxed));
 }
 
 /// The hardening seed as seen by a RENDER process: read from the command-line switch
@@ -1573,6 +1653,21 @@ fn mfzone_document() -> String {
     .clone()
 }
 
+/// The floating HUD strip page (CD-30 Task B): digital clock + live info fields
+/// (protection level, vectors active, active-window route, identity rotation).
+/// Served into the permanent transparent top-right view.
+fn hud_document() -> String {
+    static DOC: OnceLock<String> = OnceLock::new();
+    DOC.get_or_init(|| {
+        let theme = crate::theme::Theme::load();
+        include_str!("hud.html")
+            .replace("/*__TOKENS__*/", &theme.to_css_vars())
+            .replace("/*__CSS__*/", include_str!("hud.css"))
+            .replace("/*__JS__*/", include_str!("hud.js"))
+    })
+    .clone()
+}
+
 /// Scheme of a URL, for the command bar's lock/warn hint.
 fn scheme_of(url: &str) -> &'static str {
     if url.starts_with("https://") {
@@ -1979,6 +2074,10 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
         // an optional {filter:{target_prefix,level_min}, since_seq}. Pull-based +
         // incremental — the page sends back the highest seq it has seen.
         "get_log_lines" => Ok(crate::logging::log_snapshot_json(&v)),
+        // The HUD strip pulls its state once on load (CD-30 Task B) — the same
+        // pull-then-push pattern as `get_frame`. The cached payload's countdown
+        // fields are elapsed-based, so the page re-anchors them at receive time.
+        "get_hud_state" => Ok(hud_state().lock().unwrap().clone()),
         // The MF-zone viewer reports its active tab (CD-30 Task A): while the
         // Terminal tab is shown the MF zone renders 2× wide and the slot columns
         // reflow narrower; any other tab returns it to the permanent width. The
@@ -2203,7 +2302,7 @@ wrap_client! {
             // Only surf slots drive their loading line / nav state.
             match self.role {
                 Role::Slot(_) => Some(CyberLoadHandler::new(self.role)),
-                Role::Internal | Role::MfZone => None,
+                Role::Internal | Role::MfZone | Role::Hud => None,
             }
         }
         fn life_span_handler(&self) -> Option<LifeSpanHandler> {
@@ -2213,7 +2312,7 @@ wrap_client! {
             // Web isolation (cyberdesk:// only) on the internal views — the shared
             // overlay AND the MF-zone content view (CD-18).
             match self.role {
-                Role::Internal | Role::MfZone => Some(InternalRequestHandler::new()),
+                Role::Internal | Role::MfZone | Role::Hud => Some(InternalRequestHandler::new()),
                 Role::Slot(_) => None,
             }
         }
@@ -2281,7 +2380,7 @@ wrap_render_handler! {
                 // keeps its real geometry.
                 let (sw, sh) = match self.role {
                     Role::Slot(i) => slot_screen_dims(i, (dip_w, dip_h)),
-                    Role::Internal | Role::MfZone => (dip_w, dip_h),
+                    Role::Internal | Role::MfZone | Role::Hud => (dip_w, dip_h),
                 };
                 info.rect = Rect { x: 0, y: 0, width: sw as i32, height: sh as i32 };
                 info.available_rect = info.rect.clone();
@@ -2478,7 +2577,9 @@ wrap_life_span_handler! {
                 let want_focus = match self.role {
                     Role::Slot(i) => i == active_slot(),
                     Role::Internal => true,
-                    Role::MfZone => false,
+                    // The MF-zone and HUD views are mouse-driven / display-only
+                    // and never want the keyboard.
+                    Role::MfZone | Role::Hud => false,
                 };
                 if want_focus && let Some(host) = browser.host() {
                     host.set_focus(1);
@@ -2564,6 +2665,8 @@ wrap_scheme_handler_factory! {
                 start_document()
             } else if url.contains("//mfzone") {
                 mfzone_document()
+            } else if url.contains("//hud") {
+                hud_document()
             } else {
                 settings_document()
             };

@@ -1,0 +1,80 @@
+/* Floating HUD strip (CD-30 Task B). Like the command band the page is fully
+   TRANSPARENT — only the clock digits and the info capsules paint, floating
+   over the Pulse Grid in the top-right (no bars, CD-12). Colors/sizes come from
+   the injected token custom properties (theme.toml / Theme::to_css_vars). */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: transparent;              /* only the elements paint; no strip */
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  cursor: default;
+}
+
+/* Right-aligned column. The right padding keeps the shell-drawn gear + info
+   glyphs (the top-right corner) clear of the HTML content. */
+.hud {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 9px;
+  padding: 16px 132px 0 12px;
+}
+
+/* --- Sascha's digital clock ------------------------------------------------ */
+.clock {
+  font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  line-height: 1;
+  color: var(--text);
+  text-shadow: 0 0 14px color-mix(in srgb, var(--brand) 55%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Live info fields ------------------------------------------------------ */
+.fields {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.field {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  white-space: nowrap;
+}
+.field .k {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.field .v {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/* Status tints — a status display first (CD-30 rule 0.1): the accent lights
+   only what is genuinely stronger, the warn tint marks genuinely reduced
+   protection; neutral otherwise. */
+.field.good .v  { color: color-mix(in srgb, var(--accent) 85%, var(--text)); }
+.field.warn    { border-color: color-mix(in srgb, var(--warn) 55%, var(--panel-border)); }
+.field.warn .v { color: var(--warn); }
+.field.on .v   { color: color-mix(in srgb, var(--brand) 80%, var(--text)); }

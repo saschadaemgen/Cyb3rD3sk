@@ -100,6 +100,9 @@ pub const KEY_ROTATE_INTERVAL: &str = "rotate_interval_min";
 /// The persisted global identity seed key (only meaningful when `rotate_on_restart`
 /// is off — a stable cross-launch identity).
 const KEY_IDENTITY_SEED: &str = "identity_seed";
+/// The persisted seed's mint time (unix epoch ms, CD-30) — kept in step with the
+/// seed so a restored identity reports its REAL age in the HUD.
+const KEY_IDENTITY_SEED_BORN: &str = "identity_seed_born";
 
 /// Glow-intensity slider bounds (percent).
 pub const GLOW_MIN: u32 = 50;
@@ -264,6 +267,21 @@ pub fn persisted_identity_seed() -> Option<String> {
 /// Persist the global identity seed (for the stable cross-launch identity).
 pub fn store_identity_seed(seed: &str) {
     store().lock().unwrap().set(KEY_IDENTITY_SEED, seed);
+}
+/// The persisted seed's mint time (unix epoch ms), if any (CD-30).
+pub fn persisted_identity_born() -> Option<u64> {
+    store()
+        .lock()
+        .unwrap()
+        .get(KEY_IDENTITY_SEED_BORN)
+        .and_then(|v| v.parse::<u64>().ok())
+}
+/// Persist the seed's mint time alongside the seed (CD-30).
+pub fn store_identity_born(ms: u64) {
+    store()
+        .lock()
+        .unwrap()
+        .set(KEY_IDENTITY_SEED_BORN, &ms.to_string());
 }
 
 /// Apply and persist the global hardening config (CD-25). `level` is one of

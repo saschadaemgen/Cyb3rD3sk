@@ -60,6 +60,56 @@ fn gear_geom(width: u32, scale: f32) -> (f32, f32, f32) {
     (w - margin - r, margin + r, r)
 }
 
+/// The local wall-clock's offset from UTC in minutes (CD-30: the HUD's digital
+/// clock). The PROCESS runs under TZ=UTC (the CD-16 timezone clamp — honest and
+/// global), so local time is derived from the OS timezone via Win32 — never from
+/// the (deliberately clamped) C-runtime timezone, which would silently show UTC.
+#[cfg(windows)]
+fn local_utc_offset_minutes() -> i32 {
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct SystemTime16 {
+        year: u16,
+        month: u16,
+        day_of_week: u16,
+        day: u16,
+        hour: u16,
+        minute: u16,
+        second: u16,
+        milliseconds: u16,
+    }
+    #[repr(C)]
+    struct TimeZoneInformation {
+        bias: i32,
+        standard_name: [u16; 32],
+        standard_date: SystemTime16,
+        standard_bias: i32,
+        daylight_name: [u16; 32],
+        daylight_date: SystemTime16,
+        daylight_bias: i32,
+    }
+    unsafe extern "system" {
+        fn GetTimeZoneInformation(tz: *mut TimeZoneInformation) -> u32;
+    }
+    let mut tz = TimeZoneInformation {
+        bias: 0,
+        standard_name: [0; 32],
+        standard_date: SystemTime16::default(),
+        standard_bias: 0,
+        daylight_name: [0; 32],
+        daylight_date: SystemTime16::default(),
+        daylight_bias: 0,
+    };
+    // Returns 0 unknown / 1 standard / 2 daylight; UTC offset = -(bias + active).
+    let id = unsafe { GetTimeZoneInformation(&mut tz) };
+    let active = if id == 2 { tz.daylight_bias } else { tz.standard_bias };
+    -(tz.bias + active)
+}
+#[cfg(not(windows))]
+fn local_utc_offset_minutes() -> i32 {
+    0
+}
+
 /// Which internal overlay (if any) is currently shown. `Command` is the CD-12
 /// floating command band; `Settings` is the gear card; `Info` is the CD-13
 /// update-awareness panel. All mutually exclusive — one shared internal OSR view.
@@ -122,6 +172,7 @@ pub fn run(windowed: bool) {
         bar_hide_at: None,
         band_off_at: None,
         frame_sig: String::new(),
+        hud_sig: String::new(),
         tor_status_pushed: u8::MAX,
         drag: None,
     };
@@ -205,6 +256,8 @@ struct Shell {
     /// The last frame state pushed to the page, so a push fires only on change
     /// (target rects + engaged slot) — not per frame (the CD-11 IPC cadence).
     frame_sig: String,
+    /// The last HUD state pushed (CD-30 Task B) — same on-change cadence.
+    hud_sig: String,
     /// The Tor engine status last carried in a frame push (CD-23). The engine reaches
     /// READY on a BACKGROUND thread with no user action, so `about_to_wait` compares
     /// this against `tor::status()` and re-pushes the frame on a transition — otherwise
@@ -359,7 +412,23 @@ impl Shell {
             }
             // The MF-zone view's origin is the animated right-zone top-left (CD-18).
             Role::MfZone => (self.disp_right.x, self.disp_right.y),
+            // The HUD strip's origin is its (target-anchored) top-left (CD-30).
+            Role::Hud => {
+                let r = self.hud_rect();
+                (r.0, r.1)
+            }
         }
+    }
+
+    /// The floating HUD strip's rect (device px, CD-30 Task B): the top margin
+    /// strip from the MF zone's left edge to the window's right edge (the gear /
+    /// info glyphs draw over its transparent right corner). Anchored to the
+    /// TARGET frame (not the eased one) so the texture and the quad always agree.
+    fn hud_rect(&self) -> (f32, f32, f32, f32) {
+        let (w, h) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
+        let (zy, _) = slots::zone_vertical(h, self.scale, &self.theme.slots);
+        let x = self.frame_target(w, h).right.x;
+        (x, 0.0, (w as f32 - x).max(1.0), zy)
     }
 
     /// Advance the animated frame one step toward the target [`slots::frame_layout`]
@@ -1087,6 +1156,55 @@ impl Shell {
         browser::set_frame_state(&payload);
     }
 
+    /// Build and push the HUD state (CD-30 Task B) when it changes. Same on-change
+    /// cadence as `push_frame` — the signature excludes the continuously-moving
+    /// countdown/age milliseconds (the page ticks those locally off absolute
+    /// anchors) but includes the rotation EPOCH, so a re-roll re-anchors the page
+    /// exactly when it lands. Called once per loop pass; a couple of atomic reads
+    /// when nothing changed. Every pushed field is a real live value (rule 0.1).
+    fn push_hud(&mut self) {
+        let level = crate::settings::hardening_level();
+        let cfg = crate::settings::hardening_global_config();
+        let vec_on = cfg.vector_flags().iter().filter(|&&v| v).count();
+        let vec_total = crate::harden::VECTOR_KEYS.len();
+        let reduced = crate::harden::is_weakening(&crate::harden::Config::STANDARD, &cfg);
+        let active_pos = self.active_position() + 1;
+        let active_tor = browser::slot_is_tor(self.active_slot);
+        let rot_auto = crate::settings::rotate_auto();
+        let rot_interval = crate::settings::rotate_interval_min();
+        let epoch = browser::rotation_epoch();
+        let tz_offset = local_utc_offset_minutes();
+        let sig = format!(
+            "{}|{vec_on}|{reduced}|{active_pos}|{active_tor}|{rot_auto}|{rot_interval}|{epoch}|{tz_offset}",
+            level.as_str()
+        );
+        if sig == self.hud_sig {
+            return;
+        }
+        self.hud_sig = sig;
+        let sent_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let payload = serde_json::json!({
+            "sent_ms": sent_ms,
+            "tz_offset_min": tz_offset,
+            "level": level.as_str(),
+            "vectors_on": vec_on,
+            "vectors_total": vec_total,
+            "reduced": reduced,
+            "route": { "window": active_pos, "slot": self.active_slot, "tor": active_tor },
+            "rotate": {
+                "auto": rot_auto,
+                "interval_min": rot_interval,
+                "elapsed_ms": if rot_auto { self.rot_anchor.elapsed().as_millis() as u64 } else { 0 },
+            },
+            "identity_age_ms": browser::identity_age_ms(),
+        })
+        .to_string();
+        browser::set_hud_state(&payload);
+    }
+
     /// Drive automatic identity rotation (CD-29 Task D). When auto-rotation is on and
     /// the interval elapses, re-roll the GLOBAL identity (every window's next page
     /// load / any new window gets the fresh, unlinkable fingerprint) and start the
@@ -1339,6 +1457,9 @@ impl Shell {
             // geometry is set here on resize / relayout, not per frame.
             let mf = self.frame_target(w, h).right;
             browser::set_view_geometry(Role::MfZone, mf.w as u32, mf.h as u32, self.scale);
+            // HUD strip (CD-30): the transparent top-right info view.
+            let (_, _, hw, hh) = self.hud_rect();
+            browser::set_view_geometry(Role::Hud, hw as u32, hh as u32, self.scale);
         }
     }
 
@@ -1350,6 +1471,7 @@ impl Shell {
         }
         browser::notify_resized(Role::Internal);
         browser::notify_resized(Role::MfZone);
+        browser::notify_resized(Role::Hud);
     }
 
     /// Total width in units of the live slots (CD-10).
@@ -1414,6 +1536,7 @@ impl Shell {
         self.push_geometry();
         browser::create_browser(Role::Internal, hwnd);
         browser::create_browser(Role::MfZone, hwnd); // → cyberdesk://mfzone/ (permanent)
+        browser::create_browser(Role::Hud, hwnd); // → cyberdesk://hud/ (permanent, CD-30)
         for p in &plan {
             match &p.url {
                 // A saved clearnet URL reloads it; `None` opens the own start page.
@@ -1961,8 +2084,9 @@ impl ApplicationHandler for Shell {
                     };
                     // CD-29: the identity-rotation countdown modulates the glow (charge
                     // → re-roll burst), on top of the user's setting. Computed before
-                    // the mutable renderer borrow below.
+                    // the mutable renderer borrow below (as is the HUD rect, CD-30).
                     let glow = settings::glow_intensity() * self.rotation_glow_factor();
+                    let hud = self.hud_rect();
                     if let Some(r) = self.renderer.as_mut() {
                         r.render(
                             time,
@@ -1970,6 +2094,7 @@ impl ApplicationHandler for Shell {
                             &sides,
                             &overlay_quads,
                             internal,
+                            hud,
                             gear_geom(w, scale),
                             settings::feather_edges(),
                             settings::animated_background(),
@@ -2004,6 +2129,9 @@ impl ApplicationHandler for Shell {
         // Drive automatic identity rotation + its Pulse Grid countdown (CD-29).
         if self.views_started {
             self.tick_identity_rotation();
+            // Keep the HUD strip current (CD-30): a cheap signature compare per
+            // pass; an IPC push fires only when a displayed value really changed.
+            self.push_hud();
         }
 
         // Spawn a lazy slot's browser on its first navigation (queued by the
@@ -2218,6 +2346,7 @@ impl ApplicationHandler for Shell {
             }
             browser::with_dirty_frame(Role::Internal, |data, w, h| r.upload_panel(data, w, h));
             browser::with_dirty_frame(Role::MfZone, |data, w, h| r.upload_mfzone(data, w, h));
+            browser::with_dirty_frame(Role::Hud, |data, w, h| r.upload_hud(data, w, h));
         }
 
         // Opt-in web-isolation self-test: try to steer the internal view onto the
