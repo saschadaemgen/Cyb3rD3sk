@@ -2,6 +2,79 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0047 - 2026-07-15 - UI expansion: Ampel is the graded protection control; red is the maximum "bunker" mode; status is always truthful (CD-30)
+
+*Decision.* The traffic-light (**Ampel**) is the primary protection control,
+bundling the CD-29 per-vector toggles into ordered levels: **Green** (the
+coherent everyday core — every vector except the clock/timing, media/codec and
+math-rounding clamps; no layout cost), **Yellow** (adds those three aggressive
+clamps — the former *Standard*, identical content), **Red** (maximum: every
+vector at the tight *strict* buckets — the former *Strict* — plus the
+window/viewport snap-to-standard-and-lock and a dramatic transition), **Off**
+(behind the gate). Settable global (the new floating HUD Ampel, and the settings
+dropdown) and per-window (the fp-orb is now a mini traffic light); the
+per-vector Custom view remains underneath (the HUD's "Custom…" opens it).
+Moving to a weaker level goes through the CD-25 two-confirmation gate — CD-30
+**revised `is_weakening`**: the ladder is a strict protection ORDER, so leaving
+Red's tight buckets is now a weakening too (pre-CD-30, strict→standard was
+ungated). Moving stronger is immediate.
+
+**Red locks the visible window** — in CyberDesk vocabulary the *window* is the
+browser slot, and the shell itself stays fullscreen: the slot's viewport snaps
+to its reported-screen preset (default 1920×1080), laddered down (1600×900,
+1280×720) to the largest standard size the frame holds, vertically centered and
+locked (resize refused) while Red is active; unlocked neighbors absorb any
+squeeze. With viewport == reported screen (the CD-29 `reported ≥ viewport`
+invariant holds with equality) the window reads exactly like a fullscreen
+browser on an ordinary machine. `width_units` are never modified, so stepping
+down restores the prior layout by construction. **Honest weight:** the
+window-size element is minor/presentational — transient, low-entropy, with the
+reported screen already normalized by CD-29 — the last increment plus the
+visible sign of maximum protection, not a major security gain. Everyday sizing
+stays completely free outside Red; if not even the smallest standard size fits
+a display, the level and its vectors are unaffected and the slot honestly stays
+zone-sized.
+
+All indicators, the Ampel, and animations reflect the ACTUAL protection state —
+never a state that isn't active (the inverse of the D-0044 honesty rule): the
+Ampel lamps and the HUD fields are painted strictly from the host's resolved
+config (the same one the render processes receive); the transition is a single,
+replaceable hook (`app.rs trigger_red_transition`, the tasteful baseline for the
+finale Sascha choreographs) fired only by the red-engagement edge detector
+(effective level committed + strict-config respawn queued + lock applied in the
+same pass), reusing the CD-29 charge-and-burst glow channel — no new shader.
+
+Layout: the surf zone's dead space is gone (explicit `zone_top`/`zone_bottom`
+margins replace the centered `height_frac = 0.70`), a new permanent transparent
+HUD view (`cyberdesk://hud/`) floats top-right with the digital clock (local
+time derived from the OS timezone via Win32 — the process deliberately runs
+under `TZ=UTC`, so `getHours()` would lie) and live fields — protection level,
+the honest `N/10 vectors active`, the active window's route (Clearnet/Tor; a
+"Tor+SMP" state does not exist in code and is therefore not displayed), and the
+rotation countdown / identity age (mint time now persisted with a persisted
+seed so a stable identity reports its real age). The MF-zone Terminal tab lays
+the zone out 2× wide (`mf_tab` IPC); columns compress toward `slot_min_width`
+instead of closing.
+
+*Compat/product-call notes.* (Task 0) No Ampel existed in code — the level was
+a settings dropdown + the per-window fp-orb menu, and the only traffic-light-ish
+element was the passive MF-zone Tor dot — so CD-30 built the Ampel new on the
+CD-25 level machinery. Persisted `standard`/`strict` parse as aliases of
+Yellow/Red (identical content — an explicit choice never silently changes);
+the FACTORY DEFAULT moves from all-ten Standard to **Green** per the ticket
+("comfortable, everyday… This is the default"), which is a deliberate product
+call for fresh/untouched configs, recorded here rather than hidden. The
+"reduced" warning floor moves from Standard to Green (Green is a first-class
+safe level, not a warning). A user who had persisted *Strict* boots into Red
+and gets the size lock — strictly more protection, steppable-down through the
+gate.
+
+*Why.* A security product's value is visible, settable, truthful control. The
+Ampel makes the vector protection graspable at a glance and stageable; the red
+bunker mode makes maximum protection something the user can feel and see,
+layered on protection that already provably holds (CD-29) — function first,
+drama second.
+
 ## D-0046 - 2026-07-13 - Per-session identity rotation: manual / automatic (countdown showpiece) / on-restart (CD-29 Task D/E)
 
 *Decision.* The farble seed IS the identity; CD-29 makes it **rotatable** in three
