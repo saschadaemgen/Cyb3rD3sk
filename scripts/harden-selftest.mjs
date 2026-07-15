@@ -1,4 +1,4 @@
-// CyberDesk fingerprint-hardening self-test (CD-16, CD-29).
+// CyberDesk fingerprint-hardening self-test (CD-16, CD-29, CD-32).
 //
 // Headless verification of the ACTUAL src/hardening.js against a minimal DOM mock,
 // with no browser and no network. It proves the properties CD-29 acceptance asks CC
@@ -9,7 +9,11 @@
 //   * the clamp vectors return their common value (GPU strings, fonts, math, media);
 //   * clock precision is quantized AND monotonic non-decreasing;
 //   * every vector is independently gated by its FP_CONFIG flag (Task C toggles);
-//   * "Off" injects nothing.
+//   * "Off" injects nothing;
+//   * the CD-32 (D-0049) window-size cluster is COHERENT — innerWidth, the root
+//     clientWidth/Height, visualViewport, outerWidth/Height and the viewport-derived
+//     matchMedia features all agree, with matchMedia cross-checked against an
+//     INDEPENDENT evaluator that only ever sees the real geometry (the Brave trap).
 //
 // Run: node scripts/harden-selftest.mjs   (exit 0 = all pass, 1 = a failure).
 
@@ -32,7 +36,9 @@ function check(name, cond) {
 // guard passes; each method returns a deterministic "real" value so we can observe
 // whether the hardening changed it.
 
-function makeSandbox(seed, config) {
+// `asFrame` builds a NESTED frame (window.top !== window) — the CD-32 viewport
+// block must leave those alone: an iframe's inner size is its own box.
+function makeSandbox(seed, config, asFrame) {
   // A canvas 2D context whose getImageData returns a fixed gradient (so farbling is
   // observable) and whose measureText/font are backed by simple fields.
   class ImageData {
@@ -88,6 +94,94 @@ function makeSandbox(seed, config) {
   }
   const performance = new Performance();
 
+  // --- CD-32 viewport surface ---------------------------------------------
+  // The REAL geometry of a default CyberDesk column on a 1440p monitor: a 1200
+  // DIP-wide slot, as tall as the surf zone (1440 - 118 - 44 = 1278), with a
+  // classic 15px scrollbar. The host reports screen.* = 2560x1440 for it
+  // (browser.rs common_screen_for buckets the real viewport up the ladder).
+  const REAL = { innerW: 1200, innerH: 1278, clientW: 1185, clientH: 1278, scrW: 2560, scrH: 1440 };
+  class Window {}
+  Object.defineProperties(Window.prototype, {
+    // [Replaceable], like Blink: assigning REPLACES the property, never throws.
+    innerWidth: {
+      configurable: true, enumerable: true, get() { return REAL.innerW; },
+      set(v) { Object.defineProperty(this, "innerWidth", { value: v, writable: true, enumerable: true, configurable: true }); }
+    },
+    innerHeight: { configurable: true, enumerable: true, get() { return REAL.innerH; }, set() {} },
+    // OSR has no window chrome, so outer == inner here (a real relationship the
+    // hardening must PRESERVE, not invent).
+    outerWidth: { configurable: true, enumerable: true, get() { return REAL.innerW; } },
+    outerHeight: { configurable: true, enumerable: true, get() { return REAL.innerH; } }
+  });
+  class Element {}
+  Object.defineProperties(Element.prototype, {
+    clientWidth: { configurable: true, enumerable: true, get() { return this._cw; } },
+    clientHeight: { configurable: true, enumerable: true, get() { return this._ch; } }
+  });
+  const documentElement = Object.create(Element.prototype);
+  documentElement._cw = REAL.clientW; documentElement._ch = REAL.clientH;
+  // A non-root element: its client box must stay untouched.
+  const someDiv = Object.create(Element.prototype);
+  someDiv._cw = 640; someDiv._ch = 480;
+  class VisualViewport {}
+  Object.defineProperties(VisualViewport.prototype, {
+    width: { configurable: true, enumerable: true, get() { return REAL.clientW; } },
+    height: { configurable: true, enumerable: true, get() { return REAL.clientH; } }
+  });
+
+  // An INDEPENDENT media-query evaluator, deliberately written against the REAL
+  // geometry — exactly like Blink, which our JS cannot reach into. The hardening
+  // may only change the ANSWER by rewriting the query it hands us, so this is a
+  // genuine cross-check of the shift math rather than a restatement of it.
+  // Media queries evaluate against the ICB (the root client box), not innerWidth.
+  function evalMQ(q) {
+    const W0 = REAL.clientW, H0 = REAL.clientH;
+    q = String(q).trim().toLowerCase();
+    let m;
+    // device-* describes the SCREEN, not the viewport — the host already reports
+    // it, so the hardening must leave these thresholds alone.
+    if ((m = /^\(\s*(min-|max-)?device-(width|height)\s*:\s*([+-]?[\d.]+)px\s*\)$/.exec(q))) {
+      const v = m[2] === "width" ? REAL.scrW : REAL.scrH, t = parseFloat(m[3]);
+      return m[1] === "min-" ? v >= t : m[1] === "max-" ? v <= t : v === t;
+    }
+    if ((m = /^\(\s*(min-|max-)?(width|height)\s*:\s*([+-]?[\d.]+)px\s*\)$/.exec(q))) {
+      const v = m[2] === "width" ? W0 : H0, t = parseFloat(m[3]);
+      return m[1] === "min-" ? v >= t : m[1] === "max-" ? v <= t : v === t;
+    }
+    if ((m = /^\(\s*(width|height)\s*(<=|>=|<|>|=)\s*([+-]?[\d.]+)px\s*\)$/.exec(q))) {
+      const v = m[1] === "width" ? W0 : H0, t = parseFloat(m[3]);
+      return m[2] === "<=" ? v <= t : m[2] === ">=" ? v >= t
+           : m[2] === "<" ? v < t : m[2] === ">" ? v > t : v === t;
+    }
+    if ((m = /^\(\s*([+-]?[\d.]+)px\s*(<=|<)\s*(width|height)\s*(<=|<)\s*([+-]?[\d.]+)px\s*\)$/.exec(q))) {
+      const v = m[3] === "width" ? W0 : H0, lo = parseFloat(m[1]), hi = parseFloat(m[5]);
+      return (m[2] === "<=" ? lo <= v : lo < v) && (m[4] === "<=" ? v <= hi : v < hi);
+    }
+    if ((m = /^\(\s*orientation\s*:\s*(portrait|landscape)\s*\)$/.exec(q))) {
+      return (H0 >= W0) === (m[1] === "portrait");
+    }
+    if ((m = /^\(\s*(min-|max-)?aspect-ratio\s*:\s*([\d.]+)(?:\s*\/\s*([\d.]+))?\s*\)$/.exec(q))) {
+      const t = parseFloat(m[2]) / (m[3] === undefined ? 1 : parseFloat(m[3])), a = W0 / H0;
+      return m[1] === "min-" ? a >= t : m[1] === "max-" ? a <= t : Math.abs(a - t) < 1e-9;
+    }
+    return false; // unknown / invalid -> never matches (Blink's rule)
+  }
+  class MediaQueryList {}
+  Object.defineProperties(MediaQueryList.prototype, {
+    media: { configurable: true, enumerable: true, get() { return this._media; } },
+    matches: { configurable: true, enumerable: true, get() { return evalMQ(this._media); } }
+  });
+  class MediaQueryListEvent {}
+  Object.defineProperties(MediaQueryListEvent.prototype, {
+    media: { configurable: true, enumerable: true, get() { return this._media; } },
+    matches: { configurable: true, enumerable: true, get() { return this._matches; } }
+  });
+  Window.prototype.matchMedia = function (q) {
+    const l = Object.create(MediaQueryList.prototype);
+    l._media = String(q).trim().toLowerCase(); // stand-in for Blink's normalization
+    return l;
+  };
+
   const Math2 = Object.create(Math); // a patchable copy so we can compare to real Math
   const win = {
     location: { origin: "https://example.test", ancestorOrigins: { length: 0 } },
@@ -96,14 +190,19 @@ function makeSandbox(seed, config) {
     AudioBuffer, Navigator, navigator,
     HTMLMediaElement, MediaCapabilities, SpeechSynthesis,
     Performance, performance,
+    Window, Element, VisualViewport, MediaQueryList, MediaQueryListEvent,
+    document: { documentElement },
+    screen: { width: REAL.scrW, height: REAL.scrH, availWidth: REAL.scrW, availHeight: REAL.scrH },
     Math: Math2,
     Object, Function, Promise, WeakSet, Proxy, Array,
     Uint8Array, Uint8ClampedArray, Float32Array, isFinite, parseFloat, String, RegExp,
     MediaSource: { isTypeSupported() { return true; } }
   };
+  win.REAL = REAL;
+  win.someDiv = someDiv;
   win.window = win;
   win.self = win;
-  win.top = win;
+  win.top = asFrame ? { cyberdeskTopFrame: true } : win;
 
   // Substitute the placeholders exactly as the host does.
   const code = SRC
@@ -115,8 +214,21 @@ function makeSandbox(seed, config) {
 
 const STANDARD = {
   on: true, strict: false, canvas: true, webgl: true, gpu: true, audio: true,
-  metrics: true, nav: true, fonts: true, timing: true, media: true, math: true
+  metrics: true, nav: true, fonts: true, timing: true, media: true, math: true,
+  viewport: true
 };
+
+// The page reads these through the PROTOTYPE accessors — the exact properties the
+// hardening patches. The sandbox global is a plain object (node's vm contextifies
+// it), so invoke the accessor explicitly instead of faking a prototype chain.
+const winGet = (win, name) =>
+  Object.getOwnPropertyDescriptor(win.Window.prototype, name).get.call(win);
+const elGet = (win, el, name) =>
+  Object.getOwnPropertyDescriptor(win.Element.prototype, name).get.call(el);
+const vvGet = (win, name) =>
+  Object.getOwnPropertyDescriptor(win.VisualViewport.prototype, name).get.call(
+    Object.create(win.VisualViewport.prototype));
+const mm = (win, q) => win.Window.prototype.matchMedia.call(win, q);
 
 function canvasHash(win) {
   const ctx = new win.CanvasRenderingContext2D();
@@ -200,6 +312,114 @@ console.log("\n[clock precision]");
   check("performance.now coarsened (repeats within a bucket)", anyCoarse);
 }
 
+// 4b. CD-32 (D-0049): a COHERENT common inner size below Red. ---------------
+console.log("\n[window size — coherent cluster]");
+{
+  const w = makeSandbox("aaaa1111", STANDARD);
+  const R = w.REAL;
+  // The real column is 1200x1278 on a 2560x1440 reported screen. The nearest
+  // ladder step BY WIDTH is 1280x720 (|1200-1280| = 80 beats |1200-1600| = 400)
+  // — truthful-closest, and emphatically not a fixed 1920 (acceptance 3).
+  const iw = winGet(w, "innerWidth"), ih = winGet(w, "innerHeight");
+  check("inner size is the nearest common step (1200 -> 1280)", iw === 1280 && ih === 720);
+  check("reported step is NOT a fixed 1920", iw !== 1920);
+  // The real window is untouched — reporting is all we do below Red (acceptance 2).
+  check("the real window is never moved", R.innerW === 1200 && R.innerH === 1278);
+
+  // --- coherence: one delta moves the whole cluster (acceptance 4) ----------
+  const dw = iw - R.innerW, dh = ih - R.innerH;
+  const cw = elGet(w, w.document.documentElement, "clientWidth");
+  const ch = elGet(w, w.document.documentElement, "clientHeight");
+  check("root clientWidth rides the same delta", cw === R.clientW + dw);
+  check("root clientHeight rides the same delta", ch === R.clientH + dh);
+  // The scrollbar gap Blink actually measured survives: a real 1280-inner window
+  // WITH a scrollbar reports clientWidth 1265, and so do we. Reporting inner ===
+  // client would claim "no scrollbar" on every scrolling page — a tell of its own.
+  check("real scrollbar gap preserved (inner - client === 15)", iw - cw === R.innerW - R.clientW);
+  check("visualViewport rides the same delta", vvGet(w, "width") === R.clientW + dw);
+  check("outerWidth rides the same delta", winGet(w, "outerWidth") === R.innerW + dw);
+  check("outerHeight rides the same delta", winGet(w, "outerHeight") === R.innerH + dh);
+  // Only the ROOT is the viewport: every other element must keep measuring real
+  // rendered layout, or every size computation on the page would corrupt.
+  check("a non-root element is untouched", elGet(w, w.someDiv, "clientWidth") === 640);
+  // Never claim an inner size the reported screen cannot contain.
+  check("inner <= reported screen", iw <= R.scrW && ih <= R.scrH);
+  // innerWidth is [Replaceable] in WebIDL — its setter is part of the real
+  // surface, so a getter-only replacement would throw where Chrome accepts.
+  check("[Replaceable] setter preserved on innerWidth",
+    typeof Object.getOwnPropertyDescriptor(w.Window.prototype, "innerWidth").set === "function");
+
+  // --- the Brave trap: matchMedia must not contradict the DOM ---------------
+  // Binary-searching the viewport with (min-width: N) is THE way a page catches a
+  // size lie. The mock evaluates every query against the REAL geometry, so this
+  // passes only if the shift math is right. MQ answers for the ICB = clientWidth.
+  let mqOk = true, mqReal = false;
+  for (let n = 1100; n <= 1400; n++) {
+    if (mm(w, "(min-width: " + n + "px)").matches !== (cw >= n)) mqOk = false;
+    if (mm(w, "(min-width: " + n + "px)").matches !== (R.clientW >= n)) mqReal = true;
+  }
+  check("matchMedia min-width agrees with the reported viewport", mqOk);
+  check("matchMedia is actually shifted off the real viewport", mqReal);
+  let hOk = true;
+  for (let n = 600; n <= 1400; n += 7) {
+    if (mm(w, "(max-height: " + n + "px)").matches !== (ch <= n)) hOk = false;
+  }
+  check("matchMedia max-height agrees with the reported viewport", hOk);
+  check("matchMedia range syntax agrees", mm(w, "(width >= 1200px)").matches === (cw >= 1200)
+    && mm(w, "(width < 1200px)").matches === (cw < 1200));
+  check("matchMedia two-sided range agrees",
+    mm(w, "(1000px <= width <= 1270px)").matches === (cw >= 1000 && cw <= 1270));
+  // em resolves against the INITIAL font size (16px) in a media query: 80em =
+  // 1280px, which the reported 1265 misses and the real 1185 misses too — so use
+  // a threshold where real and reported DISAGREE to prove the shift applies.
+  check("matchMedia em threshold is shifted (75em = 1200px)",
+    mm(w, "(min-width: 75em)").matches === (cw >= 1200));
+  // The viewport aspect flips from portrait (1200x1278) to landscape (1280x720):
+  // leaving these to answer from the real box would contradict innerWidth outright.
+  check("orientation follows the reported size", mm(w, "(orientation: landscape)").matches === true
+    && mm(w, "(orientation: portrait)").matches === false);
+  check("aspect-ratio follows the reported size", mm(w, "(min-aspect-ratio: 16/9)").matches === true
+    && mm(w, "(max-aspect-ratio: 1/1)").matches === false);
+  // device-* describes the SCREEN (reported natively by the host) — never shifted.
+  // Both halves discriminate: shifting by dw would drag 2600 down to 2520 and
+  // flip the first answer to true.
+  check("device-width is left to the host (never shifted)",
+    mm(w, "(min-device-width: 2600px)").matches === false
+    && mm(w, "(min-device-width: 2560px)").matches === true);
+  // The rewrite must be invisible: .media serializes what the PAGE asked.
+  check("mql.media returns the page's query, not the rewrite",
+    mm(w, "(min-width: 1250px)").media === "(min-width: 1250px)");
+  // Our per-instance media/matches shadows must be NON-enumerable: on a real
+  // MediaQueryList both live on the prototype, so an own enumerable copy would
+  // show up in Object.keys() and advertise the patch. (The mock's own `_media`
+  // bookkeeping field is not part of what is under test.)
+  check("mql media/matches shadows are non-enumerable",
+    Object.keys(mm(w, "(min-width: 1px)")).indexOf("media") === -1
+    && Object.keys(mm(w, "(min-width: 1px)")).indexOf("matches") === -1);
+
+  // --- Red: the same rule is the identity ----------------------------------
+  // At Red the shell snaps the real window to 1920x1080 — already a ladder step —
+  // so the nearest step IS the real size: reported == real, and the residual that
+  // the cluster spoof leaves below Red closes with no special case.
+  const red = makeSandbox("aaaa1111", { ...STANDARD, strict: true });
+  red.REAL.innerW = 1920; red.REAL.innerH = 1080;
+  red.REAL.clientW = 1905; red.REAL.clientH = 1080;
+  red.REAL.scrW = 1920; red.REAL.scrH = 1080;
+  check("Red reports the real window (reported == real)",
+    winGet(red, "innerWidth") === 1920 && winGet(red, "innerHeight") === 1080);
+  check("Red leaves matchMedia untouched (no delta to hide)",
+    mm(red, "(min-width: 1900px)").matches === true && mm(red, "(min-width: 1910px)").matches === false);
+
+  // --- an iframe must never report the top window's size -------------------
+  // Reporting 1280x720 for a 300x250 ad slot would be incoherent AND broken. A
+  // same-origin child reading top.innerWidth reaches the TOP realm's patched
+  // accessor, so gating on the top frame loses no coverage.
+  const frame = makeSandbox("aaaa1111", STANDARD, true);
+  check("iframe inner size is its own real box", winGet(frame, "innerWidth") === frame.REAL.innerW);
+  check("iframe matchMedia is unshifted",
+    mm(frame, "(min-width: 1190px)").matches === (frame.REAL.clientW >= 1190));
+}
+
 // 5. Every vector independently gated (Task C toggles). --------------------
 console.log("\n[per-vector toggles]");
 {
@@ -232,6 +452,11 @@ console.log("\n[per-vector toggles]");
   // math OFF -> Math.tan is the real value.
   const noMath = makeSandbox("aaaa1111", { ...STANDARD, math: false });
   check("math flag off -> tan is real", noMath.Math.tan(1.2345678912345) === Math.tan(1.2345678912345));
+  // viewport OFF -> the real inner size and an unshifted matchMedia pass through.
+  const noVp = makeSandbox("aaaa1111", { ...STANDARD, viewport: false });
+  check("viewport flag off -> inner size is real", winGet(noVp, "innerWidth") === noVp.REAL.innerW);
+  check("viewport flag off -> matchMedia is unshifted",
+    mm(noVp, "(min-width: 1190px)").matches === (noVp.REAL.clientW >= 1190));
 }
 
 // 6. Off injects nothing (the render side skips injection; the config guards too). -

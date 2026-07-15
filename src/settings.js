@@ -206,7 +206,8 @@
   // Pre-CD-30 names arriving from an old store snapshot map onto the Ampel.
   function canonLevel(l) { return l === "standard" ? "yellow" : l === "strict" ? "red" : l; }
   // The full CD-29 vector list (canonical order matches harden.rs::VECTOR_KEYS).
-  var VECTORS = ["canvas", "webgl", "gpu", "audio", "metrics", "nav", "fonts", "timing", "media", "math"];
+  var VECTORS = ["canvas", "webgl", "gpu", "audio", "metrics", "nav", "fonts", "timing", "media",
+    "math", "viewport"];
   // Green = the coherent everyday core: everything except the three aggressive
   // clamps below (mirror harden.rs::Config::GREEN).
   var GREEN_OFF = ["timing", "media", "math"];

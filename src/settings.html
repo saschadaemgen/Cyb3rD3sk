@@ -239,13 +239,16 @@
         <div class="row"><div class="label"><span class="name">Math rounding</span>
           <span class="hint">Erase transcendental-rounding differences</span></div>
           <div class="switch" data-fp="math" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
+        <div class="row"><div class="label"><span class="name">Window size</span>
+          <span class="hint">Report a common inner size; your layout stays free</span></div>
+          <div class="switch" data-fp="viewport" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
       </div>
 
       <dl class="tor-info">
         <div><dt>What it does</dt><dd>Solves every measurable fingerprint vector:
         stable signals are clamped to common values (your local fonts are hidden
-        behind a standard set, GPU strings and screen size read as an ordinary
-        machine, codecs and math are normalized), and measured signals carry fresh
+        behind a standard set, GPU strings and screen and window size read as an
+        ordinary machine, codecs and math are normalized), and measured signals carry fresh
         per-session noise (canvas, WebGL, audio, text metrics, high-resolution
         timers). The noise is stable within a session but changes on the next launch
         or a new identity, so a site cannot link one session to the next.</dd></div>

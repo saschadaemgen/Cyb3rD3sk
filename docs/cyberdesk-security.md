@@ -95,6 +95,35 @@ implementation boundaries recorded for engineering, not product limitations.
   (1440p/2160p) rather than the preset — the exact monitor pixels are withheld, but a
   very large window cannot be made to look small (that would be a detectable decoy).
 
+## CD-32 window-size residual (internal engineering scope, D-0049)
+
+**Never surface in product UI, marketing, or demos** (D-0044). Product copy stays
+*tracking-resistance* and never claims the viewport is perfectly hidden below Red.
+
+- **Below Red, reported inner size ≠ the real render area.** The real window is
+  deliberately never moved (the user's layout stays free), so the inner-size cluster
+  — `innerWidth`/`innerHeight`, the root `clientWidth`/`clientHeight`,
+  `visualViewport`, `outerWidth`/`outerHeight`, and the viewport-derived
+  `matchMedia` features — is *reported* as the nearest common step of the CD-29
+  ladder. The cluster is internally coherent (one shared delta, so no member can
+  contradict another — the Brave trap), but **CSS layout still uses the real
+  viewport**: a page that measures the rendered pixels of a full-width element, or
+  reads `documentElement.scrollWidth`, can still tell reported from real. This is a
+  deliberate, bounded tradeoff — a weak, transient, low-entropy vector (users resize
+  constantly) traded for layout freedom — and it is **fully closed at Red**, where
+  the real window snaps to a common resolution and reported == real.
+- **A JS-driven layout can disagree with the page's own CSS breakpoints.** The same
+  root cause: `matchMedia` answers for the reported size (it must, or it would
+  contradict `innerWidth`), while CSS `@media` rules still evaluate against the real
+  viewport, which an embedder cannot rewrite. The paired ladder height makes the
+  vertical component of this the visible one (a 1200×1278 column reports 1280×720).
+  Accepted below Red; absent at Red, where the delta is zero.
+- **Media-query units we do not shift.** `px`/`em`/`rem` and the absolute units are
+  converted and shifted. `vw`/`vh` are left alone and are coherent by nature on their
+  own axis (self-referential — the same answer for real and reported); `ch`/`ex` and
+  `calc()` thresholds are left unshifted, a vanishingly rare incoherence recorded
+  rather than guessed at.
+
 ## Supply chain
 
 Pinned dependencies, cargo-audit and cargo-deny in the workflow, no GPL linking (D-0005), CEF version pinned exactly, large binaries never in the repo (fetch script).

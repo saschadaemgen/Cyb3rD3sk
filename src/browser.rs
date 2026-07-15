@@ -2869,7 +2869,10 @@ wrap_render_process_handler! {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_input_for, common_screen_for, fresh_seed_hex, restamp_tor_status, search_url_for};
+    use super::{
+        classify_input_for, common_screen_for, fresh_seed_hex, restamp_tor_status, search_url_for,
+        SCREEN_LADDER,
+    };
 
     // --- Identity seed (CD-29): rotation produces fresh, well-formed seeds ------
 
@@ -2919,6 +2922,25 @@ mod tests {
     #[test]
     fn screen_falls_back_to_real_size_past_the_ladder() {
         assert_eq!(common_screen_for((1920, 1080), (5000, 3000)), (5000, 3000));
+    }
+
+    /// CD-32 (D-0049): `hardening.js` picks the reported INNER size from its own
+    /// copy of the ladder while the host reports `screen.*` from this one. The two
+    /// must be the same list — a drift could let the reported inner size exceed the
+    /// reported screen, which is exactly the self-contradiction the cluster spoof
+    /// exists to prevent.
+    #[test]
+    fn the_injected_ladder_mirrors_the_host_ladder() {
+        let expect = SCREEN_LADDER
+            .iter()
+            .map(|(w, h)| format!("[{w}, {h}]"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let line = format!("var LADDER = [{expect}];");
+        assert!(
+            include_str!("hardening.js").contains(&line),
+            "hardening.js must carry the host ladder verbatim: {line}"
+        );
     }
 
     // --- Search routing (CD-27, D-0043): the selector is authoritative --------

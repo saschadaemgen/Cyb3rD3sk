@@ -93,18 +93,23 @@ feathered compositing, and an isolated in-shell settings surface.
   disable any one protection to debug). Every label stays **tracking-resistance, never
   anonymity**, and no control claims to hide the OS/UA/platform.
 * **The complete fingerprint surface — every vector solved and settable (CD-29,
-  D-0045):** the surface is now exhaustive. Ten independent vectors — canvas, WebGL
-  readback, **GPU identity**, audio, layout & text metrics, **device profile** (CPU,
-  memory, touch, battery, network), **fonts**, **clock precision**, **media & codecs**,
-  **math rounding** — each its **own visible toggle**, settable **globally and
-  per-window**. Stable signals are **clamped to common values** (your installed fonts
-  are hidden behind a standard set so every window returns the same font answer; the GPU
-  reads as a generic card; codecs, math and screen size read as an ordinary machine) and
-  measured signals carry **fresh per-session noise** (canvas, WebGL, audio, text
-  metrics, high-resolution timers). **Screen size** reports a **common real resolution**
-  (default 1920×1080; 1600×900 / 1280×720 presets) that always stays consistent with the
-  real window — never a decoy. Presets stay the coherent primary path; the safety gate
-  still fires on any weakening.
+  D-0045; CD-32, D-0049):** the surface is now exhaustive. Eleven independent vectors —
+  canvas, WebGL readback, **GPU identity**, audio, layout & text metrics, **device
+  profile** (CPU, memory, touch, battery, network), **fonts**, **clock precision**,
+  **media & codecs**, **math rounding**, **window size** — each its **own visible
+  toggle**, settable **globally and per-window**. Stable signals are **clamped to common
+  values** (your installed fonts are hidden behind a standard set so every window returns
+  the same font answer; the GPU reads as a generic card; codecs, math and screen size
+  read as an ordinary machine) and measured signals carry **fresh per-session noise**
+  (canvas, WebGL, audio, text metrics, high-resolution timers). **Screen size** reports a
+  **common real resolution** (default 1920×1080; 1600×900 / 1280×720 presets) that always
+  stays consistent with the real window — never a decoy. **Window size** reports the
+  nearest common step to your real column, as one coherent cluster —
+  `innerWidth`/`innerHeight`, the root client box, `visualViewport` and `matchMedia` all
+  agree, so no internal contradiction gives it away. Your layout is never touched for it:
+  the window itself only ever snaps at the **highest protection level** (D-0049), where
+  the reported size becomes the real one. Presets stay the coherent primary path; the
+  safety gate still fires on any weakening.
 * **New identity — on demand, on a timer, or every launch (CD-29, D-0046):** a rotation
   re-seeds the whole farble basis, producing a fresh, unlinkable fingerprint. **New
   identity now** (in each window's tracking-resistance menu) re-rolls that window — plus

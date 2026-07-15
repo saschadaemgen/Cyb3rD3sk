@@ -14,9 +14,11 @@
 //! layout/text metrics, device profile, fonts) plus GPU identity (WebGL vendor /
 //! renderer strings + WebGPU adapter, split out of `webgl` so readback noise and
 //! identity clamp are independently controllable), clock/timing precision, media /
-//! codec / voice profile, and math (transcendental-rounding) normalization. Old
-//! persisted CD-25 configs deserialize with the new vectors DEFAULTED ON (serde
-//! defaults) — an upgrade never silently weakens protection.
+//! codec / voice profile, and math (transcendental-rounding) normalization. CD-32
+//! (D-0049) adds the eleventh: window size — the inner-size read cluster reported
+//! as the nearest common step of the CD-29 screen ladder. Old persisted CD-25
+//! configs deserialize with the new vectors DEFAULTED ON (serde defaults) — an
+//! upgrade never silently weakens protection.
 //!
 //! The [`Config`] is serialized to the exact JSON `hardening.js` reads at its
 //! `__CYBERDESK_FP_CONFIG__` placeholder, and the SAME JSON rides the CreateBrowser
@@ -113,13 +115,22 @@ pub struct Config {
     /// Math normalization: transcendental low-mantissa rounding differences erased.
     #[serde(default = "on_by_default")]
     pub math: bool,
+    /// Window size: the inner-size read cluster (`innerWidth`/`innerHeight`,
+    /// the root `clientWidth`/`clientHeight`, `visualViewport`, `outerWidth`/
+    /// `outerHeight` and the viewport-derived `matchMedia` features) reported
+    /// as the nearest common step of the CD-29 screen ladder (CD-32, D-0049).
+    /// The real window is never moved below Red; at Red the window already IS a
+    /// common step, so the same reporting is the identity and reported == real.
+    #[serde(default = "on_by_default")]
+    pub viewport: bool,
 }
 
 /// The individually settable vector keys, in the canonical (serialization) order.
 /// UI surfaces, the IPC vector parser and the weaken classifier all walk THIS list,
 /// so adding a vector here is the single point of extension.
-pub const VECTOR_KEYS: [&str; 10] = [
+pub const VECTOR_KEYS: [&str; 11] = [
     "canvas", "webgl", "gpu", "audio", "metrics", "nav", "fonts", "timing", "media", "math",
+    "viewport",
 ];
 
 impl Config {
@@ -140,12 +151,15 @@ impl Config {
         timing: true,
         media: true,
         math: true,
+        viewport: true,
     };
 
-    /// The **Green** Ampel level (CD-30): the coherent everyday core — every
-    /// vector with no layout cost and minimal site breakage — WITHOUT the three
-    /// aggressive clamps (clock/timing precision, media/codec normalization,
-    /// math rounding) that can cause minor site quirks. Moderate buckets.
+    /// The **Green** Ampel level (CD-30): the coherent everyday core — WITHOUT
+    /// the three aggressive clamps (clock/timing precision, media/codec
+    /// normalization, math rounding) that can cause minor site quirks. Moderate
+    /// buckets. Window-size reporting IS part of Green (CD-32, D-0049): it is the
+    /// level rule that the real window is never moved below Red but the inner size
+    /// is always reported as a common step, so Green and Yellow report alike.
     pub const GREEN: Config = Config {
         timing: false,
         media: false,
@@ -172,6 +186,7 @@ impl Config {
         timing: false,
         media: false,
         math: false,
+        viewport: false,
     };
 
     /// The vector flags in [`VECTOR_KEYS`] order.
@@ -187,6 +202,7 @@ impl Config {
             self.timing,
             self.media,
             self.math,
+            self.viewport,
         ]
     }
 
@@ -203,6 +219,7 @@ impl Config {
             "timing" => &mut self.timing,
             "media" => &mut self.media,
             "math" => &mut self.math,
+            "viewport" => &mut self.viewport,
             _ => return false,
         };
         *f = on;
@@ -244,7 +261,7 @@ impl Config {
 
 /// The Standard config as a JSON literal (the fail-safe fallback / render default).
 /// Must stay byte-identical to `Config::STANDARD.to_json()` (unit-tested).
-pub const STANDARD_JSON: &str = "{\"on\":true,\"strict\":false,\"canvas\":true,\"webgl\":true,\"gpu\":true,\"audio\":true,\"metrics\":true,\"nav\":true,\"fonts\":true,\"timing\":true,\"media\":true,\"math\":true}";
+pub const STANDARD_JSON: &str = "{\"on\":true,\"strict\":false,\"canvas\":true,\"webgl\":true,\"gpu\":true,\"audio\":true,\"metrics\":true,\"nav\":true,\"fonts\":true,\"timing\":true,\"media\":true,\"math\":true,\"viewport\":true}";
 
 /// Resolve a level (+ the custom flags, used only when `level == Custom`)
 /// into an effective [`Config`].
@@ -322,6 +339,10 @@ mod tests {
         assert!(g.on && !g.strict);
         assert!(g.canvas && g.webgl && g.gpu && g.audio && g.metrics && g.nav && g.fonts);
         assert!(!g.timing && !g.media && !g.math);
+        // CD-32 (D-0049): reporting a common inner size is the level rule for
+        // everything below Red, so Green and Yellow report alike — only the real
+        // window snapping is Red's.
+        assert!(g.viewport, "Green reports a common window size too");
     }
 
     #[test]
@@ -424,7 +445,7 @@ mod tests {
         assert!(cfg.on && !cfg.strict);
         // All-off resolves to not-on.
         let all_off: serde_json::Value = serde_json::from_str(
-            "{\"canvas\":false,\"webgl\":false,\"gpu\":false,\"audio\":false,\"metrics\":false,\"nav\":false,\"fonts\":false,\"timing\":false,\"media\":false,\"math\":false}",
+            "{\"canvas\":false,\"webgl\":false,\"gpu\":false,\"audio\":false,\"metrics\":false,\"nav\":false,\"fonts\":false,\"timing\":false,\"media\":false,\"math\":false,\"viewport\":false}",
         )
         .unwrap();
         assert!(!Config::from_vectors_value(&all_off).on);

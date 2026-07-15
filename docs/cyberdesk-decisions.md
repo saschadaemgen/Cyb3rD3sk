@@ -2,6 +2,118 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0049 - 2026-07-15 - Window size: below Red report-only (coherent cluster, honest residual); Red snaps and outranks the MF zone (CD-32)
+
+*Decision.* Window/viewport size normalization is **level-keyed**. Below Red
+(Green / Yellow) the real window is **never moved** - the user's layout stays
+free - and the inner-window / viewport size is *reported* to pages as the
+nearest common step (CD-29 ladder) to the real width, spoofing the whole
+viewport-read cluster (`innerWidth`/`innerHeight`, the root
+`clientWidth`/`clientHeight`, `visualViewport`, `outerWidth`/`outerHeight`, and
+the viewport-derived `matchMedia` features) coherently so no internal
+contradiction arises. The honest residual: a page measuring actual rendered
+pixels (a full-width element, `documentElement.scrollWidth`) can still detect
+the difference below Red - an accepted tradeoff for a weak, transient,
+low-entropy vector versus layout freedom - and it is fully closed only at Red,
+where the real window snaps (reported == real). In Red, **protection outranks
+the MF zone**: the zone shrinks to its small step so the viewport reaches the
+full common resolution (1920x1080 where the display allows) rather than the MF
+keeping its width and forcing a smaller lock (the CD-31 interplay). User-facing
+copy stays *tracking-resistance*; the residual is internal scope only (D-0044).
+
+*Why.* The user's everyday layout must stay free (no window jumping), so below
+Red we report rather than move - accepting a haircut-thin, deliberate residual
+on a minor vector. Maximum protection (Red) is the conscious mode where the real
+window snaps and the last sliver closes, and there the protection is worth more
+than the sidebar width, so the MF zone yields.
+
+*Task A - how the zone yields.* `slots::mf_step_width` takes a `red` flag and
+returns the small step (320) unconditionally while a lock is live; the bunker
+therefore reaches the full 1080p lock from **2400px** on (rail 48 + 2x56 gutters
++ 1920 + 320) instead of the ~2720 the large step demanded - the 2560 display
+CD-31 flagged now lands 1920x1080 rather than 1600x900. `frame_layout` derives
+the yield from the `locked` array it is handed rather than from a second level
+read, so the app's ladder (which sizes its `avail` against exactly this small
+step) and the layout engine cannot drift apart. Corollary, deliberate: the zone
+yields only when that **buys** the lock something - where no standard size fits
+the display at all, no lock is recorded, the array is all-`None`, and the step
+follows the nominal layout untouched. Releasing Red restores the previous
+geometry bit-for-bit (`width_units` were never modified - CD-30's rule holds).
+
+*Task B - one delta, not six spoofs.* The cluster is moved by a **single delta**
+(reported - real): `innerWidth`/`innerHeight` ARE the reported step, and every
+other member is *shifted by that same delta* rather than overwritten with an
+independent guess. Every relationship Blink actually computed therefore survives
+exactly - the scrollbar gap between `innerWidth` and the root `clientWidth`, the
+chrome gap to `outerWidth`, `visualViewport`'s sub-pixel fraction. Coherence is
+a property of the construction, not of a checklist: reporting `inner == client`
+would itself claim "no scrollbar" on every scrolling page, a tell of its own.
+
+*Task B - matchMedia is rewritten, never re-implemented.* Binary-searching the
+viewport with `(min-width: Npx)` and comparing against `innerWidth` is *the*
+classic catch for a size lie (the Brave trap), so the viewport-derived features
+must answer for the reported size. We do not parse and evaluate media queries
+ourselves: we rewrite only the numbers and hand the query back to Blink, which
+keeps `not`/`only`/`and`, unknown features and invalid-query semantics exactly
+right. A width/height threshold shifts by `-delta` (asking Blink the equivalent
+question about the *real* viewport); `aspect-ratio` and `orientation` cannot be
+shifted linearly, so they are computed from the reported size and collapse to a
+tautology / contradiction. `.matches` is re-evaluated on every read, not frozen
+at construction: the delta is a STEP function of the real width, so a threshold
+shifted once would strand after a resize crossed a rung and let matchMedia
+contradict `innerWidth` - the exact failure the rewrite exists to prevent.
+`.media` returns Blink's normalization of the query the *page* asked for, so the
+rewrite is invisible, and a change event defers `media`/`matches` to the list it
+fired on. `device-*` describes the SCREEN (already reported by the host) and is
+deliberately untouched.
+
+*Deviations / judgement calls, recorded:*
+
+1. **The reported step is a ladder ENTRY chosen by width, so the height is the
+   paired one** (a 1200x1278 column reports 1280x720, not 1280x1440). Snapping
+   each axis independently would report *less* of a lie, but it produces window
+   shapes that do not exist: portrait windows, or `innerHeight == screen.height`
+   with a width far below it ("no OS chrome, yet not fullscreen"). It also buys
+   no anonymity - `screen.*` already carries the monitor tier (CD-29 buckets it
+   up from the real viewport), so pairing costs nothing there and keeps the
+   reported window an ordinary landscape one. The vertical lie is the visible
+   price and is part of the accepted residual, not separate from it.
+2. **The rule is level-agnostic in JS.** The block always reports the nearest
+   common step; at Red the real window already IS a ladder step, so the identical
+   rule is the identity (delta 0, matchMedia untouched, reported == real). The
+   level split lives entirely at the shell layer where it belongs - no `if (red)`
+   in the injected script, and Red's residual closes without a special case.
+3. **`viewport` is its own vector** (the eleventh), per CD-29's rule that every
+   measurable vector gets a visible, settable flag - and it is the one with the
+   most site-breakage potential, so the switch is the honest thing to offer. It
+   is ON in **Green** as well as Yellow: reporting is the level rule for
+   everything below Red; only the real *snap* is Red's.
+4. **Top frame only.** An iframe's inner size is that frame's own box - reporting
+   1280x720 for a 300x250 ad slot would be incoherent and broken. A same-origin
+   child reading `top.innerWidth` reaches the top realm's patched accessor, and a
+   cross-origin child cannot read it at all, so gating on the top frame loses no
+   coverage. Likewise only the ROOT element's client box is shifted; every other
+   element keeps measuring real rendered layout.
+5. **`[Replaceable]` setters are carried over.** `innerWidth` and friends replace
+   rather than throw on assignment in WebIDL; a getter-only replacement would
+   throw in strict mode where Chrome quietly accepts.
+6. **Bounded unit gap.** Media-query thresholds in `px`/`em`/`rem` and the
+   absolute units are converted and shifted (`em`/`rem` resolve against the
+   *initial* font size - 16px, CSS Conditional - not the root's computed size,
+   and CyberDesk exposes no setting that changes it). Viewport-relative units
+   (`vw`/`vh`) are left alone and are *coherent by nature* on their own axis
+   (self-referential: the same answer for real and reported). `ch`/`ex` and
+   `calc()` thresholds are left unshifted - a vanishingly rare incoherence,
+   recorded here rather than guessed at.
+
+*Verification.* 100 Rust tests (the 2400px threshold, the yield, the
+spring-back, the no-lock-no-yield corollary, and a test pinning the injected
+ladder to `browser.rs SCREEN_LADDER` so the reported inner size can never exceed
+the reported screen) + 66 headless checks in `scripts/harden-selftest.mjs`,
+where matchMedia is cross-checked against an INDEPENDENT evaluator that only
+ever sees the real geometry - so the shift math is proved, not restated. The
+live fingerprint self-test and the look-and-feel stay Sascha's.
+
 ## D-0048 - 2026-07-15 - MF-zone width is tab-independent and steps in large/medium/small; the Red bunker is opt-in, not booted into (CD-31)
 
 *Decision.* The MF zone's width is a property of the **zone**, not the active

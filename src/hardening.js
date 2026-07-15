@@ -735,4 +735,323 @@
     });
   })();
 
+  // ============ Window size (clamp) ==========================================
+  // CD-32 (D-0049). The window/viewport size is level-keyed at the SHELL layer:
+  // below Red the real window is never moved (the user's layout stays free), at
+  // Red it snaps to a common resolution. This block is the REPORTING half, and it
+  // is deliberately level-agnostic: it reports the nearest common step of the
+  // CD-29 ladder to the real width. Below Red that is a clamp (many machines
+  // converge on one reported size); at Red the real window ALREADY IS a common
+  // step, so the very same rule is the identity — reported == real, and the
+  // residual below closes without a special case.
+  //
+  // COHERENCE is the whole point (the "Brave trap"): spoofing innerWidth while
+  // clientWidth or matchMedia still answer from the real size is itself a
+  // fingerprint — a contradiction no real browser can produce. So we move the
+  // whole cluster by ONE delta (reported − real) and shift every other member by
+  // that same delta rather than overwriting each with an independent guess. Every
+  // internal relationship Blink computed — the scrollbar gap between innerWidth
+  // and clientWidth, the chrome gap to outerWidth, visualViewport's sub-pixel
+  // fraction — survives exactly, so the cluster cannot contradict itself.
+  //
+  // HONEST RESIDUAL (internal scope, D-0044 — never surfaced as product copy):
+  // CSS layout still uses the REAL viewport, so a page that measures the rendered
+  // pixels of a full-width element (or reads documentElement.scrollWidth) can
+  // still tell reported from real below Red. That is the accepted tradeoff — a
+  // weak, transient, low-entropy vector (users resize constantly) traded for the
+  // user's layout freedom — and it is fully closed at Red, where reported == real.
+  if (FP_CONFIG.viewport) (function viewportSize() {
+    // TOP FRAME ONLY. An iframe's inner size is that frame's own box, not the
+    // user's window: reporting 1280×720 for a 300×250 ad slot would be both
+    // incoherent and broken. A same-origin child reading `top.innerWidth` reaches
+    // the TOP realm's patched accessor, so the top frame is the whole surface;
+    // a cross-origin child cannot read it at all.
+    try { if (W.top !== W) return; } catch (e) { return; }
+
+    var Win = W.Window, El = W.Element, VV = W.VisualViewport;
+    if (!Win || !Win.prototype) return;
+
+    // The ORIGINAL accessors — how we keep reading the real geometry after the
+    // public ones are patched (and the proof that a getter exists to patch).
+    function origGet(obj, name) {
+      try {
+        var d = obj && Object.getOwnPropertyDescriptor(obj, name);
+        return (d && d.get) || null;
+      } catch (e) { return null; }
+    }
+    // `innerWidth` and friends are [Replaceable] in WebIDL: assigning to them
+    // REPLACES the property rather than throwing. That setter is part of the real
+    // surface, so carry it over untouched instead of leaving a getter-only
+    // property that throws in strict mode where Chrome quietly accepts.
+    function origSet(obj, name) {
+      try {
+        var d = obj && Object.getOwnPropertyDescriptor(obj, name);
+        return (d && d.set) || undefined;
+      } catch (e) { return undefined; }
+    }
+    var _innerW = origGet(Win.prototype, "innerWidth");
+    var _innerH = origGet(Win.prototype, "innerHeight");
+    if (!_innerW || !_innerH) return;
+
+    // Own, NON-enumerable accessor — for shadowing a prototype accessor on ONE
+    // instance without the shadow showing up in Object.keys() (a real
+    // MediaQueryList enumerates nothing of its own).
+    function defOwnGet(obj, name, getter) {
+      try {
+        Object.defineProperty(obj, name, {
+          get: getter, configurable: true, enumerable: false
+        });
+        return true;
+      } catch (e) { return false; }
+    }
+
+    // The CD-29 common-resolution ladder. MUST stay identical to browser.rs
+    // SCREEN_LADDER (a Rust unit test reads this file and pins the two together),
+    // so the size we report can never drift from the screen the host reports.
+    var LADDER = [[1280, 720], [1600, 900], [1920, 1080], [2560, 1440], [3840, 2160]];
+
+    // The common step for a real inner width: the ladder entry NEAREST by width
+    // (truthful-closest — not a fixed 1920), skipping any the reported screen
+    // could not contain, so `inner <= screen` holds structurally rather than by
+    // argument. Ties go to the smaller entry (never over-report). null = the
+    // screen is smaller than every step; the caller then reports the truth.
+    function nearestStep(realW, scrW, scrH) {
+      var best = null, bd = Infinity;
+      for (var i = 0; i < LADDER.length; i++) {
+        var w = LADDER[i][0], h = LADDER[i][1];
+        if (w > scrW || h > scrH) continue;
+        var d = realW > w ? realW - w : w - realW;
+        if (d < bd) { bd = d; best = LADDER[i]; }
+      }
+      return best;
+    }
+
+    // The live reported size + the one delta the whole cluster shares. Recomputed
+    // whenever the real geometry moves (memoized on it), so a resize or a column
+    // relayout lands coherently and Red's snap collapses this to dw = dh = 0.
+    var memo = null;
+    function rep() {
+      var rw = _innerW.call(W) | 0, rh = _innerH.call(W) | 0;
+      var sc = W.screen || {}, sw = sc.width | 0, sh = sc.height | 0;
+      if (memo && memo.rw === rw && memo.rh === rh && memo.sw === sw && memo.sh === sh) {
+        return memo;
+      }
+      var s = nearestStep(rw, sw, sh);
+      var c = s ? { w: s[0], h: s[1] } : { w: rw, h: rh };
+      c.rw = rw; c.rh = rh; c.sw = sw; c.sh = sh;
+      c.dw = c.w - rw; c.dh = c.h - rh;
+      memo = c;
+      return c;
+    }
+
+    // --- the cluster ---------------------------------------------------------
+    // innerWidth/innerHeight ARE the reported step; everything else rides the
+    // same delta so its real relationship to inner survives untouched.
+    defGetSet(Win.prototype, "innerWidth", function () { return rep().w; },
+      origSet(Win.prototype, "innerWidth"));
+    defGetSet(Win.prototype, "innerHeight", function () { return rep().h; },
+      origSet(Win.prototype, "innerHeight"));
+
+    var _outerW = origGet(Win.prototype, "outerWidth");
+    var _outerH = origGet(Win.prototype, "outerHeight");
+    if (_outerW) {
+      defGetSet(Win.prototype, "outerWidth", function () {
+        return Math.max(0, (_outerW.call(W) | 0) + rep().dw);
+      }, origSet(Win.prototype, "outerWidth"));
+    }
+    if (_outerH) {
+      defGetSet(Win.prototype, "outerHeight", function () {
+        return Math.max(0, (_outerH.call(W) | 0) + rep().dh);
+      }, origSet(Win.prototype, "outerHeight"));
+    }
+
+    // The ROOT element's client box is the viewport box (minus scrollbars). Only
+    // the root: every other element must keep measuring the real rendered layout,
+    // both because that is what it is and because shifting it would corrupt every
+    // size computation on the page.
+    function isRoot(el) {
+      try { return !!el && el === W.document.documentElement; } catch (e) { return false; }
+    }
+    var _clientW = origGet(El && El.prototype, "clientWidth");
+    var _clientH = origGet(El && El.prototype, "clientHeight");
+    if (_clientW) {
+      defGetSet(El.prototype, "clientWidth", function () {
+        var real = _clientW.call(this);
+        return isRoot(this) ? Math.max(0, real + rep().dw) : real;
+      });
+    }
+    if (_clientH) {
+      defGetSet(El.prototype, "clientHeight", function () {
+        var real = _clientH.call(this);
+        return isRoot(this) ? Math.max(0, real + rep().dh) : real;
+      });
+    }
+
+    // visualViewport: the same delta keeps its (fractional, pinch-zoom aware)
+    // relationship to the layout viewport intact.
+    if (VV && VV.prototype) {
+      var _vvW = origGet(VV.prototype, "width"), _vvH = origGet(VV.prototype, "height");
+      if (_vvW) {
+        defGetSet(VV.prototype, "width", function () {
+          return Math.max(0, _vvW.call(this) + rep().dw);
+        });
+      }
+      if (_vvH) {
+        defGetSet(VV.prototype, "height", function () {
+          return Math.max(0, _vvH.call(this) + rep().dh);
+        });
+      }
+    }
+
+    // --- matchMedia ----------------------------------------------------------
+    // The classic way to catch a size lie: binary-search the viewport with
+    // (min-width: Npx) and compare against innerWidth. So the viewport-derived
+    // media features must answer for the REPORTED size — width, height,
+    // aspect-ratio and orientation. `device-*` describes the SCREEN (already
+    // reported by the host) and is deliberately left alone.
+    //
+    // We do NOT parse and evaluate media queries ourselves: we rewrite only the
+    // numbers and hand the query back to Blink, which keeps every subtlety
+    // (`not`/`only`/`and`, unknown features, invalid-query semantics) exactly
+    // right. A width/height threshold shifts by −delta — asking Blink the
+    // equivalent question about the real viewport; aspect-ratio and orientation
+    // are computed from the reported size and collapse to a tautology or a
+    // contradiction.
+    var _matchMedia = Win.prototype.matchMedia;
+    if (typeof _matchMedia !== "function") return;
+
+    var ALWAYS = "(min-width: 0px)"; // every viewport is >= 0
+    var NEVER = "(max-width: 0px)";  // no top-level viewport is <= 0
+
+    // In a media query, font-relative units resolve against the INITIAL font size
+    // (the browser default), NOT the root element's computed size — CSS
+    // Conditional §3. CyberDesk exposes no setting that changes it, so 16 is
+    // exact here. Units we cannot resolve (vw/vh, ch/ex, calc()) leave their
+    // block untouched: viewport-relative units are self-referential (they answer
+    // the same for real and reported), and the rest are vanishingly rare.
+    var UNITS = {
+      px: 1, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6,
+      pt: 96 / 72, pc: 16, em: 16, rem: 16
+    };
+    function toPx(v) {
+      var m = /^([+-]?(?:\d+\.?\d*|\.\d+))(px|in|cm|mm|q|pt|pc|em|rem)?$/i.exec(String(v).trim());
+      if (!m) return null;
+      var n = parseFloat(m[1]);
+      if (!isFinite(n)) return null;
+      if (!m[2]) return n === 0 ? 0 : null; // unitless is legal only as 0
+      var f = UNITS[m[2].toLowerCase()];
+      return f === undefined ? null : n * f;
+    }
+    function ratioOf(v) {
+      var m = /^([+-]?(?:\d+\.?\d*|\.\d+))(?:\s*\/\s*([+-]?(?:\d+\.?\d*|\.\d+)))?$/.exec(String(v).trim());
+      if (!m) return null;
+      var a = parseFloat(m[1]), b = m[2] === undefined ? 1 : parseFloat(m[2]);
+      if (!isFinite(a) || !isFinite(b) || b === 0) return null;
+      return a / b;
+    }
+    // Shift a threshold so Blink, asked about the REAL viewport, returns the
+    // answer for the REPORTED one. Clamping at zero is exact, not a fudge: a
+    // negative min-/> threshold is always true and so is 0; a negative max-/</
+    // exact threshold is never true, and neither is 0 (the viewport is > 0).
+    function shifted(value, delta) {
+      var p = toPx(value);
+      if (p === null) return null;
+      var s = p - delta;
+      if (s < 0) s = 0;
+      return (Math.round(s * 10000) / 10000) + "px";
+    }
+    function rewrite(query) {
+      var q = String(query);
+      var r = rep();
+      // Red (and any window already sitting on a step): nothing to say.
+      if (!r.dw && !r.dh) return q;
+      var dOf = function (feat) { return feat.toLowerCase() === "width" ? r.dw : r.dh; };
+
+      // orientation: portrait iff height >= width (a square is portrait).
+      q = q.replace(/\(\s*orientation\s*:\s*(portrait|landscape)\s*\)/gi, function (m0, kind) {
+        var want = kind.toLowerCase() === "portrait";
+        return ((r.h >= r.w) === want) ? ALWAYS : NEVER;
+      });
+      // aspect-ratio, classic + range form.
+      q = q.replace(/\(\s*(min-|max-)?aspect-ratio\s*:\s*([^)]+?)\s*\)/gi, function (m0, pre, val) {
+        var t = ratioOf(val);
+        if (t === null || !r.h) return m0;
+        var a = r.w / r.h, p = (pre || "").toLowerCase();
+        var ok = p === "min-" ? a >= t : p === "max-" ? a <= t : Math.abs(a - t) < 1e-9;
+        return ok ? ALWAYS : NEVER;
+      });
+      q = q.replace(/\(\s*aspect-ratio\s*(<=|>=|<|>|=)\s*([^)]+?)\s*\)/gi, function (m0, op, val) {
+        var t = ratioOf(val);
+        if (t === null || !r.h) return m0;
+        var a = r.w / r.h;
+        var ok = op === "<=" ? a <= t : op === ">=" ? a >= t : op === "<" ? a < t
+               : op === ">" ? a > t : Math.abs(a - t) < 1e-9;
+        return ok ? ALWAYS : NEVER;
+      });
+      // width/height — classic (min-/max-/exact). `device-width` cannot match:
+      // the feature name has to start right after the "(".
+      q = q.replace(/\(\s*(min-|max-)?(width|height)\s*:\s*([^)]+?)\s*\)/gi,
+        function (m0, pre, feat, val) {
+          var s = shifted(val, dOf(feat));
+          return s === null ? m0 : "(" + (pre || "") + feat + ": " + s + ")";
+        });
+      // width/height — one-sided range: (width >= 600px)
+      q = q.replace(/\(\s*(width|height)\s*(<=|>=|<|>|=)\s*([^)]+?)\s*\)/gi,
+        function (m0, feat, op, val) {
+          var s = shifted(val, dOf(feat));
+          return s === null ? m0 : "(" + feat + " " + op + " " + s + ")";
+        });
+      // width/height — two-sided range: (400px <= width <= 700px)
+      q = q.replace(/\(\s*([^<>=()]+?)\s*(<=|<|>=|>)\s*(width|height)\s*(<=|<|>=|>)\s*([^<>=()]+?)\s*\)/gi,
+        function (m0, lo, op1, feat, op2, hi) {
+          var d = dOf(feat), a = shifted(lo, d), b = shifted(hi, d);
+          return (a === null || b === null) ? m0
+            : "(" + a + " " + op1 + " " + feat + " " + op2 + " " + b + ")";
+        });
+      // width/height — boolean: (width) is true iff non-zero, and the top-level
+      // viewport always is.
+      q = q.replace(/\(\s*(width|height)\s*\)/gi, function () { return ALWAYS; });
+      return q;
+    }
+
+    var OURS = new WeakSet();
+    def(Win.prototype, "matchMedia", function (query) {
+      var mql = _matchMedia.call(W, rewrite(query));
+      try {
+        // `.media` must serialize the query the PAGE asked for, never our
+        // rewrite. Blink's own normalization of the original is the exact answer.
+        var canonical = _matchMedia.call(W, String(query)).media;
+        defOwnGet(mql, "media", function () { return canonical; });
+        // `.matches` must be LIVE: the delta moves when the window crosses a
+        // rung, which would strand a threshold frozen at construction time and
+        // let matchMedia contradict innerWidth. Re-ask on every read.
+        defOwnGet(mql, "matches", function () {
+          return _matchMedia.call(W, rewrite(query)).matches;
+        });
+        OURS.add(mql);
+      } catch (e) {}
+      return mql;
+    });
+
+    // A change event carries its own `media`/`matches` snapshot — defer both to
+    // the list they fired on, so an event can never contradict a live read.
+    var MQLE = W.MediaQueryListEvent;
+    if (MQLE && MQLE.prototype) {
+      var _evMedia = origGet(MQLE.prototype, "media");
+      var _evMatch = origGet(MQLE.prototype, "matches");
+      if (_evMedia) {
+        defGetSet(MQLE.prototype, "media", function () {
+          try { if (OURS.has(this.target)) return this.target.media; } catch (e) {}
+          return _evMedia.call(this);
+        });
+      }
+      if (_evMatch) {
+        defGetSet(MQLE.prototype, "matches", function () {
+          try { if (OURS.has(this.target)) return this.target.matches; } catch (e) {}
+          return _evMatch.call(this);
+        });
+      }
+    }
+  })();
+
 })();
