@@ -77,21 +77,48 @@ feathered compositing, and an isolated in-shell settings surface.
   coherent **tracking-resistance** — it breaks cross-site and cross-session
   linkability while keeping every exposed value mutually consistent; IP anonymity
   is the built-in per-window Tor layer above, and the two compose.
-* **Hardening controls — global + per-window, safety-gated (CD-25, D-0040):** the
-  hardening is now visible and configurable. Settings has a **global preset**
-  (**Off** / **Standard** / **Strict**, default Standard) that applies to every window,
-  plus a **Custom** detail view for per-vector control (canvas, WebGL, audio, layout &
-  text metrics, CPU & memory, fonts). Each window can **override** its own level from a
-  floating fingerprint control beside its Tor/close icons — inherit the global, or pick
-  Standard / Strict / Off — with the level, inherited-vs-override, and any **reduced**
-  state shown honestly (a reduced window reads as a warning). The **preset path is the
-  default** (a unique per-vector toggle combination is itself a fingerprint, so the safe
-  coherent presets stay primary). Any action that **weakens** protection — Off, dropping
-  a vector, entering custom — shows an honest trackability warning and needs **two
-  confirmations** before it applies; **strengthening is instant and ungated**. The gate
-  informs and confirms but never forbids: it is also the developer escape hatch (fully
-  disable any one protection to debug). Every label stays **tracking-resistance, never
-  anonymity**, and no control claims to hide the OS/UA/platform.
+* **Hardening controls — global + per-window, safety-gated (CD-25, D-0040; CD-30,
+  D-0047):** the hardening is visible and configurable. Settings has a **global preset**
+  (the **Ampel** levels below — **Off** / **Green** / **Yellow** / **Red**, default
+  **Green**) that applies to every window, plus a **Custom** detail view for per-vector
+  control. Each window can **override** its own level from a floating control beside its
+  Tor/close icons — inherit the global, or pick its own — with the level,
+  inherited-vs-override, and any **reduced** state shown honestly (a reduced window reads
+  as a warning). The **preset path is the default** (a unique per-vector toggle
+  combination is itself a fingerprint, so the safe coherent presets stay primary). Any
+  action that **weakens** protection — Off, a step down the Ampel, dropping a vector,
+  entering custom — shows an honest trackability warning and needs **two confirmations**
+  before it applies; **strengthening is instant and ungated**. The gate informs and
+  confirms but never forbids: it is also the developer escape hatch (fully disable any one
+  protection to debug). Every label stays **tracking-resistance, never anonymity**, and no
+  control claims to hide the OS/UA/platform.
+* **The Ampel — one graded protection control (CD-30, D-0047):** the traffic light is the
+  primary way protection is set and read. **Green** — the everyday default — runs the
+  coherent core: every vector except the clock, media/codec and math clamps, so it costs
+  you no layout and no timing. **Yellow** adds those three. **Red** is the maximum: every
+  vector at its tight buckets, plus the window lock below. **Off** stays behind the gate.
+  The Ampel lives in the permanent HUD and in settings, and each window's own icon is a
+  **mini traffic light** for that window's effective level. Green < Yellow < Red is a
+  strict order: stepping **up** applies instantly, every step **down** goes through the
+  two-confirmation gate. The earlier preset names survive as aliases of identical content
+  (a persisted *Standard* reads as Yellow, *Strict* as Red), so an upgrade never silently
+  changes a choice you made.
+* **Red locks the window (CD-30, D-0047; CD-31, D-0048):** at Red a window's viewport
+  snaps to a standard size — 1920×1080, laddered down (1600×900, 1280×720) to the largest
+  the frame holds — vertically centered and **locked** while Red is live; unlocked
+  neighbors absorb the space. Reported screen and viewport then agree exactly, so the
+  window reads like a fullscreen browser on an ordinary machine. Everyday sizing outside
+  Red stays completely free, and your column layout returns by construction the moment you
+  step down. Red is always a **deliberate in-session choice**: a saved Red boots into
+  Yellow — full protection, freely resizable — never into a locked window you didn't ask
+  for. If not even the smallest standard size fits the display, the level and its vectors
+  are unaffected and the window honestly stays zone-sized.
+* **The HUD — status that is always true (CD-30, D-0047):** a permanent transparent
+  readout floats top-right: a digital clock in your local time, the global Ampel, the
+  active window's route (**Clearnet** / **Tor**), the honest count of **vectors active**,
+  and the identity countdown / age. Every field is painted from the host's resolved
+  config — the same one the render processes receive — so the HUD reports the protection
+  that is actually running, never a state that isn't.
 * **The complete fingerprint surface — every vector solved and settable (CD-29,
   D-0045; CD-32, D-0049):** the surface is now exhaustive. Eleven independent vectors —
   canvas, WebGL readback, **GPU identity**, audio, layout & text metrics, **device
@@ -107,8 +134,8 @@ feathered compositing, and an isolated in-shell settings surface.
   nearest common step to your real column, as one coherent cluster —
   `innerWidth`/`innerHeight`, the root client box, `visualViewport` and `matchMedia` all
   agree, so no internal contradiction gives it away. Your layout is never touched for it:
-  the window itself only ever snaps at the **highest protection level** (D-0049), where
-  the reported size becomes the real one. Presets stay the coherent primary path; the
+  the window itself only ever snaps at **Red** (D-0049), where the reported size becomes
+  the real one. Presets stay the coherent primary path; the
   safety gate still fires on any weakening.
 * **New identity — on demand, on a timer, or every launch (CD-29, D-0046):** a rotation
   re-seeds the whole farble basis, producing a fresh, unlinkable fingerprint. **New
@@ -259,9 +286,10 @@ feathered compositing, and an isolated in-shell settings surface.
   Tor for that window, and a **close icon** that closes that window (the last window
   refuses). These consolidate the scattered CD-15 Tor glyph and the CD-12
   corner-hover close into two clear controls. **CD-25** adds a third: a **tracking-
-  resistance icon** (a fingerprint glyph) that opens this window's hardening level
-  chooser and shows its effective level (neutral for Standard, accent for Strict, warn
-  for a reduced/off window, with an override marker when it differs from the global).
+  resistance icon** that opens this window's protection chooser and shows its effective
+  level — **CD-30** makes it a **mini Ampel** (the lamp for the live level lights green,
+  yellow or red; Off leaves them dark; a reduced or off window is warn-tinted, with an
+  override marker when it differs from the global).
   **CD-29** grows that menu into the window's full identity control: **New identity
   now**, a per-vector **Custom** detail, and a **screen-size** cycler — all per-window.
 
