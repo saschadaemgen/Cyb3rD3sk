@@ -15,7 +15,7 @@ use std::sync::{Mutex, OnceLock};
 
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// History is capped at this many rows; the oldest are pruned on each insert
 /// (D-0014). Local only — no sync, no export.
@@ -82,7 +82,16 @@ impl Store {
 
     fn from_connection(conn: Connection) -> Self {
         let store = Self { conn };
+        // CD-33 (D-0050): pin the temp schema to RAM before anything can use it. This
+        // is what makes the session's `history` table (create_ram_history) memory-only,
+        // and it also keeps SQLite from spilling sorter/index scratch for ANY query
+        // into a temp FILE next to the database — an anti-forensic win beyond history.
+        store
+            .conn
+            .pragma_update(None, "temp_store", "MEMORY")
+            .expect("failed to pin sqlite temp storage to memory");
         store.migrate();
+        store.create_ram_history();
         store.seed_defaults();
         store
     }
@@ -193,9 +202,50 @@ impl Store {
                 )
                 .expect("failed to migrate to schema v6 (session_slots + per-slot mode)");
         }
+        if version < 7 {
+            // CD-33 (D-0050): history is BROWSING CONTENT, so it must not live on
+            // disk. Drop the persisted table — which also PURGES every URL + title a
+            // prior build recorded — and re-create it per session in RAM (see
+            // `create_ram_history`). Same shape as the v5 drop (D-0025), for the same
+            // reason: the privacy reversal has to take the existing rows with it, or
+            // the residue outlives the decision.
+            //
+            // `favorites` deliberately stays on disk: a favorite is an explicit user
+            // act (Ctrl+D), not a trace of where you have been — the bookmark/history
+            // split every ephemeral browser makes.
+            self.conn
+                .execute_batch(
+                    "DROP INDEX IF EXISTS idx_history_last_visit;
+                     DROP TABLE IF EXISTS history;",
+                )
+                .expect("failed to migrate to schema v7 (history off disk)");
+        }
         self.conn
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .ok();
+    }
+
+    /// Create this session's RAM-only `history` table (CD-33, D-0050).
+    ///
+    /// A TEMP table lives in the connection's temp schema, which `temp_store =
+    /// MEMORY` (set in [`Store::from_connection`]) pins to RAM — so history is never
+    /// written to disk and dies with the process, exactly like the cache and cookies
+    /// now do. SQLite resolves an unqualified name against temp BEFORE main, so every
+    /// existing history query keeps working untouched; there is no `main.history` left
+    /// for them to hit (v7 dropped it).
+    fn create_ram_history(&self) {
+        self.conn
+            .execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS history (
+                     url         TEXT PRIMARY KEY,
+                     title       TEXT NOT NULL DEFAULT '',
+                     last_visit  INTEGER NOT NULL,
+                     visit_count INTEGER NOT NULL DEFAULT 1
+                 );
+                 CREATE INDEX IF NOT EXISTS temp.idx_history_last_visit
+                     ON history (last_visit);",
+            )
+            .expect("failed to create the in-memory history table");
     }
 
     fn seed_defaults(&self) {
@@ -631,6 +681,93 @@ fn like_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CD-33 (D-0050): history must live in the RAM-only temp schema, never on disk.
+    /// Asserted through sqlite's own catalogs rather than by trusting the pragma:
+    /// `temp.sqlite_master` must own `history`, and `main` must not.
+    #[test]
+    fn history_lives_in_ram_not_on_disk() {
+        let s = Store::open_in_memory();
+
+        let in_temp: i64 = s
+            .conn
+            .query_row(
+                "SELECT count(*) FROM temp.sqlite_master WHERE type='table' AND name='history'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(in_temp, 1, "history must be a TEMP (in-memory) table");
+
+        let in_main: i64 = s
+            .conn
+            .query_row(
+                "SELECT count(*) FROM main.sqlite_master WHERE type='table' AND name='history'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(in_main, 0, "history must NOT exist in the on-disk schema");
+
+        // temp_store=MEMORY (2) is what keeps the temp schema off the filesystem; a
+        // file-backed temp store would put history right back on disk.
+        let temp_store: i64 = s
+            .conn
+            .query_row("PRAGMA temp_store", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(temp_store, 2, "sqlite temp storage must be pinned to MEMORY");
+    }
+
+    /// A visit still records and still surfaces in the palette — history works
+    /// exactly as before within the session; only its persistence is gone.
+    #[test]
+    fn ram_history_still_records_and_suggests() {
+        let s = Store::open_in_memory();
+        s.record_visit("https://example.org/page", "A Page");
+
+        let hits = s.query_suggestions("example", 6);
+        assert_eq!(hits.len(), 1, "the visit must be suggestible in-session");
+        assert_eq!(hits[0].url, "https://example.org/page");
+        assert!(!hits[0].favorite);
+    }
+
+    /// The v7 migration must PURGE a prior build's on-disk history, not just stop
+    /// writing new rows — residue that outlives the decision defeats the point.
+    /// Drives a real v6-shaped database with a row already in it.
+    #[test]
+    fn v7_migration_purges_previously_persisted_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE history (
+                 url TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '',
+                 last_visit INTEGER NOT NULL, visit_count INTEGER NOT NULL DEFAULT 1
+             );
+             INSERT INTO history (url, title, last_visit, visit_count)
+                 VALUES ('https://old.example/secret-page', 'Old', 1, 3);
+             PRAGMA user_version = 6;",
+        )
+        .unwrap();
+
+        // Sanity: the row is really there in the on-disk schema before migrating.
+        let before: i64 = conn
+            .query_row("SELECT count(*) FROM main.history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before, 1);
+
+        let s = Store::from_connection(conn);
+
+        let leftover: i64 = s
+            .conn
+            .query_row(
+                "SELECT count(*) FROM main.sqlite_master WHERE type='table' AND name='history'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftover, 0, "the persisted history table must be dropped");
+        // And the session starts with an empty RAM history — the old URL is gone.
+        assert_eq!(s.query_suggestions("old.example", 6).len(), 0);
+    }
 
     /// Two distinct pages favorited in sequence must both persist (no collapse to
     /// one), and the empty-input palette query — the surface the reveal shows —
