@@ -2,6 +2,70 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0051 - 2026-07-18 - Permanent browsing-residue purge (allowlisted, every launch, settable); zeroize/memory-lock deferred to the vault (CD-34)
+
+*Decision.* On every launch, before CEF opens the profile, CyberDesk purges the
+browsing cache/profile directory — a **standing** safety net, not a one-time cleanup.
+It clears the legacy residue CD-33 left behind (the measured ~79 MB profile older
+builds wrote) and re-cleans any *future* accidental disk leak, so "browsing never
+survives on disk" holds even if something upstream regresses. It is strictly
+**allowlisted to exactly one path** — the CEF `root_cache_path`,
+`<exe_dir>/cyberdesk-cache` — and never touches the Tor state dir (kept for
+anonymity), the saved session (CD-21), or config; those live in a disjoint tree
+(`%LOCALAPPDATA%\CyberDesk`). It is a **global**, visible settings option (default ON)
+with honest information and a **live on-disk-footprint + last-purge readout**;
+disabling it is a weakening routed through the D-0040 confirmation gate (host
+re-validated), re-enabling is immediate. Zeroize and memory-lock (CD-33 Tasks C/D)
+are **deferred to the vault stack** and built/tested against a real secret then; no
+`SecretBuf` is built now as dead infrastructure.
+
+*Why.* CD-33 stopped new writes but left legacy residue and could regress. A permanent
+allowlisted purge makes the Tier-1 anti-forensic guarantee true and durable on the real
+machine — CD-33 acceptance #1 (a clean filesystem scan) can only pass once the residue
+is actually cleared — while stated as a visible, honest, settable control rather than a
+silent background wipe.
+
+*The allowlist is one directory, on purpose.* The purge deletes the whole
+`cyberdesk-cache` directory rather than a curated list of sub-paths. That directory is
+created and owned entirely by CEF for the browsing profile, its caches, and Chromium
+component data; the app writes nothing of its own there (verified: every top-level entry
+is CEF/Chromium's, e.g. `Local State`, `first_party_sets.db` — the app's own config is
+`state.db` under a different tree). A sub-path allowlist would drift as CEF's on-disk
+layout changes between versions and could silently miss a future leak — the exact
+failure mode CD-33 was about. One known top-level directory, entirely ours-via-CEF and
+provably disjoint from everything protected, is both a *strict* allowlist (of one entry)
+and the *strongest* guarantee. CEF recreates it clean on init — proven by CD-33's probe,
+which ran from an empty dir every time. A defense-in-depth guard
+(`forensic::is_safe_purge_target`) additionally refuses to delete anything that is not an
+absolute path whose final component is exactly `cyberdesk-cache` with a real parent — so
+a future refactor bug can never aim `remove_dir_all` at the exe dir or a root; if in
+doubt it flags rather than deletes. The path is derived in ONE place
+(`forensic::browsing_cache_root`, which `browser::init_cef` also uses), so the directory
+CEF writes to and the directory purged can never drift apart.
+
+*On-launch only, by necessity.* The purge runs before `init_cef`. Once CEF opens the
+profile it holds OS locks on those files, so a mid-session wipe would fail or corrupt —
+before init is the only safe moment, and it is sufficient: this session's browsing lives
+in RAM (CD-33), so the on-disk profile only ever holds regenerable scaffolding until the
+next launch clears it. Consequently the footprint readout is honest about two distinct
+numbers: **last-launch purge** (what was found and cleared) and **on disk now** (the live
+working profile — no browsing content, wiped next launch). Both are measured, never
+asserted — truthful by construction, in the spirit of the `N/10 vectors` readout.
+
+*C/D deferral, recorded.* The only key the app holds today is the fingerprinting seed,
+and it is deliberately plaintext-on-disk in `state.db` when rotate-on-restart is off
+(a stable cross-launch identity, CD-29). Zeroizing and memory-locking its RAM copy while
+it sits in plaintext on disk by design would be theater — it would look like protection
+and provide none. There is no vault yet, and Tor's keys are arti's. So Tasks C/D land
+with the vault stack, built and tested against a real secret; nothing is built now as
+dead infrastructure (CD-33 acceptance #3 stays honestly vacuous until then — there is no
+secret to lock).
+
+*Settings surface direction.* The card is meant to grow into a large, sectioned,
+extensible control panel (future vault, NetGuard, …). This option is placed as its own
+titled section rather than another flat row, keeping the structure ready to extend
+without over-building a framework now.
+
 ## D-0050 - 2026-07-16 - Anti-forensic in-memory browsing (phase 1): browsing content is RAM-only; Tor state and session layout persist by design (CD-33)
 
 *Decision.* Browsing content (cache, cookies, history, decoded content) **never

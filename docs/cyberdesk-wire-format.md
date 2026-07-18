@@ -24,8 +24,11 @@ Transport: `window.cefQuery({ request, persistent: false, onSuccess, onFailure }
 ### `get_settings` (view -> host)
 
 - Request: `{"cmd":"get_settings"}`
-- Success: `{"feather_edges":<bool>,"animated_background":<bool>,"stay_foreground":<bool>,"glow_intensity":<int>,"search_engine":<str>,"tor_enabled":<bool>,"tor_default":<bool>,"fp_preset":<str>,"fp_custom":{…}}`
-  (`tor_enabled` / `tor_default` added in CD-15; `fp_preset` / `fp_custom` in CD-25.)
+- Success: `{"feather_edges":<bool>,"animated_background":<bool>,"stay_foreground":<bool>,"purge_residue":<bool>,"glow_intensity":<int>,"search_engine":<str>,"tor_enabled":<bool>,"tor_default":<bool>,"fp_preset":<str>,"fp_custom":{…}}`
+  (`tor_enabled` / `tor_default` added in CD-15; `fp_preset` / `fp_custom` in CD-25;
+  `purge_residue` in CD-34.)
+  - `purge_residue` (default true) — the on-launch browsing-residue purge (CD-34,
+    D-0051).
   - `glow_intensity` is a whole percent (50..=220).
   - `search_engine` ∈ { `google`, `duckduckgo`, `bing`, `startpage`, `brave` }
     (CD-07; CD-27/D-0043 added `brave` and flipped the factory default to
@@ -40,9 +43,13 @@ Transport: `window.cefQuery({ request, persistent: false, onSuccess, onFailure }
 
 ### `set_setting` (view -> host)
 
-- Request: `{"cmd":"set_setting","key":"<key>","value":<bool|int|str>}`
+- Request: `{"cmd":"set_setting","key":"<key>","value":<bool|int|str>[,"confirm":<bool>]}`
 - Writable keys and their value types:
   - `feather_edges`, `animated_background`, `stay_foreground` — boolean.
+  - `purge_residue` — boolean (CD-34, D-0051); the on-launch browsing-residue purge.
+    Default true. Setting it to `false` is a WEAKENING and requires `"confirm":true`
+    (the host re-validates the D-0040 gate, code 3 without it); setting it `true` is
+    immediate. See `get_residue_footprint` for the live readout.
   - `glow_intensity` — number (whole percent; accepts a JSON number or a numeric
     string, clamped host-side to 50..=220).
   - `search_engine` — string (CD-07); one of `google`, `duckduckgo`, `bing`,
@@ -69,6 +76,22 @@ CD-05 (D-0012) renamed the background toggle `deep_field` -> `animated_backgroun
 (it now governs whichever background the template selects) and added the numeric
 `glow_intensity`; the store migrates the old key. Unknown commands are rejected
 with code 4. There is no passthrough channel.
+
+### `get_residue_footprint` (view -> host, CD-34, D-0051)
+
+The anti-forensic on-disk readout — the live browsing-cache footprint plus what the
+last launch purge did. Read-only, truthful by construction (both sizes are measured).
+
+- Request: `{"cmd":"get_residue_footprint"}`
+- Success: `{"enabled":<bool>,"on_disk_bytes":<int>,"on_disk_human":<str>,"last_purge":{"ran":<bool>,"found_bytes":<int>,"found_human":<str>,"cleared":<bool>,"error":<str|null>}}`
+  - `enabled` — whether the on-launch purge is on (the `purge_residue` setting).
+  - `on_disk_*` — the CURRENT size of the browsing-cache/profile directory: the
+    working profile CEF scaffolds while running. It holds no browsing content (that
+    is RAM-only, CD-33) and is wiped at the next launch.
+  - `last_purge` — what the launch purge did: `ran` (was it enabled), `found_bytes`
+    (residue found before deleting), `cleared` (target removed), `error` (a non-fatal
+    message if it could not fully complete, else null).
+- Failure: code 1 (malformed request JSON).
 
 ### `set_hardening` (view -> host, CD-25; vectors extended CD-29; Ampel CD-30)
 

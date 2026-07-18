@@ -161,14 +161,21 @@ Residuals, precisely:
   window. Zeroize applies to *our* memory, not Chromium's.
 - **The profile directory still exists** under `root_cache_path`. CEF persists
   installation-specific data there by design and Chromium instantiates its primary
-  profile regardless of what our views use. Post-fix it is **empty scaffolding**: a
-  `History` file with zero rows, a `Cookies` file with zero rows, and no occurrence of
+  profile regardless of what our views use. During a session it is **empty scaffolding**:
+  a `History` file with zero rows, a `Cookies` file with zero rows, and no occurrence of
   any visited host anywhere beneath it (measured). It is not browsing content, but it
-  is not *nothing* — a scan will still show Chromium-shaped filenames.
-- **Pre-existing residue is not retroactively purged.** The fix stops the writing; it
-  does not delete what earlier builds already wrote (on the development machine that
-  was 79 MB of cache, 21 URLs / 254 visits, and 36 cookies). `state.db`'s history *is*
-  purged by the v7 migration, but the CEF profile residue needs a one-time wipe.
+  is not *nothing* — a scan mid-session will still show Chromium-shaped filenames. **CD-34
+  (D-0051) wipes the whole directory on every launch**, so across launches even this
+  scaffolding does not persist.
+- **Pre-existing residue — CLOSED by CD-34 (D-0051).** CD-33 stopped the writing but did
+  not delete what earlier builds already wrote (on the development machine, 79 MB of
+  cache, 21 URLs / 254 visits, 36 cookies). `state.db`'s history was purged by the v7
+  migration; the CEF profile residue is now cleared by the **standing on-launch purge** —
+  allowlisted to the one `cyberdesk-cache` directory, never touching Tor state, session,
+  or config. It is also a regression backstop: any future accidental disk leak survives
+  at most one session. The purge runs before `init_cef` (the only moment CEF does not
+  hold the profile's files open) and is a global, settable option (default ON) with a
+  live footprint readout; turning it off routes through the D-0040 gate.
 - **The pagefile is addressed by keeping secrets out of it, not by disk encryption.**
   Disk encryption is transparent on a running, unlocked machine and is therefore *not*
   the control against a running-system attacker; the control is that sensitive data
