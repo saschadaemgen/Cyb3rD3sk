@@ -90,6 +90,41 @@
       </div>
     </section>
 
+    <!-- On-disk privacy (CD-34, D-0051). Browsing content is RAM-only (CD-33); this
+         net wipes any cache/profile residue that reached disk, on every launch, so
+         nothing browsed survives there — even if something upstream ever regresses.
+         Copy rule (D-0044): state what it does, confidently and accurately; never a
+         competitor pointer, never self-deprecation. -->
+    <section class="rows tor-section" aria-label="On-disk privacy">
+      <h2 class="section-head">On-disk privacy <span id="residue-pill" class="tor-status"></span></h2>
+
+      <div class="row">
+        <div class="label">
+          <span class="name">Purge browsing residue on launch</span>
+          <span class="hint">Wipe any browsing cache or content that reached disk, every launch</span>
+        </div>
+        <div class="switch" data-key="purge_residue" role="switch" tabindex="0" aria-checked="false">
+          <span class="knob"></span>
+        </div>
+      </div>
+
+      <!-- Live status + confidence readout (truthful by construction: both numbers are
+           measured, never asserted). "On disk now" is the working profile CEF scaffolds
+           while running; it holds no browsing content and is wiped at the next launch. -->
+      <dl class="tor-info">
+        <div><dt>Last launch</dt><dd id="residue-last">—</dd></div>
+        <div><dt>On disk now</dt><dd id="residue-now">—</dd></div>
+      </dl>
+
+      <p class="honesty">Everything you browse lives only in memory and is gone when
+      CyberDesk closes. As a standing safeguard, each launch also wipes any browsing
+      cache or content that ever reached the disk — so <strong>nothing you browsed
+      survives on disk</strong>, even if an update ever wrote some by accident. It only
+      ever touches the browsing profile: your <strong>Tor state</strong> (so its
+      protection carries across restarts) and your <strong>saved session</strong> are
+      never touched.</p>
+    </section>
+
     <!-- Per-window Tor (CD-15). Copy rule (D-0044): state what it does, confidently
          and accurately — never a competitor pointer, never self-deprecation. -->
     <section class="rows tor-section" aria-label="Tor">

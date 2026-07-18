@@ -43,9 +43,30 @@
   function toggle(el) {
     var key = el.dataset.key;
     var next = !el.classList.contains("on");
+    // Turning OFF the on-launch residue purge weakens the anti-forensic guarantee
+    // (residue would accumulate on disk), so it routes through the honest two-
+    // confirmation gate (D-0040) — the host re-validates it too. Turning it back on
+    // is immediate. Every other toggle is a plain flip.
+    if (key === "purge_residue" && !next) {
+      openGate({
+        title: "Stop purging browsing residue?",
+        body: "With this off, any browsing cache or content that reaches the disk " +
+          "<strong>stays there</strong> and builds up across launches, so what you browsed " +
+          "could be recovered from the disk later. Browsing still runs in memory — but the " +
+          "disk safety net is gone. Keep it on unless you have a specific reason."
+      }, function () {
+        paint(key, false);
+        setStatus("");
+        query({ cmd: "set_setting", key: key, value: false, confirm: true })
+          .then(refreshResidue)
+          .catch(function (err) { paint(key, true); setStatus(String(err), true); });
+      });
+      return;
+    }
     paint(key, next);
     setStatus("");
     query({ cmd: "set_setting", key: key, value: next })
+      .then(function () { if (key === "purge_residue") refreshResidue(); })
       .catch(function (err) {
         paint(key, !next);
         setStatus(String(err), true);
@@ -424,6 +445,7 @@
       paint("feather_edges", s.feather_edges);
       paint("animated_background", s.animated_background);
       paint("stay_foreground", s.stay_foreground);
+      paint("purge_residue", s.purge_residue);
       paint("tor_default", s.tor_default);
       paint("tor_enabled", s.tor_enabled);
       paint("rotate_on_restart", s.rotate_on_restart);
@@ -441,6 +463,41 @@
       paintFp();
     })
     .catch(function (err) { setStatus(String(err), true); });
+
+  // On-disk privacy readout (CD-34): the live browsing footprint + what the last
+  // launch purge did. Truthful by construction — both numbers arrive measured from the
+  // host, never asserted. Refreshed on load, after a toggle, and on a slow poll.
+  var residuePill = document.getElementById("residue-pill");
+  var residueLast = document.getElementById("residue-last");
+  var residueNow = document.getElementById("residue-now");
+  function refreshResidue() {
+    return query({ cmd: "get_residue_footprint" }).then(function (r) {
+      var j;
+      try { j = JSON.parse(r); } catch (x) { return; }
+      var lp = j.last_purge || {};
+      var last;
+      // lp.error is a self-describing sentence from the host (refused / could-not-resolve /
+      // could-not-fully-clear), so it renders verbatim — no framing that would mislabel a
+      // never-ran case as "incomplete" or double the phrasing.
+      if (!lp.ran) last = "purge is off — residue accumulates on disk";
+      else if (lp.error) last = lp.error;
+      else if (lp.found_bytes > 0) last = "cleared " + lp.found_human + " of browsing residue";
+      else last = "no residue found — clean";
+      if (residueLast) residueLast.textContent = last;
+      // The live profile is CEF's working scaffolding; it holds no browsing content
+      // (that stays in RAM) and is wiped at the next launch. Say so, plainly.
+      if (residueNow) {
+        residueNow.textContent = j.on_disk_human +
+          " — working profile, wiped next launch (holds no browsing content)";
+      }
+      if (residuePill) {
+        residuePill.textContent = j.enabled ? "on" : "off";
+        residuePill.className = "tor-status s" + (j.enabled ? 1 : 3);
+      }
+    }).catch(function () {});
+  }
+  refreshResidue();
+  setInterval(refreshResidue, 3000);
 
   // Tor engine status readout (CD-15): polled while the settings page is open.
   // On failure the engine reports a concrete reason (timeout, bad dir, …) —
