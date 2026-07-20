@@ -5,6 +5,46 @@ Living document - maintained by Claude Code (CC), updated in the same
 commit-set as the change it records (D-0053). Append-only: historical entries
 are never rewritten; a superseded decision gets a new D-number forward.
 
+## D-0056 - 2026-07-20 - README is product-facing, not a changelog; badge row; AGPL-3.0 open core (CD-39)
+
+*Decision.* The README is a polished, product-facing document (intro, features
+with shipped/planned marked, security/privacy with honest scope, editions/
+license, lineage, build, status) with a static badge row at the top — not a
+per-ticket technical log. Per-ticket history lives in the season protocols and
+`decisions.md`, not the README. License references across the repo are made
+consistent with the **AGPL-3.0 `LICENSE`** (open core) plus the commercial
+Professional edition: the `LICENSE` file (AGPL-3.0, added by Sascha) is
+committed; `NOTICE`, the source-file headers (`main.rs`, `forensic.rs`,
+`fsprobe.rs`, `build.rs` — "All rights reserved." → an `AGPL-3.0-only` SPDX
+line), the architecture-doc front matter, and CLAUDE.md's platform line are all
+aligned from the old "proprietary" framing to AGPL open core. Confident + honest
+copy (D-0044): no competitor references, no self-deprecation, bounded engineering
+limits stay in the internal docs.
+
+Badges are **static shields.io** only (they render on a private repo via
+GitHub's image proxy, no CI/token needed): license AGPL-3.0, platform Windows
+(Linux "planned" stated in text, not a badge), built with Rust, engine Chromium
+149, edition open core + Pro, status in development. **No** build-passing /
+coverage / version badge — the repo is private with no CI surface, so such a
+badge could not be honestly backed.
+
+Note (append-only, historical entries untouched): D-0005 ("No GPL linking in the
+proprietary core", 2026-07-08) predates this license change; its "proprietary
+core" framing is superseded here (the open core is now AGPL-3.0), but its
+engineering rule — the open core avoids third-party strong-copyleft *linking* so
+the commercial edition stays possible — still holds. The historical entry stays
+as written. SPDX chosen as `AGPL-3.0-only` (not `-or-later`) to faithfully match
+the AGPLv3 text present, without over-granting a future-version clause Sascha did
+not state. **D-0055 is reserved for the CD-37 onion-hosting-probe work** (per the
+CD-38 report) so the two do not collide; CD-39 took the next free number, D-0056.
+
+*Why.* The prior README read like a build log — poor as a product's front page.
+A product-facing structure with honest badges and clear shipped/planned marking
+presents the project accurately and well, and keeping the changelog out of the
+README removes a recurring staleness/drift surface. Aligning every license
+reference to the AGPL-3.0 `LICENSE` removes the contradiction of "proprietary"
+statements sitting beside an AGPL license file.
+
 ## D-0054 - 2026-07-20 - CD-35 regression fixed forward: onion-refusal guard no longer stalls the UI (CD-38)
 
 *Decision.* The CD-35 request-intercept layers (address-bar reroute, per-slot

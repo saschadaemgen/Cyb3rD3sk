@@ -89,7 +89,10 @@ never persisted — onion browsing leaves no disk trace.
 
 Shipped scope is **open `.onion` addresses** (client only). Later phases, named
 and deferred: Onion-Location auto-switch, client authentication, `.onion`
-certificate/TLS handling. Not planned: onion-service hosting.
+certificate/TLS handling. Onion-service **hosting** (serving a `.onion`, not
+just visiting) was out of scope through CD-35 and is now **under evaluation** —
+an isolated, env-gated feasibility probe (CD-37; the formal decision lands with
+that ticket's D-number). It remains client-only in shipped builds.
 
 ## Anonymity-set scope note (CD-28, D-0044)
 
