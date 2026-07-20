@@ -1418,8 +1418,17 @@ impl Shell {
         let rot_interval = crate::settings::rotate_interval_min();
         let epoch = browser::rotation_epoch();
         let tz_offset = local_utc_offset_minutes();
+        // Vault status for the tile (CD-40 1c). While the HUD exists the gate
+        // is open, so the honest states are: no vault / unlocked / dev bypass.
+        let vault = if crate::vault::is_unlocked() {
+            "unlocked"
+        } else if crate::vault::has_vault() {
+            "bypassed" // a vault exists but no VMK → only the debug bypass gets here
+        } else {
+            "none"
+        };
         let sig = format!(
-            "{}|{vec_on}|{reduced}|{active_pos}|{active_tor}|{active_onion}|{rot_auto}|{rot_interval}|{epoch}|{tz_offset}",
+            "{}|{vec_on}|{reduced}|{active_pos}|{active_tor}|{active_onion}|{rot_auto}|{rot_interval}|{epoch}|{tz_offset}|{vault}",
             level.as_str()
         );
         if sig == self.hud_sig {
@@ -1444,6 +1453,7 @@ impl Shell {
                 "elapsed_ms": if rot_auto { self.rot_anchor.elapsed().as_millis() as u64 } else { 0 },
             },
             "identity_age_ms": browser::identity_age_ms(),
+            "vault": vault,
         })
         .to_string();
         browser::set_hud_state(&payload);

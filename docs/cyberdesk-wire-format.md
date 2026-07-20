@@ -1,6 +1,6 @@
 # CyberDesk - Wire Format
 
-Project CARVILON CyberDesk - living document - Status: 2026-07-21 (through CD-40 Stage 1b / D-0059)
+Project CARVILON CyberDesk - living document - Status: 2026-07-21 (through CD-40 Stage 1c / D-0060)
 Maintained by Claude Code (CC), updated in the same commit-set as the code it describes (D-0053).
 
 Rule: every interface change is documented here in the same commit-set as the
@@ -615,6 +615,13 @@ the count changes). Payload:
 - `bypassed` — debug-build dev bypass active (gate skipped, sealed state stays sealed).
 - `broken` — the vault file exists but failed validation; the gate stays
   closed and unlock cannot succeed (fail-closed).
+- `methods` (1c) — the enrolled methods: `[{id, kind, label, created_ms,
+  removable}]`; `removable` is true only for hardware methods (the never-brick
+  floor: passphrase and recovery key are not removable).
+- `kdf` (1c) — the passphrase envelope's Argon2id cost:
+  `{m_cost_kib, t_cost, p_cost}`.
+- `capture` additionally takes `change_pass` / `change_confirm` /
+  `retune_kdf` (1c, unlocked-session flows).
 
 ### `get_vault_state` (view -> host, pull)
 
@@ -644,6 +651,35 @@ key: the one-time display is zeroized and leaves the state. Reply = state JSON.
 Request `{ "cmd": "vault_lock" }` → `{ "ok": true }`. Queues "lock now": the
 shell wipes key material and relaunches itself cold (D-0059) — every CEF child
 process dies with it, and the next boot is the gate.
+
+### `vault_set_policy` (view -> host, 1c)
+
+Request `{ "cmd": "vault_set_policy", "required": 1|2, "confirm": bool }`.
+Re-mints the envelope set structurally (unlocked sessions only). LOWERING the
+required count is a weakening: the host refuses without `confirm` regardless
+of what the page showed (D-0040 discipline). Reply = state JSON; also pushed.
+
+### `vault_retune_kdf` (view -> host, 1c)
+
+Request `{ "cmd": "vault_retune_kdf", "m_cost_kib": n, "t_cost": n,
+"p_cost": n, "confirm": bool }`. Validates bounds (16 MiB..=1 GiB, 1..=10
+passes, 1..=8 lanes); anything below the RFC 9106 default OR the current cost
+is a weakening → refused without `confirm`. On success this BEGINS a
+`retune_kdf` capture: the current passphrase is host-captured, VERIFIED
+against the existing envelope (a wrong entry can never silently become the new
+passphrase), then re-derived under the staged params on a worker thread.
+
+### `vault_regen_recovery` (view -> host, 1c)
+
+Request `{ "cmd": "vault_regen_recovery" }`. Mints a fresh recovery key on a
+worker (the old one stops working atomically); the new one-time display rides
+the state until `vault_setup_ack`.
+
+### `vault_remove_method` (view -> host, 1c)
+
+Request `{ "cmd": "vault_remove_method", "id": "passkey-…" }`. Hardware
+methods only — the core's never-brick invariant refuses removing the
+passphrase or the recovery key, and refuses dropping below the policy size.
 
 Key handling while a capture is active (host-side, `app.rs`): printable text →
 buffer; Backspace → UTF-8-aware delete; Enter → advance the flow (derivations

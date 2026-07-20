@@ -2478,6 +2478,43 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
             crate::vault::request_lock();
             Ok("{\"ok\":true}".to_string())
         }
+        // Config surface (CD-40 1c). All host-revalidated: lowering the policy
+        // or the KDF cost is a weakening and refuses without `confirm` —
+        // regardless of what the page claims to have shown (D-0040 discipline).
+        "vault_set_policy" => {
+            let required = v.get("required").and_then(|n| n.as_u64()).unwrap_or(0) as u8;
+            let confirm = v.get("confirm").and_then(|c| c.as_bool()).unwrap_or(false);
+            crate::vault::set_policy(required, confirm).map_err(|e| (3, e))?;
+            let state = crate::vault::state_json();
+            set_vault_state(&state);
+            Ok(state)
+        }
+        "vault_retune_kdf" => {
+            let m = v.get("m_cost_kib").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+            let t = v.get("t_cost").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+            let p = v.get("p_cost").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+            let confirm = v.get("confirm").and_then(|c| c.as_bool()).unwrap_or(false);
+            crate::vault::retune_kdf(m, t, p, confirm).map_err(|e| (3, e))?;
+            let state = crate::vault::state_json();
+            set_vault_state(&state);
+            Ok(state)
+        }
+        "vault_regen_recovery" => {
+            crate::vault::regen_recovery().map_err(|e| (3, e))?;
+            let state = crate::vault::state_json();
+            set_vault_state(&state);
+            Ok(state)
+        }
+        "vault_remove_method" => {
+            let id = v
+                .get("id")
+                .and_then(|s| s.as_str())
+                .ok_or((2, "missing 'id'".to_string()))?;
+            crate::vault::remove_enrolled_method(id).map_err(|e| (3, e))?;
+            let state = crate::vault::state_json();
+            set_vault_state(&state);
+            Ok(state)
+        }
         // Open the settings card (CD-30: the HUD Ampel's "Custom…" — the
         // per-vector view lives there). Queued for the main thread.
         "open_settings" => {

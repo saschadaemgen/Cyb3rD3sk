@@ -1,6 +1,6 @@
 # CyberDesk - Security
 
-Project CARVILON CyberDesk - living document - Status: 2026-07-21 (through CD-40 Stage 1b / D-0059)
+Project CARVILON CyberDesk - living document - Status: 2026-07-21 (through CD-40 Stage 1c / D-0060)
 Maintained by Claude Code (CC), updated in the same commit-set as the code it describes (D-0053).
 
 ## Iron law
@@ -105,6 +105,17 @@ The model, precisely:
   is the sealed store's first tenant: with a vault present it exists only
   inside `vault.seal`, migrated out of plaintext at setup, and is never
   readable — with no plaintext fallback — before unlock.
+- **Config surface (1c, D-0060).** Every knob is visible and settable in
+  settings: enrolled methods, the 1/2-required policy, the Argon2id cost,
+  change-passphrase, regenerate-recovery, Lock now; the HUD tile shows the
+  vault state (a dev bypass is loudly warned). Weakening — lowering the
+  policy, or an Argon2id cost below the RFC default or the current setting —
+  is HOST-refused without a confirmation flag; a page bug cannot quietly
+  cheapen the offline brute-force surface. A KDF re-tune verifies the
+  captured passphrase against the existing envelope before re-deriving, so a
+  typo can never silently become the new passphrase. Change-passphrase is
+  VMK-authorized (session possession = vault control — recorded reasoning in
+  D-0060).
 - **Dev bypass honesty.** `CYBERDESK_VAULT_BYPASS=1` exists only under
   `cfg(debug_assertions)` — a release artifact contains no bypass code path.
   It skips the gate for the dev loop; it cannot produce the VMK, so sealed

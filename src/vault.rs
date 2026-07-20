@@ -330,6 +330,12 @@ impl SecretBuf {
         Ok(b)
     }
 
+    /// A locked duplicate (locked → locked copy) — hands a worker thread its
+    /// own VMK copy while the runtime keeps the session's.
+    pub fn try_clone(&self) -> Result<Self> {
+        Self::copy_of(self.as_slice())
+    }
+
     /// A fresh CSPRNG-filled locked buffer (VMK, recovery key, salts live
     /// elsewhere — this is for keys).
     pub fn random(len: usize) -> Result<Self> {
@@ -1245,6 +1251,14 @@ pub enum CaptureKind {
     SetupPass,
     /// …and its confirmation re-type (internal step, never begun via IPC).
     SetupConfirm,
+    /// The replacement passphrase (change flow, unlocked session, CD-40 1c)…
+    ChangePass,
+    /// …and its confirmation re-type (internal step).
+    ChangeConfirm,
+    /// The CURRENT passphrase, to authorize an Argon2id cost re-tune (the new
+    /// params are staged in `pending_kdf`; the entry is verified against the
+    /// existing envelope before anything is re-derived).
+    RetuneKdf,
 }
 
 impl CaptureKind {
@@ -1254,6 +1268,9 @@ impl CaptureKind {
             CaptureKind::UnlockRecovery => "unlock_recovery",
             CaptureKind::SetupPass => "setup_pass",
             CaptureKind::SetupConfirm => "setup_confirm",
+            CaptureKind::ChangePass => "change_pass",
+            CaptureKind::ChangeConfirm => "change_confirm",
+            CaptureKind::RetuneKdf => "retune_kdf",
         }
     }
 }
@@ -1272,6 +1289,11 @@ pub enum Outcome {
     SetupDone,
     /// Setup failed (error in the state).
     SetupFailed,
+    /// A re-wrap finished (passphrase change / KDF re-tune / recovery
+    /// regeneration / policy change) — state carries any one-time display.
+    Rewrapped,
+    /// A re-wrap failed (error in the state).
+    RewrapFailed,
 }
 
 struct Runtime {
@@ -1302,6 +1324,9 @@ struct Runtime {
     sealed: Option<serde_json::Value>,
     /// KDF cost for setup (product default; tests override).
     kdf: KdfParams,
+    /// New Argon2id params staged by a cost re-tune, applied once the current
+    /// passphrase is captured and verified (CD-40 1c).
+    pending_kdf: Option<KdfParams>,
 }
 
 fn rt() -> &'static Mutex<Runtime> {
@@ -1324,6 +1349,7 @@ fn rt() -> &'static Mutex<Runtime> {
             relaunch: false,
             sealed: None,
             kdf: KdfParams::PRODUCT,
+            pending_kdf: None,
         })
     })
 }
@@ -1387,6 +1413,7 @@ pub fn begin_capture(purpose: &str) -> std::result::Result<(), String> {
         "unlock_pass" => CaptureKind::UnlockPass,
         "unlock_recovery" => CaptureKind::UnlockRecovery,
         "setup_pass" => CaptureKind::SetupPass,
+        "change_pass" => CaptureKind::ChangePass,
         other => return Err(format!("unknown capture purpose: {other}")),
     };
     match kind {
@@ -1400,7 +1427,14 @@ pub fn begin_capture(purpose: &str) -> std::result::Result<(), String> {
                 return Err("a vault already exists".into());
             }
         }
-        CaptureKind::SetupConfirm => unreachable!(),
+        CaptureKind::ChangePass => {
+            if r.vmk.is_none() || r.file.is_none() {
+                return Err("vault is not unlocked".into());
+            }
+        }
+        CaptureKind::SetupConfirm | CaptureKind::ChangeConfirm | CaptureKind::RetuneKdf => {
+            unreachable!()
+        }
     }
     let input = SecretInput::new().map_err(|e| e.to_string())?;
     r.capture = Some(kind);
@@ -1419,6 +1453,7 @@ pub fn cancel_capture() {
     }
     r.input = None;
     r.pending_pass = None;
+    r.pending_kdf = None;
     r.error = None;
     let locked = (r.file.is_some() || r.broken.is_some()) && r.vmk.is_none() && !r.bypassed;
     if locked {
@@ -1523,7 +1558,228 @@ pub fn key_submit() {
             drop(confirm);
             spawn_setup(&mut r, first);
         }
+        CaptureKind::ChangePass => {
+            let len = r.input.as_ref().map(|i| i.len).unwrap_or(0);
+            if len < MIN_PASSPHRASE_LEN {
+                r.error = Some(format!(
+                    "passphrase must be at least {MIN_PASSPHRASE_LEN} characters"
+                ));
+                return;
+            }
+            r.pending_pass = r.input.take();
+            r.input = SecretInput::new().ok();
+            r.capture = Some(CaptureKind::ChangeConfirm);
+            r.error = None;
+        }
+        CaptureKind::ChangeConfirm => {
+            let confirm = r.input.take();
+            let first = r.pending_pass.take();
+            let (Some(first), Some(confirm)) = (first, confirm) else { return };
+            if first.as_slice() != confirm.as_slice() {
+                r.error = Some("the two entries do not match — start again".into());
+                r.capture = Some(CaptureKind::ChangePass);
+                r.input = SecretInput::new().ok();
+                return;
+            }
+            drop(confirm);
+            // Keep the passphrase method's CURRENT cost params on a plain
+            // passphrase change; the re-tune flow stages different ones.
+            let kdf = r
+                .file
+                .as_ref()
+                .and_then(|f| f.methods.iter().find(|m| m.kind == MethodKind::Passphrase))
+                .and_then(|m| m.kdf)
+                .unwrap_or(KdfParams::PRODUCT);
+            spawn_rewrap(&mut r, RewrapJob::ChangePass { pass: first, kdf });
+        }
+        CaptureKind::RetuneKdf => {
+            let Some(input) = r.input.take() else { return };
+            let Some(kdf) = r.pending_kdf.take() else {
+                r.error = Some("no staged cost parameters".into());
+                r.capture = None;
+                return;
+            };
+            spawn_rewrap(&mut r, RewrapJob::RetuneKdf { pass: input, kdf });
+        }
     }
+}
+
+/// A background re-wrap job from an unlocked session (CD-40 1c). Every job
+/// re-wraps the VMK — the vault data is never re-encrypted.
+enum RewrapJob {
+    /// Replace the passphrase (fresh salt, `kdf` params).
+    ChangePass { pass: SecretInput, kdf: KdfParams },
+    /// Re-derive the passphrase envelope under new cost params. The captured
+    /// entry must VERIFY against the current envelope first — this flow tunes
+    /// the cost, it must never silently change the passphrase.
+    RetuneKdf { pass: SecretInput, kdf: KdfParams },
+    /// Mint a fresh recovery key (one-time display rides the state).
+    RegenRecovery,
+}
+
+/// Run a re-wrap on a worker thread with a cloned VMK; commit the new file on
+/// success. Argon2 never runs under the runtime lock.
+fn spawn_rewrap(r: &mut Runtime, job: RewrapJob) {
+    let (Some(file), Some(vmk)) = (r.file.clone(), r.vmk.as_ref().and_then(|v| v.try_clone().ok()))
+    else {
+        r.error = Some("vault is not unlocked".into());
+        return;
+    };
+    r.busy = true;
+    r.error = None;
+    let dir = r.dir.clone();
+    std::thread::spawn(move || {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let result: Result<(VaultFile, Option<String>)> = (|| match job {
+            RewrapJob::ChangePass { pass, kdf } => {
+                let new = change_passphrase(&file, &vmk, pass.as_slice(), &kdf, now_ms)?;
+                Ok((new, None))
+            }
+            RewrapJob::RetuneKdf { pass, kdf } => {
+                // Verify the entry IS the current passphrase before re-deriving.
+                let check = unlock(&file, &[Factor::Passphrase(pass.as_slice())])?;
+                drop(check);
+                let new = change_passphrase(&file, &vmk, pass.as_slice(), &kdf, now_ms)?;
+                Ok((new, None))
+            }
+            RewrapJob::RegenRecovery => {
+                let (new, display) = regenerate_recovery(&file, &vmk, now_ms)?;
+                Ok((new, Some(display)))
+            }
+        })()
+        .and_then(|(new, display)| {
+            new.save_to(&dir.join("vault.json"))?;
+            Ok((new, display))
+        });
+        let mut r = rt().lock().unwrap();
+        r.busy = false;
+        r.capture = None;
+        r.input = None;
+        r.pending_pass = None;
+        match result {
+            Ok((new, display)) => {
+                r.file = Some(new);
+                if let Some(d) = display {
+                    r.recovery_display = Some(d);
+                }
+                r.error = None;
+                r.outcome = Some(Outcome::Rewrapped);
+                tracing::info!("vault re-wrapped");
+            }
+            Err(e) => {
+                // The retune verify failure is the one caller-actionable case;
+                // everything else keeps the uniform error discipline.
+                r.error = Some(match e {
+                    VaultError::Crypto => "passphrase does not match".to_string(),
+                    other => other.to_string(),
+                });
+                r.outcome = Some(Outcome::RewrapFailed);
+            }
+        }
+    });
+}
+
+/// Bounds for user-tunable Argon2id cost (CD-40 1c): memory 16 MiB..=1 GiB,
+/// passes 1..=10, lanes 1..=8. Anything below the RFC 9106 product default is
+/// a WEAKENING and needs the confirm flag (the D-0040 gate discipline).
+pub fn retune_kdf(m_cost_kib: u32, t_cost: u32, p_cost: u32, confirm: bool) -> std::result::Result<(), String> {
+    let mut r = rt().lock().unwrap();
+    if r.busy {
+        return Err("busy".into());
+    }
+    if r.vmk.is_none() || r.file.is_none() {
+        return Err("vault is not unlocked".into());
+    }
+    if !(16 * 1024..=1024 * 1024).contains(&m_cost_kib) {
+        return Err("memory cost must be between 16384 and 1048576 KiB".into());
+    }
+    if !(1..=10).contains(&t_cost) {
+        return Err("passes must be between 1 and 10".into());
+    }
+    if !(1..=8).contains(&p_cost) {
+        return Err("lanes must be between 1 and 8".into());
+    }
+    // Weakening = dropping below the RFC 9106 product default (the vetted
+    // floor) OR below the user's own current cost — either way the offline
+    // brute-force surface of vault.json gets cheaper, so the D-0040 gate
+    // applies. Strengthening is always free.
+    let current = r
+        .file
+        .as_ref()
+        .and_then(|f| f.methods.iter().find(|m| m.kind == MethodKind::Passphrase))
+        .and_then(|m| m.kdf)
+        .unwrap_or(KdfParams::PRODUCT);
+    let weakening = m_cost_kib < KdfParams::PRODUCT.m_cost_kib
+        || t_cost < KdfParams::PRODUCT.t_cost
+        || m_cost_kib < current.m_cost_kib
+        || t_cost < current.t_cost;
+    if weakening && !confirm {
+        return Err(
+            "lowering the passphrase cost below the default or the current setting requires confirmation"
+                .into(),
+        );
+    }
+    r.pending_kdf = Some(KdfParams { m_cost_kib, t_cost, p_cost });
+    r.capture = Some(CaptureKind::RetuneKdf);
+    r.input = SecretInput::new().ok();
+    r.pending_pass = None;
+    r.error = None;
+    Ok(())
+}
+
+/// Mint a fresh recovery key from the unlocked session (one-time display).
+pub fn regen_recovery() -> std::result::Result<(), String> {
+    let mut r = rt().lock().unwrap();
+    if r.busy {
+        return Err("busy".into());
+    }
+    spawn_rewrap(&mut r, RewrapJob::RegenRecovery);
+    if let Some(e) = r.error.clone() {
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Change the unlock policy from the unlocked session. Structural (a full
+/// envelope-set re-mint); LOWERING the required count is a weakening and
+/// needs the confirm flag — the host re-validates the D-0040 gate rather than
+/// trusting the page. Cheap (AEAD only, no KDF), so it runs synchronously.
+pub fn set_policy(required: u8, confirm: bool) -> std::result::Result<(), String> {
+    let mut r = rt().lock().unwrap();
+    if r.busy {
+        return Err("busy".into());
+    }
+    let (Some(file), Some(vmk)) = (r.file.as_ref(), r.vmk.as_ref()) else {
+        return Err("vault is not unlocked".into());
+    };
+    if required < file.required && !confirm {
+        return Err("lowering the unlock policy requires confirmation".into());
+    }
+    let new = set_required(file, vmk, required).map_err(|e| e.to_string())?;
+    new.save_to(&r.dir.join("vault.json")).map_err(|e| e.to_string())?;
+    r.file = Some(new);
+    r.error = None;
+    Ok(())
+}
+
+/// Remove an enrolled method (hardware methods only — the core enforces the
+/// never-brick floor). Synchronous like `set_policy` (AEAD only).
+pub fn remove_enrolled_method(id: &str) -> std::result::Result<(), String> {
+    let mut r = rt().lock().unwrap();
+    if r.busy {
+        return Err("busy".into());
+    }
+    let (Some(file), Some(vmk)) = (r.file.as_ref(), r.vmk.as_ref()) else {
+        return Err("vault is not unlocked".into());
+    };
+    let new = remove_method(file, vmk, id).map_err(|e| e.to_string())?;
+    new.save_to(&r.dir.join("vault.json")).map_err(|e| e.to_string())?;
+    r.file = Some(new);
+    r.error = None;
+    Ok(())
 }
 
 /// Unlock on a worker thread: derive → try envelopes → open the sealed state
@@ -1694,12 +1950,44 @@ pub fn state_json() -> String {
     } else {
         "none"
     };
+    // The config surface (CD-40 1c): enrolled methods, policy, KDF cost —
+    // honest metadata, no secrets.
+    let methods: Vec<serde_json::Value> = r
+        .file
+        .as_ref()
+        .map(|f| {
+            f.methods
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "id": m.id,
+                        "kind": match m.kind {
+                            MethodKind::Passphrase => "passphrase",
+                            MethodKind::RecoveryKey => "recovery_key",
+                            MethodKind::Passkey => "passkey",
+                        },
+                        "label": m.label,
+                        "created_ms": m.created_ms,
+                        "removable": m.kind.hardware(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let kdf = r
+        .file
+        .as_ref()
+        .and_then(|f| f.methods.iter().find(|m| m.kind == MethodKind::Passphrase))
+        .and_then(|m| m.kdf)
+        .map(|k| serde_json::json!({ "m_cost_kib": k.m_cost_kib, "t_cost": k.t_cost, "p_cost": k.p_cost }));
     serde_json::json!({
         "vault": vault,
         "capture": r.capture.map(|c| c.as_str()),
         "chars": r.input.as_ref().map(|i| i.chars()).unwrap_or(0),
         "step2": r.pending_pass.is_some(),
         "required": r.file.as_ref().map(|f| f.required).unwrap_or(1),
+        "methods": methods,
+        "kdf": kdf,
         "busy": r.busy,
         "error": r.error,
         "recovery": r.recovery_display,
@@ -1785,6 +2073,7 @@ fn test_reset_runtime(dir: &Path, kdf: KdfParams) {
         relaunch: false,
         sealed: None,
         kdf,
+        pending_kdf: None,
     };
     let path = dir.join("vault.json");
     if let Ok(file) = VaultFile::load_from(&path) {
@@ -2341,6 +2630,62 @@ mod tests {
         key_submit();
         assert_eq!(wait_outcome(), Outcome::Unlocked);
         assert!(is_unlocked(), "the printed recovery key unlocks independently");
+
+        // --- 1c: the config surface, driven end to end while unlocked -------
+
+        // Policy: raising is free; lowering is a weakening → host-refused
+        // without the confirm flag (D-0040 discipline), allowed with it.
+        set_policy(2, false).expect("raising the policy needs no confirmation");
+        assert!(state_json().contains("\"required\":2"));
+        assert!(set_policy(1, false).is_err(), "lowering without confirm is refused");
+        set_policy(1, true).expect("lowering with confirm");
+        assert!(state_json().contains("\"required\":1"));
+
+        // Change the passphrase through the host-captured flow.
+        begin_capture("change_pass").unwrap();
+        key_text("a brand new passphrase");
+        key_submit();
+        key_text("a brand new passphrase");
+        key_submit();
+        assert_eq!(wait_outcome(), Outcome::Rewrapped);
+        assert!(is_unlocked(), "the session stays unlocked across a re-wrap");
+
+        // Regenerate the recovery key: a fresh one-time display appears.
+        regen_recovery().unwrap();
+        assert_eq!(wait_outcome(), Outcome::Rewrapped);
+        let state: serde_json::Value = serde_json::from_str(&state_json()).unwrap();
+        let new_recovery = state["recovery"].as_str().expect("new one-time display");
+        assert_ne!(new_recovery, recovery, "the recovery key rotated");
+        setup_ack();
+
+        // Relaunch: the OLD passphrase is dead, the new one unlocks.
+        test_reset_runtime(&dir, TEST_KDF);
+        begin_capture("unlock_pass").unwrap();
+        key_text("correct horse battery staple");
+        key_submit();
+        assert_eq!(wait_outcome(), Outcome::UnlockFailed);
+        key_text("a brand new passphrase");
+        key_submit();
+        assert_eq!(wait_outcome(), Outcome::Unlocked);
+
+        // KDF re-tune: bounds + weakening gate enforced, the captured entry is
+        // VERIFIED against the current envelope (a wrong entry must not
+        // silently become the new passphrase), then the cost really changes.
+        assert!(retune_kdf(1024, 1, 1, true).is_err(), "below the memory floor");
+        assert!(
+            retune_kdf(16 * 1024, 1, 1, false).is_err(),
+            "weaker than the product default needs confirmation"
+        );
+        retune_kdf(16 * 1024, 1, 1, true).unwrap();
+        key_text("not the passphrase at all");
+        key_submit();
+        assert_eq!(wait_outcome(), Outcome::RewrapFailed);
+        assert!(state_json().contains("does not match"));
+        retune_kdf(16 * 1024, 1, 1, true).unwrap();
+        key_text("a brand new passphrase");
+        key_submit();
+        assert_eq!(wait_outcome(), Outcome::Rewrapped);
+        assert!(state_json().contains("\"m_cost_kib\":16384"));
 
         // Lock request queues a relaunch; wipe drops every secret.
         request_lock();

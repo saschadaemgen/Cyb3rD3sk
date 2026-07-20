@@ -119,6 +119,55 @@
         <button class="btn" id="vault-lock" type="button">Lock</button>
       </div>
 
+      <!-- The config surface (CD-40 1c): every knob visible and settable.
+           Shown only while the vault is unlocked (re-wraps need the VMK). -->
+      <div id="vault-config" hidden>
+        <div class="row">
+          <div class="label">
+            <span class="name">Enrolled methods</span>
+            <span class="hint" id="vault-methods">&mdash;</span>
+          </div>
+        </div>
+        <div class="row">
+          <div class="label">
+            <span class="name">Unlock policy</span>
+            <span class="hint">How many methods must be presented together to unlock</span>
+          </div>
+          <div class="vault-policy">
+            <button class="btn pol" id="vault-pol-1" type="button">1 required</button>
+            <button class="btn pol" id="vault-pol-2" type="button">2 required</button>
+          </div>
+        </div>
+        <div class="row">
+          <div class="label">
+            <span class="name">Passphrase cost (Argon2id)</span>
+            <span class="hint" id="vault-kdf-hint">&mdash;</span>
+          </div>
+          <button class="btn" id="vault-retune" type="button">Tune&hellip;</button>
+        </div>
+        <div id="vault-retune-form" class="vault-retune" hidden>
+          <label>Memory <input id="kdf-m" type="number" min="16384" max="1048576" step="16384"> KiB</label>
+          <label>Passes <input id="kdf-t" type="number" min="1" max="10"></label>
+          <label>Lanes <input id="kdf-p" type="number" min="1" max="8"></label>
+          <button class="btn" id="kdf-apply" type="button">Apply&hellip;</button>
+          <span class="hint">Applying asks for your passphrase &mdash; captured by the core, verified, then re-derived under the new cost</span>
+        </div>
+        <div class="row">
+          <div class="label">
+            <span class="name">Change passphrase</span>
+            <span class="hint">Re-wraps the master key &mdash; your data is never re-encrypted</span>
+          </div>
+          <button class="btn" id="vault-change" type="button">Change&hellip;</button>
+        </div>
+        <div class="row">
+          <div class="label">
+            <span class="name">Regenerate recovery key</span>
+            <span class="hint">Invalidates the old key and shows a new one, once</span>
+          </div>
+          <button class="btn" id="vault-regen" type="button">Regenerate</button>
+        </div>
+      </div>
+
       <div id="vault-capture" class="vault-capture" hidden>
         <div class="vault-cap-hint" id="vault-cap-hint"></div>
         <div class="vault-entry" id="vault-entry">

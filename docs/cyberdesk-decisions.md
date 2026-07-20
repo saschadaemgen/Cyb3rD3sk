@@ -5,6 +5,43 @@ Living document - maintained by Claude Code (CC), updated in the same
 commit-set as the change it records (D-0053). Append-only: historical entries
 are never rewritten; a superseded decision gets a new D-number forward.
 
+## D-0060 - 2026-07-21 - Vault Stage 1c: config + tile surface — every knob visible, weakening host-gated, change-passphrase is VMK-authorized (CD-40)
+
+*Decision.* The settings vault section exposes, honestly and settably:
+enrolled methods (with `removable` only ever true for hardware methods — the
+never-brick floor stays structural), the unlock policy (1/2-required buttons;
+the structural re-mint runs synchronously — AEAD only, no KDF), the Argon2id
+cost parameters (display + re-tune), change-passphrase, regenerate-recovery,
+and Lock now; the HUD tile gains a Vault field (Unlocked / Not set up / a
+loudly-warned DEV BYPASS — "locked" cannot appear there because the HUD does
+not exist while the gate is closed). Three posture calls worth recording:
+
+1. **Weakening is host-gated, client dialogs are not trusted.** Lowering the
+required count, and lowering the Argon2id cost below the RFC 9106 default OR
+below the user's current setting, refuse without a `confirm` flag — the host
+re-validates (D-0040 discipline); the client half is a two-step armed button
+(same two-confirmation semantics as a dialog, less chrome).
+
+2. **A KDF re-tune verifies before it re-derives.** The captured entry is
+first checked against the existing envelope; only a passphrase that actually
+unlocks the vault is re-derived under the new params. A typo can therefore
+never silently BECOME the new passphrase — the one failure mode a combined
+"enter passphrase to apply" flow could invent.
+
+3. **Change-passphrase is VMK-authorized, not old-passphrase-authorized.**
+Anyone holding the unlocked session already holds the VMK — they can read
+everything the vault protects and rotate the recovery key; demanding the old
+passphrase would be security theater against that attacker while adding a
+lockout path for the legitimate user. The model stays honest: session
+possession = vault control; protect the session (lock, and Stage 2's
+auto-lock).
+
+*Why.* Task 7 of CD-40 is the tile doctrine applied to the vault: every state
+the crypto core can be in must be visible, and every parameter it exposes must
+be settable — with the same host-revalidated weakening gate the hardening
+Ampel established, so no page bug (or page compromise) can quietly cheapen the
+offline brute-force surface.
+
 ## D-0059 - 2026-07-21 - Vault Stage 1b: the gate is host-captured, lock is a cold relaunch, the identity seed is the first sealed tenant (CD-40)
 
 *Decision.* Three implementation choices shaping the start-authorization gate:

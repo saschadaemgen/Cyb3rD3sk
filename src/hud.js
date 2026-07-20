@@ -131,6 +131,16 @@
     routeK.textContent = "Route W" + (r.window || 1);
     routeV.textContent = r.tor ? (r.onion ? "Tor · Onion" : "Tor") : "Clearnet";
     routeV.parentElement.classList.toggle("on", !!r.tor);
+    // Vault status (CD-40 1c). While the HUD exists the gate is open, so the
+    // honest states are: unlocked (sealed state active), not set up, or the
+    // debug-build dev bypass (loudly warned — the gate was skipped).
+    var vaultV = document.getElementById("vault-v");
+    if (vaultV) {
+      var vs = state.vault || "none";
+      vaultV.textContent = vs === "unlocked" ? "Unlocked" : vs === "bypassed" ? "DEV BYPASS" : "Not set up";
+      vaultV.parentElement.classList.toggle("on", vs === "unlocked");
+      vaultV.parentElement.classList.toggle("warn", vs === "bypassed");
+    }
     paintIdentity();
     paintClock();
   }

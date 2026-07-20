@@ -577,10 +577,22 @@
 
     var HINTS = {
       setup_pass: "Choose a passphrase (at least 8 characters). It is typed into the CyberDesk core, not this page — Enter to continue, Esc to cancel.",
-      setup_confirm: "Re-type the passphrase to confirm — Enter to create the vault."
+      setup_confirm: "Re-type the passphrase to confirm — Enter to create the vault.",
+      change_pass: "New passphrase (at least 8 characters) — Enter to continue, Esc to cancel.",
+      change_confirm: "Re-type the new passphrase to confirm — Enter to change it.",
+      retune_kdf: "Enter your current passphrase to authorize the cost change — verified first, then re-derived under the new parameters."
+    };
+    var BUSY = {
+      setup_confirm: "Creating the vault…",
+      change_confirm: "Re-wrapping…",
+      retune_kdf: "Verifying and re-deriving…"
     };
 
+    var KINDS = { passphrase: "Passphrase", recovery_key: "Recovery key", passkey: "Passkey" };
+    var last = {};
+
     function render(s) {
+      last = s;
       var label =
         s.vault === "none" ? "not set up" :
         s.vault === "unlocked" ? "unlocked" :
@@ -588,23 +600,51 @@
       pill.textContent = label;
       pill.className = "tor-status " + (s.vault === "unlocked" ? "s2" : s.vault === "bypassed" ? "s3" : "");
 
-      var capturing = s.capture === "setup_pass" || s.capture === "setup_confirm";
+      // Any settings-side capture (setup / change / re-tune) shows the entry.
+      var capturing = s.capture === "setup_pass" || s.capture === "setup_confirm" ||
+                      s.capture === "change_pass" || s.capture === "change_confirm" ||
+                      s.capture === "retune_kdf";
       noneRow.hidden = !(s.vault === "none" && !capturing);
-      lockRow.hidden = s.vault !== "unlocked";
+      lockRow.hidden = s.vault !== "unlocked" || capturing;
       capture.hidden = !capturing;
       recovery.hidden = !s.recovery;
       if (capturing) {
-        capHint.textContent = s.busy ? "Creating the vault…" : (HINTS[s.capture] || "");
+        capHint.textContent = s.busy ? (BUSY[s.capture] || "Working…") : (HINTS[s.capture] || "");
         renderDots(s.chars || 0);
         entry.classList.toggle("busy", !!s.busy);
       }
-      if (s.error && (capturing || s.vault === "none")) {
+      if (s.error && (capturing || s.vault === "none" || s.vault === "unlocked")) {
         errEl.textContent = s.error;
         errEl.hidden = false;
       } else {
         errEl.hidden = true;
       }
       if (s.recovery) keyEl.textContent = s.recovery;
+
+      // The config surface (1c): methods, policy, KDF cost — unlocked only.
+      var config = document.getElementById("vault-config");
+      config.hidden = s.vault !== "unlocked" || capturing || !!s.recovery;
+      if (!config.hidden) {
+        var parts = [];
+        var canTwo = (s.methods || []).length >= 2;
+        for (var i = 0; i < (s.methods || []).length; i++) {
+          var m = s.methods[i];
+          parts.push((KINDS[m.kind] || m.kind) + (m.removable ? "" : " (always present)"));
+        }
+        document.getElementById("vault-methods").textContent =
+          parts.length ? parts.join(" · ") : "—";
+        var p1 = document.getElementById("vault-pol-1");
+        var p2 = document.getElementById("vault-pol-2");
+        p1.classList.toggle("active", s.required === 1);
+        p2.classList.toggle("active", s.required === 2);
+        p2.disabled = !canTwo;
+        if (s.kdf) {
+          document.getElementById("vault-kdf-hint").textContent =
+            Math.round(s.kdf.m_cost_kib / 1024) + " MiB · " + s.kdf.t_cost +
+            (s.kdf.t_cost === 1 ? " pass" : " passes") + " · " + s.kdf.p_cost +
+            (s.kdf.p_cost === 1 ? " lane" : " lanes");
+        }
+      }
     }
 
     window.cdVault = function (json) {
@@ -642,6 +682,101 @@
         lockBtn.textContent = "Lock";
         lockArmed = null;
       }, 3000);
+    });
+
+    // --- Config surface (1c) ------------------------------------------------
+    function applyState(p) {
+      p.then(function (r) {
+        try { render(JSON.parse(r)); } catch (e) {}
+      }).catch(function (e) {
+        errEl.textContent = String(e);
+        errEl.hidden = false;
+      });
+    }
+
+    // Policy: raising to 2 applies directly (strengthening); lowering to 1 is
+    // a weakening — two-step confirm, and the HOST refuses without the flag.
+    var polArmed = null;
+    document.getElementById("vault-pol-2").addEventListener("click", function () {
+      applyState(query({ cmd: "vault_set_policy", required: 2 }));
+    });
+    var pol1 = document.getElementById("vault-pol-1");
+    pol1.addEventListener("click", function () {
+      if (pol1.classList.contains("active")) return;
+      if (polArmed) {
+        clearTimeout(polArmed);
+        polArmed = null;
+        pol1.textContent = "1 required";
+        applyState(query({ cmd: "vault_set_policy", required: 1, confirm: true }));
+        return;
+      }
+      pol1.textContent = "Confirm 1-required";
+      polArmed = setTimeout(function () {
+        pol1.textContent = "1 required";
+        polArmed = null;
+      }, 3000);
+    });
+
+    // KDF re-tune: numbers staged here, authorized by a host-captured
+    // passphrase entry. Lowering below the default needs the confirm flag —
+    // armed the same two-step way.
+    var retuneForm = document.getElementById("vault-retune-form");
+    document.getElementById("vault-retune").addEventListener("click", function () {
+      retuneForm.hidden = !retuneForm.hidden;
+      if (!retuneForm.hidden && last.kdf) {
+        document.getElementById("kdf-m").value = last.kdf.m_cost_kib;
+        document.getElementById("kdf-t").value = last.kdf.t_cost;
+        document.getElementById("kdf-p").value = last.kdf.p_cost;
+      }
+    });
+    var kdfArmed = false;
+    var kdfApply = document.getElementById("kdf-apply");
+    kdfApply.addEventListener("click", function () {
+      var m = parseInt(document.getElementById("kdf-m").value, 10) || 0;
+      var t = parseInt(document.getElementById("kdf-t").value, 10) || 0;
+      var p = parseInt(document.getElementById("kdf-p").value, 10) || 0;
+      var req = { cmd: "vault_retune_kdf", m_cost_kib: m, t_cost: t, p_cost: p };
+      if (kdfArmed) { req.confirm = true; }
+      query(req).then(function (r) {
+        kdfArmed = false;
+        kdfApply.textContent = "Apply…";
+        retuneForm.hidden = true;
+        try { render(JSON.parse(r)); } catch (e) {}
+      }).catch(function (e) {
+        var msg = String(e);
+        if (msg.indexOf("confirmation") !== -1 && !kdfArmed) {
+          kdfArmed = true;
+          kdfApply.textContent = "Confirm weaker cost";
+          setTimeout(function () {
+            kdfArmed = false;
+            kdfApply.textContent = "Apply…";
+          }, 4000);
+        }
+        errEl.textContent = msg;
+        errEl.hidden = false;
+      });
+    });
+
+    document.getElementById("vault-change").addEventListener("click", function () {
+      applyState(query({ cmd: "vault_begin_capture", purpose: "change_pass" }));
+    });
+
+    // Regenerating invalidates the old printed key — two-step confirm.
+    var regenArmed = null;
+    var regenBtn = document.getElementById("vault-regen");
+    regenBtn.addEventListener("click", function () {
+      if (regenArmed) {
+        clearTimeout(regenArmed);
+        regenArmed = null;
+        regenBtn.textContent = "Regenerate";
+        applyState(query({ cmd: "vault_regen_recovery" }));
+        return;
+      }
+      regenBtn.textContent = "Confirm — old key stops working";
+      regenArmed = setTimeout(function () {
+        regenBtn.textContent = "Regenerate";
+        regenArmed = null;
+      }, 3500);
     });
 
     query({ cmd: "get_vault_state" }).then(function (r) {
