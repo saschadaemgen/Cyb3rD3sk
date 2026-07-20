@@ -1,6 +1,7 @@
 # CyberDesk - Security
 
-Project CARVILON CyberDesk - living document - Status: 2026-07-13
+Project CARVILON CyberDesk - living document - Status: 2026-07-20
+Maintained by Claude Code (CC), updated in the same commit-set as the code it describes (D-0053).
 
 ## Iron law
 

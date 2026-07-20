@@ -1,6 +1,7 @@
 # CyberDesk - Architecture
 
-Project CARVILON CyberDesk - living document - Status: 2026-07-10 (Season 2 begun - CD-12, frame law D-0022, CD-13 info area, CD-14 start page, CD-15 per-window Tor + hotfix D-0028, CD-18 MF viewer + per-window icons + Tor settings D-0030, CD-15-HOTFIX-2 arti bootstrap instrumentation D-0031, CD-15-HOTFIX-3 dir-fetch trace D-0032, CD-15 Tor fix arti compression feature D-0033)
+Project CARVILON CyberDesk - living document - Status: 2026-07-20 (through CD-35 / D-0052)
+Maintained by Claude Code (CC), updated in the same commit-set as the code it describes (D-0053).
 Proprietary - Copyright (c) 2026 Sascha Daemgen IT and More Systems. All rights reserved.
 
 ## What CyberDesk is

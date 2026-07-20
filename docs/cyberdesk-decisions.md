@@ -1,6 +1,30 @@
 # CyberDesk - Decisions
 
 Newest decision on top. Format: D number - date - decision - reasoning.
+Living document - maintained by Claude Code (CC), updated in the same
+commit-set as the change it records (D-0053). Append-only: historical entries
+are never rewritten; a superseded decision gets a new D-number forward.
+
+## D-0053 - 2026-07-20 - Documentation governance: CC owns the living docs and the factual season protocol; docs update in-lockstep with code; roadmap folded into feature-backlog (CD-36)
+
+*Decision.* CC owns and maintains the living technical docs (architecture,
+security, wire-format, feature-backlog, decisions, degoogle-audit) and authors
+the factual season protocol; Master chat + Sascha review and add
+narrative/strategic framing. Every code change updates its affected living docs
+in the same commit-set (Definition of Done, not deferred), and CC's report
+lists the docs touched - this is the mechanism that prevents doc/code drift at
+the source. Briefings additionally name the docs to update, but CC is not
+limited to that list. `cyberdesk-roadmap.txt` is folded into
+`feature-backlog.md` (principles + season orientation at the top) and retired,
+so the season→feature mapping has one source of truth; `degoogle-audit.md`
+stays as a specialized verification recipe. The README is corrected to the
+shipped Ampel model.
+
+*Why.* Documentation drift was a live risk (docs written from a stale mental
+model can diverge from what CC actually built). Putting doc ownership where
+the ground truth is, and coupling doc updates to the code commit that changes
+them, keeps the record accurate by construction; consolidating the two
+season-mapped docs removes a guaranteed drift surface.
 
 ## D-0052 - 2026-07-20 - Onion support (phase 1): open .onion in Tor slots via arti; clearnet slots refuse without leaking (CD-35)
 

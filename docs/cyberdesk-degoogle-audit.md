@@ -1,6 +1,7 @@
 # CyberDesk - De-Google net-log audit (CD-17, D-0041; CD-26, D-0042)
 
-Project CARVILON CyberDesk - living document - Status: 2026-07-13
+Project CARVILON CyberDesk - living document - Status: 2026-07-20
+Maintained by Claude Code (CC), updated in the same commit-set as the code it describes (D-0053).
 
 This is the **measurement half** of CD-17. The enforcement (switches + prefs) is
 in `src/degoogle.rs` and is applied automatically. This recipe proves it: capture

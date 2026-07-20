@@ -1,5 +1,8 @@
 # CyberDesk - Feature Backlog
 
+Project CARVILON CyberDesk - living document - Status: 2026-07-20
+Maintained by Claude Code (CC), updated in the same commit-set as the code it describes (D-0053).
+
 Soft season mapping - chat fill level and reality decide the actual cuts. Completed items move into the respective season protocol.
 
 ## Foundation (Season 1, running)

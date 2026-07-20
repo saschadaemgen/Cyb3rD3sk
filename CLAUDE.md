@@ -92,6 +92,23 @@ are a map; the crate is the truth.
 * On a real blocker, don't guess for hours: commit the clean intermediate state,
   document the problem and options in docs or `BLOCKER.md`, and stop.
 
+## Documentation governance (CD-36, D-0053)
+
+* **Claude Code (CC) owns and maintains the living technical docs** — it has the
+  implementation ground truth: `cyberdesk-architecture.md`,
+  `cyberdesk-security.md`, `cyberdesk-wire-format.md`,
+  `cyberdesk-feature-backlog.md`, `cyberdesk-decisions.md`,
+  `cyberdesk-degoogle-audit.md`.
+* **Per-ticket doc Definition of Done:** every code change updates its affected
+  living docs **in the same commit-set** as the change — never deferred. Each CC
+  report lists which docs it touched. Briefings additionally name the docs to
+  update, but CC updates any doc the change actually touches, not just the
+  named ones.
+* **Season protocol:** CC authors the **factual** season protocol in `seasons/`
+  (what shipped per ticket, D-numbers, findings, dead ends) from its own
+  reports; the Master chat + Sascha review it and add the strategic/narrative
+  framing. The factual spine comes from CC so the record matches what was built.
+
 ## Platform
 
 The current target is **Windows 11 (x64, MSVC)** only. No Linux/macOS support in
