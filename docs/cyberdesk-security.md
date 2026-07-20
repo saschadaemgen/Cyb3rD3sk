@@ -53,6 +53,35 @@ phone-home and is **not** disabled - certificate verification stays on. Metrics
 `ServerURL` and no upload). CD-17 is the precursor and proof for the NetGuard
 analyzer epic: host silent + engine silenced + proven.
 
+## Onion routing (CD-35, D-0052)
+
+`.onion` addresses open in **Tor windows** via arti's embedded onion-service
+client (the stable `onion-service-client` feature of the pinned 0.43). The
+property, worth stating plainly: **onion sites are resolved inside Tor, never
+through clearnet DNS** — onion resolution is the hidden-service rendezvous
+protocol, there is no DNS query of any kind and no exit node, so onion browsing
+has no exit-node exposure. Per-window circuit isolation carries over to onion
+circuits (arti keys the HS tunnel by the client's isolation).
+
+Clearnet windows **refuse** `.onion` without leaking, in three fail-closed
+layers: the address bar reroutes to the honest refusal page before any resolver
+is consulted; the per-slot request handler cancels `.onion` navigations
+(including top-level redirects; the FQDN trailing-dot spelling is caught too);
+and a context-level guard on the ephemeral clearnet context cancels any
+remaining `.onion` request on the IO thread and rewrites redirect-targets to an
+inert `about:` URL — covering subresources, XHR, and worker requests that have
+no per-browser handler. Chromium itself implements no RFC 7686 special-casing;
+CyberDesk enforces the split. The refusal page offers the Tor path (new Tor
+window / switch this window) — no dead end, no silent failure.
+
+Ephemerality (CD-33/34) applies unchanged: Tor contexts are in-memory, the
+refusal page is excluded from the RAM-only history, and `cyberdesk://` URLs are
+never persisted — onion browsing leaves no disk trace.
+
+Shipped scope is **open `.onion` addresses** (client only). Later phases, named
+and deferred: Onion-Location auto-switch, client authentication, `.onion`
+certificate/TLS handling. Not planned: onion-service hosting.
+
 ## Anonymity-set scope note (CD-28, D-0044)
 
 **Internal engineering scope - never surface in product UI, marketing, or demos.**

@@ -2,6 +2,70 @@
 
 Newest decision on top. Format: D number - date - decision - reasoning.
 
+## D-0052 - 2026-07-20 - Onion support (phase 1): open .onion in Tor slots via arti; clearnet slots refuse without leaking (CD-35)
+
+*Decision.* CyberDesk opens `.onion` addresses in Tor slots via arti's embedded
+onion-service client (client only, not hosting): the stable
+`onion-service-client` feature of the **pinned arti-client 0.43** is enabled in
+Cargo.toml — the pin is **not** bumped (the 0.43 pin exists for the 0.44
+bootstrap regression) — and with the feature compiled in, arti admits `.onion`
+by default (`allow_onion_addrs` defaults to true) and resolves it through the
+hidden-service rendezvous *inside* Tor. The existing per-slot SOCKS relay
+(tor.rs) already hands hostnames to arti unresolved, so a Tor slot carries
+`.onion` with **zero relay changes**; per-slot circuit isolation carries over
+(arti passes the client's isolation into `get_or_launch_tunnel`). A schemeless
+`.onion` classifies with an **http:// default** (the onion transport is
+end-to-end encrypted and authenticated by the address itself; https-onion
+certificates are a deferred phase — an https default would stall on certificate
+errors); an explicit scheme is honored unchanged.
+
+Clearnet slots refuse `.onion` **without leaking**: Chromium implements no RFC
+7686 special-casing (in a clearnet context it would resolve `.onion` like any
+hostname — the exact leak the RFC warns about), so CyberDesk enforces the split
+itself in three layers: (1) the address bar reroutes a `.onion` typed into a
+clearnet slot to the honest refusal page (`cyberdesk://onion/`) before any
+resolver sees it; (2) `SlotRequestHandler::on_before_browse` cancels `.onion`
+link clicks / JS navigations / top-level redirects in clearnet slots (main
+frame lands on the refusal page, subframes just cancel); (3) a context-level
+`ClearnetContextHandler` → `OnionGuardHandler` on the ephemeral clearnet
+context cancels any remaining `.onion` request on the IO thread (subresources,
+XHR, workers) and rewrites redirect-*targets* to an inert `about:blank` — one
+fail-closed choke point covering paths with no per-browser handler. The
+refusal page offers the Tor path instead of a dead end: open in a NEW Tor
+window (no room → the source window switches), or switch THIS window to Tor
+and load the address (toggle_tor's fresh-identity respawn, spawning at the
+URL). The Tor master switch is honored with an inline honest message when off.
+The trailing-dot FQDN spelling (`example.onion.`) is detected too — it would
+otherwise slip past a naive suffix check straight to a clearnet resolver.
+
+The HUD route field (CD-30) shows **"Tor · Onion"** while the active window is
+a Tor window on a `.onion` page — derived from the live slot URL + mode, never
+asserted; it claims exactly "connected to an onion service", nothing more.
+
+*Security property (recorded).* Onion traffic stays within Tor: there is no
+exit node, so onion browsing has no exit-node exposure, and onion resolution
+never touches DNS of any kind (arti resolves it inside Tor). Genuine, worth
+stating: *onion sites resolved inside Tor, never through clearnet DNS.*
+CD-33/34 ephemerality applies unchanged — Tor contexts are in-memory since
+CD-15/CD-33, the refusal page (which carries the `.onion` target in its query)
+is excluded from the RAM-only history and, being `cyberdesk://`, is never
+persisted by the session save — onion browsing leaves no disk trace.
+
+*Scope, honestly stated (D-0044).* Shipped: **open `.onion` addresses** — said
+as exactly that, no "full onion support" overclaim. Named and deferred to later
+phases: Onion-Location auto-switch, client authentication for private onion
+services, `.onion` certificate/TLS handling. Not planned: onion-service
+hosting (CyberDesk is a client). Headless/unit verification covers the routing
+and refusal logic (117 Rust tests incl. host parsing, FQDN-dot evasion,
+userinfo smuggling, refusal-URL round-trip, D-0044 copy check, and a
+compile-time proof the arti feature is on); the live `.onion` load and the
+DNS/net-log check are Sascha's.
+
+*Why.* The embedded Tor stack makes onion-client support a natural, bounded
+win and a Tor-Browser-parity feature (EC-01: solve every buildable vector);
+scoping to the core open — with honest clearnet refusal and no leak — delivers
+it safely without overclaiming the ecosystem extras.
+
 ## D-0051 - 2026-07-18 - Permanent browsing-residue purge (allowlisted, every launch, settable); zeroize/memory-lock deferred to the vault (CD-34)
 
 *Decision.* On every launch, before CEF opens the profile, CyberDesk purges the

@@ -62,6 +62,17 @@ feathered compositing, and an isolated in-shell settings surface.
   hardening is a separate, always-on layer (see below) and the two compose. *This is the
   host's second sanctioned outbound path (D-0004 → D-0027); the live routing/leak checks
   run on the maintainer's networked machine.*
+* **Open `.onion` addresses (CD-35, D-0052):** Tor windows open **onion services** —
+  `.onion` addresses are resolved **inside Tor, never through clearnet DNS** (the
+  hidden-service rendezvous has no DNS query and no exit node, so onion browsing has
+  no exit-node exposure), on the same per-window isolated circuits. A `.onion` in a
+  **clearnet** window is **refused before any lookup** — an honest full-window notice
+  offers to open it in a new Tor window or switch that window to Tor — and a
+  fail-closed request guard keeps `.onion` subresources and redirects away from
+  clearnet DNS too. While a Tor window is on an onion service, the HUD route reads
+  **Tor · Onion**. Onion browsing is in-memory like all browsing content — no disk
+  trace. (Onion-Location auto-switch, client auth, and `.onion` TLS specifics are
+  later phases.)
 * **Fingerprinting hardening — coherent tracking-resistance (CD-16, D-0039):**
   always on, in **every** window (clearnet and Tor alike). A fresh random seed per
   launch keys **deterministic per-session farbling** of the readback surfaces sites
