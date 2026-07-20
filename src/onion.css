@@ -1,0 +1,95 @@
+/* Onion refusal page styling (CD-35 Task B). Colors come entirely from the
+   injected token custom properties (theme.toml / Theme::to_css_vars) — nothing
+   hardcoded. Opaque panel, same idiom as the info page; the wgpu compositor
+   paints the Pulse Grid behind it. */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: transparent;
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.panel {
+  width: min(560px, 100%);
+  padding: 30px 32px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--corner-radius);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.mark { width: 44px; height: 44px; flex: none; }
+.ring { fill: none; stroke: var(--brand); }
+.r1 { stroke-width: 2; opacity: 0.55; }
+.r2 { stroke-width: 2; opacity: 0.8; }
+.r3 { stroke-width: 2.5; }
+.mark { filter: drop-shadow(0 0 10px color-mix(in srgb, var(--brand) 45%, transparent)); }
+
+h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.3px; }
+.sub { font-size: 11px; color: var(--text-dim); letter-spacing: 2px; text-transform: uppercase; margin-top: 4px; }
+
+/* The refused target, shown verbatim (textContent — never markup). */
+.addr {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 13px;
+  padding: 10px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.body { font-size: 13px; line-height: 1.55; color: var(--text); }
+.body em { font-style: normal; color: var(--brand); }
+
+.actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
+.btn {
+  appearance: none;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 9px 16px;
+  cursor: pointer;
+}
+.btn:hover { border-color: var(--brand); }
+.btn.primary {
+  color: var(--panel);
+  background: var(--brand);
+  border-color: var(--brand);
+}
+.btn.primary:hover { filter: brightness(1.12); }
+
+.err {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-radius: 8px;
+  padding: 8px 12px;
+}

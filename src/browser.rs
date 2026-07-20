@@ -51,6 +51,7 @@ const INFO_URL: &str = "cyberdesk://info/";
 const START_URL: &str = "cyberdesk://start/";
 const MFZONE_URL: &str = "cyberdesk://mfzone/";
 const HUD_URL: &str = "cyberdesk://hud/";
+const ONION_URL: &str = "cyberdesk://onion/";
 
 // cef_event_flags_t bits (modifiers for mouse/key events).
 const EVENTFLAG_SHIFT_DOWN: u32 = 1 << 1;
@@ -502,6 +503,46 @@ pub fn take_pending_tor_toggles() -> Vec<usize> {
     std::mem::take(&mut pending_tor_toggle().lock().unwrap())
 }
 
+/// Clearnet `.onion` refusals caught at the REQUEST level (CD-35 Task B): a
+/// link click / redirect to a `.onion` in a clearnet slot is canceled on the
+/// CEF UI thread (SlotRequestHandler) and queued here as `(slot, refusal_url)`;
+/// the main thread navigates the slot to the refusal page. The address-bar path
+/// never queues (it reroutes synchronously in the `navigate` IPC).
+fn pending_onion_refusal() -> &'static Mutex<Vec<(usize, String)>> {
+    static P: OnceLock<Mutex<Vec<(usize, String)>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Drain queued request-level onion refusals (main thread).
+pub fn take_pending_onion_refusals() -> Vec<(usize, String)> {
+    std::mem::take(&mut pending_onion_refusal().lock().unwrap())
+}
+
+/// "Open this onion address in a new Tor window" requests from the refusal page
+/// (CD-35): `(source_slot, onion_url)`, drained by the main thread which owns
+/// the slot lifecycle.
+fn pending_onion_tor() -> &'static Mutex<Vec<(usize, String)>> {
+    static P: OnceLock<Mutex<Vec<(usize, String)>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Drain queued open-in-new-Tor-window requests (main thread).
+pub fn take_pending_onion_tor() -> Vec<(usize, String)> {
+    std::mem::take(&mut pending_onion_tor().lock().unwrap())
+}
+
+/// "Switch this window to Tor and open the onion address" requests from the
+/// refusal page (CD-35): `(slot, onion_url)`, drained by the main thread.
+fn pending_onion_switch() -> &'static Mutex<Vec<(usize, String)>> {
+    static P: OnceLock<Mutex<Vec<(usize, String)>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Drain queued switch-to-Tor requests (main thread).
+pub fn take_pending_onion_switch() -> Vec<(usize, String)> {
+    std::mem::take(&mut pending_onion_switch().lock().unwrap())
+}
+
 /// Per-window close requests from the page's close icon (CD-18, CEF UI thread),
 /// drained by the main thread which owns the slot lifecycle (and enforces
 /// last-slot-refuses). Holds the slot ids to close.
@@ -691,9 +732,12 @@ fn ephemeral_context() -> Option<RequestContext> {
 /// scheme-factory calls); called once from `on_context_initialized`.
 fn init_ephemeral_context() {
     // Empty cache_path = in-memory storage for this context (the measured behaviour
-    // above). Everything else stays default.
+    // above). Everything else stays default. The context handler is the CD-35
+    // onion guard: every request in the clearnet context is checked on the IO
+    // thread and a `.onion` never reaches a clearnet resolver.
     let settings = RequestContextSettings::default();
-    let Some(ctx) = request_context_create_context(Some(&settings), None) else {
+    let mut handler = ClearnetContextHandler::new();
+    let Some(ctx) = request_context_create_context(Some(&settings), Some(&mut handler)) else {
         tracing::error!("ephemeral request context creation FAILED; no view can be created");
         return;
     };
@@ -1763,6 +1807,23 @@ fn hud_document() -> String {
     .clone()
 }
 
+/// The onion refusal page (CD-35 Task B): shown in a CLEARNET slot that was
+/// pointed at a `.onion` address. States the fact (onion addresses resolve
+/// inside Tor) and offers the Tor path — a new Tor window, or switching this
+/// window — instead of a dead end. Same self-contained inlining discipline as
+/// every internal page; zero network.
+fn onion_document() -> String {
+    static DOC: OnceLock<String> = OnceLock::new();
+    DOC.get_or_init(|| {
+        let theme = crate::theme::Theme::load();
+        include_str!("onion.html")
+            .replace("/*__TOKENS__*/", &theme.to_css_vars())
+            .replace("/*__CSS__*/", include_str!("onion.css"))
+            .replace("/*__JS__*/", include_str!("onion.js"))
+    })
+    .clone()
+}
+
 /// Scheme of a URL, for the command bar's lock/warn hint.
 fn scheme_of(url: &str) -> &'static str {
     if url.starts_with("https://") {
@@ -1787,6 +1848,113 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+// --- Onion routing (CD-35, D-0052) ------------------------------------------
+// `.onion` is a Tor feature (RFC 7686): it must resolve inside Tor via arti's
+// onion-service client, and it must NEVER reach a clearnet DNS resolver.
+// Chromium implements no RFC 7686 special-casing — in a clearnet context it
+// would resolve `.onion` like any hostname (the exact leak the RFC warns
+// about) — so CyberDesk enforces the split itself: Tor slots route `.onion`
+// through the per-slot SOCKS relay (tor.rs), clearnet slots refuse it before
+// any resolver is consulted (address-bar refusal here + the request-level
+// fail-closed guard in SlotRequestHandler below).
+
+/// Extract the host of a URL: the authority between `://` and the first
+/// `/?#`, minus any userinfo (`user@`) and any `:port` suffix. Byte-level and
+/// allocation-free on purpose — it runs on every request in clearnet slots.
+fn host_of(url: &str) -> &str {
+    let rest = match url.find("://") {
+        Some(i) => &url[i + 3..],
+        None => return "",
+    };
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    // Userinfo ends at the LAST '@' (RFC 3986: '@' in userinfo is legal, the
+    // host starts after the final one).
+    let host_port = match authority.rfind('@') {
+        Some(i) => &authority[i + 1..],
+        None => authority,
+    };
+    // A bracketed IPv6 literal ends at its bracket — anything after it (a
+    // `:port`) is dropped with it. Otherwise strip a trailing `:port` when the
+    // tail is all digits (a lone extra colon means an unbracketed IPv6-ish
+    // authority; leave it whole rather than truncate a hextet).
+    if host_port.starts_with('[') {
+        return match host_port.find(']') {
+            Some(end) => &host_port[..=end],
+            None => host_port,
+        };
+    }
+    match host_port.rfind(':') {
+        Some(i)
+            if host_port[i + 1..].bytes().all(|b| b.is_ascii_digit())
+                && !host_port[..i].contains(':') =>
+        {
+            &host_port[..i]
+        }
+        _ => host_port,
+    }
+}
+
+/// Is `host` a `.onion` special-use name (RFC 7686)? Case-insensitive; a
+/// trailing FQDN dot (`example.onion.`) counts too — that spelling would
+/// otherwise slip past the guard and reach a clearnet resolver.
+fn is_onion_host(host: &str) -> bool {
+    let h = host.trim_end_matches('.');
+    let Some(prefix) = h
+        .len()
+        .checked_sub(6)
+        .filter(|_| h[h.len() - 6..].eq_ignore_ascii_case(".onion"))
+        .map(|i| &h[..i])
+    else {
+        return false;
+    };
+    // `<label>.onion` needs a non-empty label ("....onion" / ".onion" are not
+    // onion addresses, and must not be treated as one).
+    !prefix.trim_end_matches('.').is_empty()
+}
+
+/// Is `url`'s host a `.onion` name? Pub for the HUD's route indicator (CD-35
+/// Task C): "on an onion service" is derived from the live slot URL + mode,
+/// never asserted separately.
+pub fn is_onion_url(url: &str) -> bool {
+    is_onion_host(host_of(url))
+}
+
+/// Strict percent-encoding for a URL embedded as a query-param value (the
+/// refusal page's `u=`). Unlike [`urlencode`], a space becomes `%20` (never
+/// `+` — a literal `+` in an onion URL's path must round-trip).
+fn urlencode_component(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// The clearnet-slot refusal page URL for onion target `url` shown in slot
+/// `slot` (CD-35 Task B): the internal page states that onion addresses need a
+/// Tor window and offers exactly that. The slot id rides along so the page's
+/// buttons act on the window they live in (never "whichever slot is active").
+fn onion_refusal_url(slot: usize, url: &str) -> String {
+    format!("{ONION_URL}?s={slot}&u={}", urlencode_component(url))
+}
+
+/// Where a classified navigation actually goes (CD-35): a `.onion` target in a
+/// clearnet slot is rerouted to the refusal page — the address never reaches
+/// any resolver — while every other target (and every Tor-slot target) passes
+/// through unchanged. Pure, so the unit tests can pin the routing table.
+fn route_navigation(slot: usize, tor: bool, url: &str) -> String {
+    if !tor && is_onion_url(url) {
+        onion_refusal_url(slot, url)
+    } else {
+        url.to_string()
+    }
 }
 
 /// The query→search-URL mapping for one engine (CD-07; the engine allowlist
@@ -1824,7 +1992,17 @@ fn classify_input_for(engine: &str, input: &str) -> String {
         t == "localhost" || t.starts_with("localhost:") || t.starts_with("localhost/");
     let looks_url = is_localhost || (t.contains('.') && !t.contains(char::is_whitespace));
     if looks_url {
-        format!("https://{t}")
+        // A schemeless `.onion` defaults to http:// (CD-35, D-0052): the onion
+        // transport itself is end-to-end encrypted and authenticated (the
+        // address IS the service's public key), and onion services rarely carry
+        // TLS certificates — an https:// default would stall on a certificate
+        // error before the page ever loads. An EXPLICIT https:// is honored
+        // unchanged (the `://` branch above).
+        if is_onion_host(host_of(&format!("x://{t}"))) {
+            format!("http://{t}")
+        } else {
+            format!("https://{t}")
+        }
     } else {
         search_url_for(engine, t)
     }
@@ -1953,7 +2131,11 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
                 .get("input")
                 .and_then(|x| x.as_str())
                 .ok_or((2, "missing 'input'".to_string()))?;
-            let url = classify_input(input);
+            // CD-35 Task B: a `.onion` target in a clearnet slot goes to the
+            // refusal page INSTEAD of the network — the address is never handed
+            // to any resolver (the request-level guard below is the backstop for
+            // non-address-bar paths).
+            let url = route_navigation(slot, slot_is_tor(slot), &classify_input(input));
             // Load that slot (spawning it if lazy — see navigate_slot).
             navigate_slot(slot, &url);
             request_overlay_close();
@@ -2023,6 +2205,32 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
         "toggle_tor" => {
             let slot = target_slot(&v);
             pending_tor_toggle().lock().unwrap().push(slot);
+            Ok(serde_json::json!({ "ok": true }).to_string())
+        }
+        // Onion refusal-page actions (CD-35 Task B): open the refused `.onion`
+        // in a NEW Tor window beside this one, or switch THIS window to Tor and
+        // load it there. Both validate host-side (the target must really be an
+        // http(s) `.onion` URL — the page is trusted UI, but fail-closed is the
+        // house style) and honor the Tor master switch with an honest error the
+        // page shows inline (no dead end, no silent failure).
+        "onion_open_tor" | "onion_switch_tor" => {
+            let cmd = v.get("cmd").and_then(|c| c.as_str()).unwrap_or("");
+            let slot = target_slot(&v);
+            let url = v
+                .get("url")
+                .and_then(|x| x.as_str())
+                .ok_or((2, "missing 'url'".to_string()))?;
+            if !(url.starts_with("http://") || url.starts_with("https://")) || !is_onion_url(url) {
+                return Err((2, "not an onion URL".to_string()));
+            }
+            if !crate::settings::tor_enabled() {
+                return Err((3, "Tor is disabled in Settings — enable it to open onion addresses".to_string()));
+            }
+            if cmd == "onion_open_tor" {
+                pending_onion_tor().lock().unwrap().push((slot, url.to_string()));
+            } else {
+                pending_onion_switch().lock().unwrap().push((slot, url.to_string()));
+            }
             Ok(serde_json::json!({ "ok": true }).to_string())
         }
         // Per-window close (CD-18): the ensemble's close icon. Queued for the main
@@ -2431,10 +2639,14 @@ wrap_client! {
         }
         fn request_handler(&self) -> Option<RequestHandler> {
             // Web isolation (cyberdesk:// only) on the internal views — the shared
-            // overlay AND the MF-zone content view (CD-18).
+            // overlay AND the MF-zone content view (CD-18). Slots get the onion
+            // navigation guard (CD-35): clearnet slots refuse `.onion` with the
+            // honest refusal page; Tor slots pass it to the SOCKS relay. Both
+            // also forward the message-router lifecycle (the start page lives in
+            // a slot and uses the router).
             match self.role {
                 Role::Internal | Role::MfZone | Role::Hud => Some(InternalRequestHandler::new()),
-                Role::Slot(_) => None,
+                Role::Slot(i) => Some(SlotRequestHandler::new(i, self.tor)),
             }
         }
         fn on_process_message_received(
@@ -2574,7 +2786,11 @@ wrap_display_handler! {
                     nav.url = new_url.clone();
                     changed
                 };
-                if changed {
+                // The onion refusal page is an error surface, not a destination —
+                // keep it (and the `.onion` target riding in its query) out of
+                // the suggestion pool (CD-35; history is RAM-only since CD-33
+                // either way).
+                if changed && !new_url.starts_with(ONION_URL) {
                     crate::memory::record_visit(&new_url, "");
                 }
             }
@@ -2761,6 +2977,150 @@ wrap_request_handler! {
     }
 }
 
+wrap_request_handler! {
+    struct SlotRequestHandler {
+        slot: usize,
+        // The connection mode this browser was created for (validated by the
+        // on_after_created guard, so a registered browser's mode always matches
+        // its slot). Tor slots pass `.onion` through to the SOCKS relay; clearnet
+        // slots refuse it here before any resolver sees the name (CD-35 Task B).
+        tor: bool,
+    }
+
+    impl RequestHandler {
+        fn on_before_browse(
+            &self,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            request: Option<&mut Request>,
+            _user_gesture: c_int,
+            _is_redirect: c_int,
+        ) -> c_int {
+            // A `.onion` navigation in a CLEARNET slot is refused before the
+            // network stack touches it (link clicks, JS navigation, and server
+            // redirects all pass through here — `on_before_browse` fires per
+            // top-level hop). The main frame lands on the honest refusal page
+            // with the Tor offer; a subframe is just canceled (an embedded
+            // iframe must not hijack the whole window). The address-bar path
+            // never reaches this (it reroutes in the `navigate` IPC), and the
+            // context-level OnionGuard below is the IO-thread backstop.
+            if !self.tor {
+                let url = request
+                    .as_ref()
+                    .map(|r| CefString::from(&r.url()).to_string())
+                    .unwrap_or_default();
+                if is_onion_url(&url) {
+                    let is_main = frame.as_ref().map(|f| f.is_main() != 0).unwrap_or(true);
+                    tracing::info!(slot = self.slot, is_main, "clearnet slot refused .onion navigation");
+                    if is_main {
+                        pending_onion_refusal()
+                            .lock()
+                            .unwrap()
+                            .push((self.slot, onion_refusal_url(self.slot, &url)));
+                    }
+                    return 1; // cancel — the name never reaches a resolver
+                }
+            }
+            // Allowed navigation: let the message router drop stale queries (the
+            // slot's own start page uses the router; CD-35 wires the required
+            // OnBeforeBrowse forwarding that slots previously lacked).
+            if let Some(router) = BROWSER_ROUTER.get() {
+                router.on_before_browse(browser.map(|b| b.clone()), frame.map(|f| f.clone()));
+            }
+            0 // proceed
+        }
+
+        fn on_render_process_terminated(
+            &self,
+            browser: Option<&mut Browser>,
+            _status: TerminationStatus,
+            _error_code: c_int,
+            _error_string: Option<&CefString>,
+        ) {
+            if let Some(router) = BROWSER_ROUTER.get() {
+                router.on_render_process_terminated(browser.map(|b| b.clone()));
+            }
+        }
+    }
+}
+
+wrap_resource_request_handler! {
+    struct OnionGuardHandler;
+
+    impl ResourceRequestHandler {
+        fn on_before_resource_load(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            request: Option<&mut Request>,
+            _callback: Option<&mut Callback>,
+        ) -> ReturnValue {
+            // Fail-closed: any `.onion` request in the clearnet context is
+            // canceled on the IO thread — subresources, XHR/fetch, iframes,
+            // anything that slipped past the UI-thread navigation guard. NB:
+            // the crate's `ReturnValue::default()` is RV_CANCEL, so the allow
+            // path must return CONTINUE explicitly.
+            let url = request
+                .as_ref()
+                .map(|r| CefString::from(&r.url()).to_string())
+                .unwrap_or_default();
+            if is_onion_url(&url) {
+                tracing::info!("clearnet context canceled .onion resource load");
+                return ReturnValue::CANCEL;
+            }
+            ReturnValue::CONTINUE
+        }
+
+        fn on_resource_redirect(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _request: Option<&mut Request>,
+            _response: Option<&mut Response>,
+            new_url: Option<&mut CefString>,
+        ) {
+            // A clearnet request whose server REDIRECTS to a `.onion` would
+            // otherwise follow the hop inside the same request — after this
+            // handler was already selected — so the redirect target is rewritten
+            // to an inert about: URL (no resolver involved) before it is
+            // followed. Top-level redirects additionally re-enter
+            // on_before_browse, which shows the refusal page.
+            if let Some(new_url) = new_url {
+                let target = new_url.to_string();
+                if is_onion_url(&target) {
+                    tracing::info!("clearnet context rewrote redirect-to-.onion to about:blank");
+                    new_url.try_set("about:blank#onion-blocked");
+                }
+            }
+        }
+    }
+}
+
+wrap_request_context_handler! {
+    struct ClearnetContextHandler;
+
+    impl RequestContextHandler {
+        fn resource_request_handler(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _request: Option<&mut Request>,
+            _is_navigation: c_int,
+            _is_download: c_int,
+            _request_initiator: Option<&CefString>,
+            _disable_default_handling: Option<&mut c_int>,
+        ) -> Option<ResourceRequestHandler> {
+            // Every request in the ephemeral CLEARNET context gets the onion
+            // guard (CD-35 Task B). Context-level on purpose: it also covers
+            // requests with no per-browser handler (workers), and any client
+            // path that returns None falls through to here — one choke point,
+            // fail-closed. Tor contexts have no guard: `.onion` is legitimate
+            // there and flows to the per-slot SOCKS relay.
+            Some(OnionGuardHandler::new())
+        }
+    }
+}
+
 wrap_scheme_handler_factory! {
     struct InternalSchemeFactory;
 
@@ -2788,6 +3148,8 @@ wrap_scheme_handler_factory! {
                 mfzone_document()
             } else if url.contains("//hud") {
                 hud_document()
+            } else if url.contains("//onion") {
+                onion_document()
             } else {
                 settings_document()
             };
@@ -2987,8 +3349,9 @@ wrap_render_process_handler! {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_input_for, common_screen_for, fresh_seed_hex, restamp_tor_status, search_url_for,
-        SCREEN_LADDER,
+        classify_input_for, common_screen_for, fresh_seed_hex, host_of, is_onion_host,
+        is_onion_url, onion_document, onion_refusal_url, restamp_tor_status, route_navigation,
+        search_url_for, urlencode_component, SCREEN_LADDER,
     };
 
     // --- Identity seed (CD-29): rotation produces fresh, well-formed seeds ------
@@ -3179,5 +3542,137 @@ mod tests {
         // A non-object (malformed / unexpected) cache is returned unchanged, never a panic.
         assert_eq!(restamp_tor_status("not json", 2), "not json");
         assert_eq!(restamp_tor_status("[1,2,3]", 2), "[1,2,3]");
+    }
+
+    // --- Onion routing (CD-35, D-0052) --------------------------------------
+
+    /// `host_of` extracts exactly the host: scheme, path/query/fragment,
+    /// userinfo, and port are all stripped; IPv6 brackets survive.
+    #[test]
+    fn host_of_extracts_the_host() {
+        assert_eq!(host_of("http://example.com/a?b#c"), "example.com");
+        assert_eq!(host_of("https://example.com:8443/x"), "example.com");
+        assert_eq!(host_of("http://user@example.com/"), "example.com");
+        assert_eq!(host_of("http://user:pw@example.com:80/"), "example.com");
+        // '@' may legally occur in userinfo — the host starts after the LAST one.
+        assert_eq!(host_of("http://a@b@example.com/"), "example.com");
+        assert_eq!(host_of("http://[2001:db8::1]:8080/"), "[2001:db8::1]");
+        assert_eq!(host_of("http://[2001:db8::1]/"), "[2001:db8::1]");
+        // No scheme → no host (classify_input prepends one before any check).
+        assert_eq!(host_of("example.com/a"), "");
+        assert_eq!(host_of("cyberdesk://onion/?u=x"), "onion");
+    }
+
+    /// The `.onion` test is case-insensitive, accepts the FQDN trailing dot
+    /// (which would otherwise slip to a clearnet resolver), and rejects
+    /// look-alikes: `.onion` inside a longer suffix, a bare "onion" label, and
+    /// an empty label before ".onion".
+    #[test]
+    fn onion_host_detection() {
+        // The 56-char v3 base32 label, the realistic shape (structure only —
+        // any real service id in the repo would be a doc/test-data smell).
+        let v3 = format!("{}.onion", "a".repeat(56));
+        assert!(is_onion_host(&v3));
+        assert!(is_onion_host("example.onion"));
+        assert!(is_onion_host("EXAMPLE.ONION"));
+        assert!(is_onion_host("sub.example.onion"));
+        assert!(is_onion_host("example.onion.")); // FQDN spelling must not evade
+        assert!(!is_onion_host("onion"));
+        assert!(!is_onion_host(".onion"));
+        assert!(!is_onion_host("..onion"));
+        assert!(!is_onion_host("example.onion.com")); // .onion NOT the TLD
+        assert!(!is_onion_host("example.union"));
+        assert!(!is_onion_host("notonion"));
+        assert!(!is_onion_host(""));
+        // Full-URL wrapper: host extraction + detection compose; userinfo and
+        // port cannot smuggle a clearnet host past the check (or vice versa).
+        assert!(is_onion_url("http://example.onion/page"));
+        assert!(is_onion_url("https://example.onion:8443/"));
+        assert!(is_onion_url("http://clearnet.com@example.onion/"));
+        assert!(!is_onion_url("http://example.onion@clearnet.com/"));
+        assert!(!is_onion_url("https://example.com/example.onion"));
+        assert!(!is_onion_url("https://example.com/?q=example.onion"));
+        assert!(!is_onion_url("cyberdesk://onion/?u=http%3A%2F%2Fexample.onion"));
+    }
+
+    /// A schemeless `.onion` classifies as a URL with an http:// default (the
+    /// onion transport is E2E-encrypted; https-onion certs are a later phase);
+    /// an explicit scheme is honored unchanged; clearnet keeps https.
+    #[test]
+    fn classify_defaults_onion_to_http() {
+        assert_eq!(
+            classify_input_for("duckduckgo", "example.onion"),
+            "http://example.onion"
+        );
+        assert_eq!(
+            classify_input_for("duckduckgo", "example.onion/page?a=1"),
+            "http://example.onion/page?a=1"
+        );
+        assert_eq!(
+            classify_input_for("duckduckgo", "https://example.onion/"),
+            "https://example.onion/"
+        );
+        // Clearnet input is untouched by the onion branch.
+        assert_eq!(
+            classify_input_for("duckduckgo", "example.com"),
+            "https://example.com"
+        );
+        // ".onion" in a SEARCH stays a search (contains whitespace → not a URL).
+        assert!(
+            classify_input_for("duckduckgo", "what is example.onion about")
+                .starts_with("https://duckduckgo.com/?q=")
+        );
+    }
+
+    /// The navigation routing table (CD-35): clearnet + `.onion` → the refusal
+    /// page (address never reaches a resolver); everything else passes through.
+    #[test]
+    fn route_navigation_refuses_onion_on_clearnet_only() {
+        // Clearnet slot + onion target → refusal page carrying slot + target.
+        let out = route_navigation(2, false, "http://example.onion/x");
+        assert!(out.starts_with("cyberdesk://onion/?s=2&u="));
+        assert!(out.contains("example.onion"));
+        // Tor slot + onion target → passes through to the SOCKS relay.
+        assert_eq!(
+            route_navigation(2, true, "http://example.onion/x"),
+            "http://example.onion/x"
+        );
+        // Clearnet slot + clearnet target → untouched.
+        assert_eq!(
+            route_navigation(0, false, "https://example.com/"),
+            "https://example.com/"
+        );
+        // Internal pages are never onion (the refusal page itself must not
+        // recurse into a refusal of itself).
+        let refusal = route_navigation(0, false, &out);
+        assert_eq!(refusal, out);
+    }
+
+    /// The refusal-URL encoding round-trips the target exactly (JS-side
+    /// `decodeURIComponent`): '+' stays a literal plus (never a space), '&'
+    /// and '=' cannot break the query structure.
+    #[test]
+    fn onion_refusal_url_encodes_strictly() {
+        assert_eq!(urlencode_component("a b+c&d=e"), "a%20b%2Bc%26d%3De");
+        let url = onion_refusal_url(1, "http://example.onion/p?a=1&b=+2");
+        assert_eq!(
+            url,
+            "cyberdesk://onion/?s=1&u=http%3A%2F%2Fexample.onion%2Fp%3Fa%3D1%26b%3D%2B2"
+        );
+    }
+
+    /// The refusal page's copy holds the D-0044 line: it offers CyberDesk's own
+    /// Tor path, names no competitor, and the actions the JS wires exist in the
+    /// served document.
+    #[test]
+    fn onion_document_copy_is_confident_and_wired() {
+        let doc = onion_document();
+        assert!(doc.contains("Tor window"), "the offer is CyberDesk's own Tor path");
+        assert!(doc.contains("onion_open_tor") && doc.contains("onion_switch_tor"));
+        assert!(doc.contains("id=\"open-tor\"") && doc.contains("id=\"switch-tor\""));
+        assert!(
+            !doc.contains("Tor Browser"),
+            "product surfaces never name a competitor (D-0044)"
+        );
     }
 }

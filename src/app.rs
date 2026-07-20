@@ -764,6 +764,36 @@ impl Shell {
         tracing::info!(slot = id, "toggle_tor: end (respawn requested, returned immediately)");
     }
 
+    /// Switch slot `id` to Tor and load `url` there (CD-35): the onion refusal
+    /// page's "switch this window to Tor". [`toggle_tor`]'s teardown/respawn —
+    /// same fresh-identity, no-state-bleed semantics — except the new browser
+    /// spawns at the requested URL instead of the start page, and the direction
+    /// is fixed (always → Tor; a slot already on Tor just navigates). The Tor
+    /// master switch was checked by the IPC that queued this.
+    fn switch_slot_to_tor_url(&mut self, id: usize, url: &str) {
+        if !self.order.contains(&id) {
+            return;
+        }
+        if browser::slot_is_tor(id) {
+            browser::load_url(Role::Slot(id), url);
+            return;
+        }
+        tracing::info!(slot = id, "switch_slot_to_tor_url: begin");
+        crate::tor::init(); // idempotent — ensure the engine is bootstrapping
+        browser::set_slot_tor(id, true);
+        if let Some(window) = self.window.clone() {
+            browser::close_slot(id);
+            if let Some(r) = self.renderer.as_mut() {
+                r.clear_slot(id);
+            }
+            self.loading[id] = 0.0;
+            self.push_geometry();
+            let hwnd = window_hwnd(&window);
+            browser::create_browser_url(Role::Slot(id), hwnd, url);
+        }
+        self.push_frame(false);
+    }
+
     /// Respawn slot `id`'s browser at its CURRENT url (CD-25 / CD-29): the fresh
     /// document picks up the new effective fingerprint config — hardening vectors AND
     /// the reported screen preset — which a live context can't adopt (the patches are
@@ -800,9 +830,28 @@ impl Shell {
     /// immediately with the URL, and becomes active. If the grid has no room, fall
     /// back to the CD-04 behavior: navigate the source slot in place.
     fn open_in_new_slot(&mut self, source_id: usize, url: String) {
+        // FAIL-CLOSED (CD-15, D-0027): a link opened from a Tor slot must STAY on
+        // Tor — the new slot inherits the source's mode. (The no-room fallback
+        // navigates the source's own browser in place, so it keeps the source's
+        // mode already.)
+        self.open_in_new_slot_mode(source_id, url, browser::slot_is_tor(source_id));
+    }
+
+    /// [`open_in_new_slot`] with the new slot's Tor mode set EXPLICITLY (CD-35):
+    /// the onion refusal page opens a `.onion` from a CLEARNET source in a new
+    /// TOR window, so "inherit the source's mode" is exactly wrong there. The
+    /// no-room fallback differs per mode: same-mode falls back to navigating the
+    /// source in place (CD-04), while a forced-Tor open must NOT (a clearnet
+    /// slot would just refuse the `.onion` again) — it switches the source slot
+    /// to Tor with the URL instead.
+    fn open_in_new_slot_mode(&mut self, source_id: usize, url: String, tor: bool) {
         let has_room = self.order.len() < self.slot_max() && self.total_units() < self.capacity() as u32;
         let Some(free) = slots::free_id(&self.order).filter(|_| has_room) else {
-            browser::load_url(Role::Slot(source_id), &url);
+            if tor && !browser::slot_is_tor(source_id) {
+                self.switch_slot_to_tor_url(source_id, &url);
+            } else {
+                browser::load_url(Role::Slot(source_id), &url);
+            }
             return;
         };
         if self.overlay == Overlay::Closed {
@@ -816,17 +865,12 @@ impl Shell {
         self.loading[free] = 0.0;
         self.active_slot = free;
         browser::set_active_slot(free);
-        // FAIL-CLOSED (CD-15, D-0027): a link opened from a Tor slot must STAY on
-        // Tor — inherit the source's mode BEFORE the browser is created, since
-        // create_browser_url reads slot_is_tor to pick the context. Otherwise a
-        // popup from a Tor page would silently open on the direct connection and
-        // leak the real IP. (The no-room fallback above navigates the source's own
-        // browser in place, so it keeps the source's mode already.)
-        let src_tor = browser::slot_is_tor(source_id);
-        if src_tor {
+        // Set the mode BEFORE the browser is created — create_browser_url reads
+        // slot_is_tor to pick the request context (CD-15, D-0027).
+        if tor {
             crate::tor::init();
         }
-        browser::set_slot_tor(free, src_tor);
+        browser::set_slot_tor(free, tor);
         // CD-25 / CD-29: a popup inherits the source window's hardening AND screen
         // overrides (so a Strict / 720p window's popups match it), read BEFORE the
         // browser is created.
@@ -1281,12 +1325,18 @@ impl Shell {
         let reduced = crate::harden::is_weakening(&crate::harden::Config::GREEN, &cfg);
         let active_pos = self.active_position() + 1;
         let active_tor = browser::slot_is_tor(self.active_slot);
+        // CD-35 Task C: "connected to an onion service" = the active window is a
+        // Tor window AND its current page is a `.onion` — derived from the live
+        // slot URL, never asserted. (A clearnet slot can never show a `.onion`
+        // page, so the conjunction is belt-and-suspenders.) In the sig because
+        // it changes on navigation alone.
+        let active_onion = active_tor && browser::is_onion_url(&browser::slot_url(self.active_slot));
         let rot_auto = crate::settings::rotate_auto();
         let rot_interval = crate::settings::rotate_interval_min();
         let epoch = browser::rotation_epoch();
         let tz_offset = local_utc_offset_minutes();
         let sig = format!(
-            "{}|{vec_on}|{reduced}|{active_pos}|{active_tor}|{rot_auto}|{rot_interval}|{epoch}|{tz_offset}",
+            "{}|{vec_on}|{reduced}|{active_pos}|{active_tor}|{active_onion}|{rot_auto}|{rot_interval}|{epoch}|{tz_offset}",
             level.as_str()
         );
         if sig == self.hud_sig {
@@ -1304,7 +1354,7 @@ impl Shell {
             "vectors_on": vec_on,
             "vectors_total": vec_total,
             "reduced": reduced,
-            "route": { "window": active_pos, "slot": self.active_slot, "tor": active_tor },
+            "route": { "window": active_pos, "slot": self.active_slot, "tor": active_tor, "onion": active_onion },
             "rotate": {
                 "auto": rot_auto,
                 "interval_min": rot_interval,
@@ -2325,6 +2375,28 @@ impl ApplicationHandler for Shell {
         if self.views_started {
             for id in browser::take_pending_tor_toggles() {
                 self.toggle_tor(id);
+            }
+        }
+
+        // Onion handling (CD-35): request-level clearnet refusals land the slot
+        // on the honest refusal page; the page's two offers open the `.onion`
+        // in a NEW Tor window (beside the refusing one) or switch THAT window
+        // to Tor with the URL. All three queued on the CEF UI thread, executed
+        // here because the main thread owns the slot lifecycle.
+        if self.views_started {
+            for (slot, refusal_url) in browser::take_pending_onion_refusals() {
+                // The slot may have been closed between the UI-thread cancel and
+                // this drain — navigating it then would ghost-spawn a browser
+                // for a slot outside the layout.
+                if self.order.contains(&slot) {
+                    browser::navigate_slot(slot, &refusal_url);
+                }
+            }
+            for (source, url) in browser::take_pending_onion_tor() {
+                self.open_in_new_slot_mode(source, url, true);
+            }
+            for (slot, url) in browser::take_pending_onion_switch() {
+                self.switch_slot_to_tor_url(slot, &url);
             }
         }
 

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Onion address</title>
+<link rel="icon" href="data:,">
+<style>
+/*__TOKENS__*/
+/*__CSS__*/
+</style>
+</head>
+<body>
+  <!-- Onion refusal page (CD-35 Task B): shown in a CLEARNET window that was
+       pointed at a .onion address. The address was NOT sent anywhere — refused
+       before any resolver — and the page offers the Tor path instead of a dead
+       end. Copy per D-0044: states what CyberDesk does, confidently. -->
+  <main class="panel">
+    <div class="head">
+      <svg class="mark" viewBox="0 0 48 48" aria-hidden="true">
+        <circle cx="24" cy="24" r="20" class="ring r1"/>
+        <circle cx="24" cy="24" r="13" class="ring r2"/>
+        <circle cx="24" cy="24" r="6" class="ring r3"/>
+      </svg>
+      <div>
+        <h1>This address needs a Tor window</h1>
+        <div class="sub">Onion service &middot; resolved inside Tor</div>
+      </div>
+    </div>
+    <div class="addr" id="addr" title=""></div>
+    <p class="body">
+      This is an onion address. Onion services resolve <em>inside</em> the Tor
+      network &mdash; never through regular DNS &mdash; so CyberDesk opens them in
+      Tor windows. This clearnet window refused the address before any lookup:
+      nothing was sent.
+    </p>
+    <div class="actions">
+      <button class="btn primary" id="open-tor" type="button">Open in a new Tor window</button>
+      <button class="btn" id="switch-tor" type="button">Switch this window to Tor</button>
+    </div>
+    <div class="err" id="err" hidden></div>
+  </main>
+<script>
+/*__JS__*/
+</script>
+</body>
+</html>

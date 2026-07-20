@@ -1,6 +1,6 @@
 # CyberDesk - Wire Format
 
-Project CARVILON CyberDesk - living document - Status: 2026-07-09
+Project CARVILON CyberDesk - living document - Status: 2026-07-20
 
 Deliberately thin for now - the formats emerge from CD-02 on. Rule: every interface change is documented here before it lands on main.
 
@@ -408,6 +408,21 @@ hit-tested host-side, like the gear button.
   the engine master switch (`tor_enabled`) is off and the target is turning Tor ON.
 - Success: `{"ok":true}`. Failure: code 1 (malformed request JSON).
 
+### `onion_open_tor` / `onion_switch_tor` (view -> host, CD-35)
+
+- Request: `{"cmd":"onion_open_tor","url":<str>[,"slot":<int>]}` /
+  `{"cmd":"onion_switch_tor","url":<str>[,"slot":<int>]}` — the onion refusal
+  page's two offers (`cyberdesk://onion/?s=<slot>&u=<strictly-percent-encoded
+  target>`; the page reads both params and sends the slot it lives in).
+- Effect: `onion_open_tor` queues opening `url` in a NEW Tor window beside slot
+  `slot` (no room → the source slot itself is switched to Tor with the URL);
+  `onion_switch_tor` queues switching slot `slot` to Tor (toggle_tor's
+  teardown/respawn semantics, fresh identity) spawning at `url` instead of the
+  start page. Host re-validates: `url` must be an http(s) `.onion` URL.
+- Success: `{"ok":true}`. Failure: code 1 (malformed request JSON), 2 (missing
+  `url` / not an onion URL), 3 (Tor disabled in Settings — the page shows the
+  message inline; honest, no dead end).
+
 ### `close_slot` (view -> host, CD-18)
 
 - Request: `{"cmd":"close_slot"[,"slot":<int>]}` — the ensemble's close icon. `slot`
@@ -504,7 +519,7 @@ and the countdown locally, off absolute anchors.
 ### `cdHud(json)` (host -> view, push)
 
 - Payload:
-  `{"sent_ms":<unix ms>,"tz_offset_min":<int>,"level":<str>,"vectors_on":<int>,"vectors_total":<int>,"reduced":<bool>,"route":{"window":<1-based pos>,"slot":<id>,"tor":<bool>},"rotate":{"auto":<bool>,"interval_min":<int>,"elapsed_ms":<int>},"identity_age_ms":<int>}`
+  `{"sent_ms":<unix ms>,"tz_offset_min":<int>,"level":<str>,"vectors_on":<int>,"vectors_total":<int>,"reduced":<bool>,"route":{"window":<1-based pos>,"slot":<id>,"tor":<bool>,"onion":<bool>},"rotate":{"auto":<bool>,"interval_min":<int>,"elapsed_ms":<int>},"identity_age_ms":<int>}`
   - `sent_ms` — the host's send time; the page converts the elapsed-based fields
     into ABSOLUTE anchors at receive time (`deadline = sent_ms + interval −
     elapsed`, `born = sent_ms − identity_age_ms`), so a re-pulled cache can never
@@ -518,7 +533,10 @@ and the countdown locally, off absolute anchors.
     by construction: read from the same resolved config the render processes
     receive. The HUD's Ampel lamps light strictly from `level`.
   - `route` — the ACTIVE window's route (`tor` bool; window is its 1-based
-    display position). Real CD-15 state; there is no other route kind.
+    display position). Real CD-15 state; there is no other route kind. `onion`
+    (CD-35): the window is a Tor window AND its current page is a `.onion` —
+    derived from the live slot URL, shown as "Tor · Onion". Claims exactly
+    "connected to an onion service", nothing more.
   - `rotate` — the CD-29 auto-rotation state driving the countdown field; when
     `auto` is false the page shows the identity age instead.
 - Push signature: level, vector count, reduced, active window/route, rotate
