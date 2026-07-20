@@ -12,6 +12,17 @@
 //! checklist is enforced on the CEF request context (Stage B). Empirical
 //! verification (check.torproject.org, DNS-leak, WebRTC) is Sascha's live run.
 //!
+//! Onion services (CD-35, D-0052): the same relay path carries `.onion` targets.
+//! A `.onion` hostname arrives as ATYP=domain like any other and goes to
+//! `TorClient::connect` unresolved; with the `onion-service-client` feature
+//! compiled in (Cargo.toml), arti performs the hidden-service rendezvous INSIDE
+//! Tor — there is no exit node and no DNS resolution of any kind for onion
+//! targets, clearnet or otherwise. Per-slot circuit isolation carries over:
+//! arti passes the client's isolation into `get_or_launch_tunnel`, so two Tor
+//! windows never share an HS circuit either. Clearnet slots never reach this
+//! relay; their `.onion` refusal is enforced browser-side (browser.rs, CD-35
+//! Task B) so the address is never handed to a clearnet resolver.
+//!
 //! Residual risk (documented, D-0026): embedded arti may `process::exit(1)` on an
 //! obsolete consensus, which would take the shell down; the subprocess integration
 //! would isolate that. Embedded was chosen (single-binary doctrine, SimpleGoX
@@ -479,5 +490,17 @@ mod tests {
             rustls::crypto::CryptoProvider::get_default().is_some(),
             "a rustls CryptoProvider must be installed after install_crypto_provider()"
         );
+    }
+
+    /// The `onion-service-client` feature must be COMPILED IN (CD-35, D-0052).
+    /// `StreamPrefs::connect_to_onion_services` exists only under that feature, so
+    /// this test is a compile-time proof: if the Cargo feature is ever dropped, the
+    /// build (not a live .onion load) is what fails. A `.onion` through the relay
+    /// without the feature would fail with OnionAddressNotSupported — an outage,
+    /// not a leak, but the feature is the ticket's core capability.
+    #[test]
+    fn onion_service_client_feature_is_compiled_in() {
+        let mut prefs = arti_client::StreamPrefs::new();
+        prefs.connect_to_onion_services(arti_client::config::BoolOrAuto::Explicit(true));
     }
 }

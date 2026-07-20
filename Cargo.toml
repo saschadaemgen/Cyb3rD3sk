@@ -39,7 +39,12 @@ toml = "0.9"
 # arti cannot inflate the response — the fetch silently stalls at 15% (D-0033). Do
 # NOT drop it. (Needs a C toolchain for the zstd/xz codecs — MSVC, already present
 # for CEF.)
-arti-client = { version = "0.43", default-features = false, features = ["tokio", "rustls", "compression"] }
+# `onion-service-client` (CD-35, D-0052) — arti's onion-service CLIENT (stable,
+# non-experimental at 0.43): a `.onion` hostname handed to `TorClient::connect`
+# resolves via the HS rendezvous protocol INSIDE Tor (no exit node, no DNS).
+# With the feature compiled in, `allow_onion_addrs` defaults to true — no config
+# change needed; the per-slot SOCKS relay already passes hostnames unresolved.
+arti-client = { version = "0.43", default-features = false, features = ["tokio", "rustls", "compression", "onion-service-client"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "io-util", "sync", "time"] }
 # File logging (CD-15 HOTFIX): a windowed app has no visible stderr. `tracing` is
 # chosen over `log`+fern because arti/tokio already emit `tracing` events, so one
