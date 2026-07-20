@@ -53,7 +53,9 @@ pub fn shared() -> &'static Mutex<Store> {
     S.get_or_init(|| Mutex::new(Store::open()))
 }
 
-fn data_dir() -> PathBuf {
+/// The OS app-data directory holding `state.db` — and, since CD-40, the vault
+/// files (`vault.json` / `vault.seal`, see vault.rs).
+pub(crate) fn data_dir() -> PathBuf {
     let base = std::env::var("LOCALAPPDATA")
         .or_else(|_| std::env::var("APPDATA"))
         .unwrap_or_else(|_| ".".to_string());

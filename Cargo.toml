@@ -75,6 +75,24 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 # sessions are unlinkable and the seed is unguessable. Purpose-built minimal crate,
 # already in the tree via rand/arti; NOT an HTTP client — NetGuard (D-0004) unaffected.
 getrandom = "0.3"
+# --- Vault crypto core (CD-40, D-0058) — vetted RustCrypto crates, no custom
+# crypto. All four are MIT OR Apache-2.0 (D-0005 license check clean).
+# `argon2`: Argon2id KDF for the passphrase envelope. Trimmed to `alloc` (the
+# in-memory block matrix) — the PHC-string/password-hash layer and its rand dep
+# are not used (we store explicit per-envelope params + salt, not PHC strings).
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "zeroize"] }
+# `chacha20poly1305`: XChaCha20-Poly1305 AEAD wrapping the Vault Master Key and
+# sealing app state. Only the *_in_place_detached APIs are used, so plaintext
+# key material never transits an unlocked heap allocation the AEAD crate makes;
+# its own `getrandom` feature is off (nonces come from our getrandom 0.3 above).
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+# `zeroize`: volatile-write key erasure the optimizer cannot elide (closes the
+# CD-33-deferred memory-hygiene tasks C/D for vault keys).
+zeroize = "1"
+# `blake2`: keyless KDF/checksum duties — combining per-method wrapping keys for
+# multi-factor envelopes and the recovery-key display checksum. Already proven
+# code: it is the same hash family Argon2 builds on internally.
+blake2 = "0.10"
 
 [profile.release]
 opt-level = 3

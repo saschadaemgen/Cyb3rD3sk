@@ -5,6 +5,77 @@ Living document - maintained by Claude Code (CC), updated in the same
 commit-set as the change it records (D-0053). Append-only: historical entries
 are never rewritten; a superseded decision gets a new D-number forward.
 
+## D-0058 - 2026-07-21 - Vault Stage 1: envelope key management (VMK wrapped by passphrase / recovery key / passkey-PRF), structural unlock policy, start-authorization gate, memory hygiene (CD-40)
+
+*Decision.* The vault uses an **envelope model**: one random 256-bit Vault
+Master Key (VMK, CSPRNG) is wrapped independently by every enrolled unlock
+method — passphrase via Argon2id (RFC 9106 second-recommendation parameters:
+64 MiB, t=3, p=4, stored per method and re-tunable), a mandatory
+displayed-once recovery key (Crockford-base32, 14×4 groups, 3-byte BLAKE2s
+typo checksum), and later a device-bound passkey via WebAuthn PRF enrolled
+from an unlocked session. Enrolling/removing a method **re-wraps the VMK,
+never re-encrypts the vault**. The unlock policy (how many methods must be
+presented together) is **structural, not a flag**: at 1-required every method
+has its own envelope; at N-required only N-combinations of methods have
+envelopes, each keyed by a BLAKE2s-combined key of all members — so editing
+the `required` field in `vault.json` changes nothing; the cryptography is in
+which envelopes exist. To make re-wrapping possible with only the VMK in
+memory, every method's wrapping key is also stored wrapped **under the VMK**
+("escrow") — this adds no attack surface: the escrows open only *with* the
+VMK, and whoever holds the VMK has already won the current vault; rotating a
+method replaces its escrow. **Never-brick rule**: passphrase and recovery key
+are always enrolled and non-removable (Stage 1), and every envelope set must
+contain at least one all-non-hardware envelope — which also means the
+required count may only rise while a non-hardware combination still exists
+(3-required over {passphrase, recovery, passkey} is *refused*: every envelope
+would contain the hardware token). A PIN is never a standalone vault key (too
+low-entropy): it belongs to the authenticator (Windows Hello / security-key
+gate) or a later session quick-unlock. The app is locked until unlock (UI
+renders only after the VMK is available; env-gated dev bypass compiled only
+under `debug_assertions`, impossible in a release artifact). AEAD is
+XChaCha20-Poly1305 with per-context associated data (envelope/escrow/sealed
+state are mutually non-replayable); unlock failure is one uniform error (no
+wrong-key vs tampered oracle). Sensitive app state is sealed under the VMK
+(`vault.seal`), decrypted only after unlock.
+
+*Memory hygiene (closes the CD-33-deferred Tasks C/D for vault keys).* All
+key material lives in `SecretBuf`s: dedicated `VirtualAlloc`ed pages,
+`VirtualLock`ed out of the pagefile, zeroized then unlocked and freed on
+drop; allocation **fails closed** (no lock → no key material, after one
+working-set bump). Dedicated pages because `VirtualUnlock` unlocks pages, so
+secrets must never share one with an allocator neighbor, and page-owning
+buffers are never realloc-copied. AEAD runs through `*_in_place_detached`
+(plaintext never transits cipher-crate allocations); Argon2 runs with an
+explicitly provided block matrix zeroized after derivation plus the crate's
+`zeroize` feature for its internal state. Honest residual (internal scope,
+D-0044): transient stack copies inside the crypto crates, the Argon2 matrix
+*during* derivation, and hibernation snapshots are not closable at this
+layer.
+
+*Crates (verified at source, D-0005 license check clean — all MIT OR
+Apache-2.0).* `argon2` 0.5.3 (alloc+zeroize only — no PHC-string layer),
+`chacha20poly1305` 0.10.1 (the audited 0.10 line; alloc only, its own
+getrandom feature off), `zeroize` 1.9, `blake2` 0.10.6; CSPRNG via the
+existing `getrandom` 0.3. No custom cryptography anywhere: the only
+constructions are the vetted primitives plus documented AAD domains and a
+keys-to-key BLAKE2s combine over fixed-length uniform inputs.
+
+*Shipping.* CD-40 lands in sub-stages: 1a crypto core + persistence + tests
+(this entry), 1b start-authorization gate + setup/unlock flow + sealed-state
+wiring, 1c config/tile surface, 1d passkey-PRF (verify-first; honestly
+deferred if PRF is not dependable on the target). File vault and PQ layers
+are Stages 2/3 (separate tickets).
+
+*Why.* A vault must never derive its master key from a single factor or trap
+it behind one method; the envelope model gives configurable multi-factor with
+recovery and hardware-strength convenience at once, and it is the foundation
+the sealed onion-hosting key and the file vault build on. The structural
+policy exists because a policy an attacker can edit out of a JSON file is not
+a policy; the escrow exists because "enroll from an unlocked session" is a UX
+promise the pairwise-envelope design cannot keep without it; the never-brick
+invariant exists because a security feature that can strand its owner is a
+liability, not a feature.
+
 ## D-0057 - 2026-07-20 - Fresh installs now actually boot the hardening Ampel at Green: the stale CD-25 store seed is removed, not reseeded
 
 *Decision.* A fresh install was booting the fingerprinting-hardening Ampel at

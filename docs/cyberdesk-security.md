@@ -1,6 +1,6 @@
 # CyberDesk - Security
 
-Project CARVILON CyberDesk - living document - Status: 2026-07-20
+Project CARVILON CyberDesk - living document - Status: 2026-07-21 (through CD-40 Stage 1a / D-0058)
 Maintained by Claude Code (CC), updated in the same commit-set as the code it describes (D-0053).
 
 ## Iron law
@@ -21,10 +21,72 @@ The surf zone (CEF) has no path to CARVILON functions (doors, cameras, time cloc
   ONLY on `cyberdesk://` frames — a web page has no IPC surface at all.
 - No generic eval or passthrough channels.
 
-## Keys and authorization (planned, Season 6)
+## Vault: keys and authorization (Season 6 crypto, CD-40, D-0058)
 
-- Start authorization: passphrase or token -> Argon2id -> key -> encrypted app state is decrypted -> only then does the UI render.
-- Zeroize for all key material. No keys in memory before authentication. No key material in the WebView, ever.
+Stage 1 crypto core is shipped (`src/vault.rs`); the start-authorization
+gate, the config/tile surface, and the passkey-PRF layer land in the CD-40
+sub-stages that follow. The standing laws are unchanged: **no key material in
+memory before authentication; no key material in the WebView, ever.**
+
+The model, precisely:
+
+- **Envelope key management.** One random 256-bit Vault Master Key (VMK)
+  protects the vault's sensitive data; it is never derived from any single
+  factor. Every enrolled method wraps the VMK in its own XChaCha20-Poly1305
+  envelope: the passphrase via Argon2id (RFC 9106 second recommendation —
+  64 MiB, t=3, p=4 — stored per method, re-tunable), the mandatory recovery
+  key (32 random bytes, displayed exactly once), later the passkey's WebAuthn
+  PRF secret. Enroll/remove/rotate re-wraps the VMK; the vault data is never
+  re-encrypted.
+- **The unlock policy is structural.** "2-required" does not check a flag: at
+  2-required only *pairs* of methods have envelopes, keyed by a combined
+  (BLAKE2s, domain-separated) key of both members. An attacker editing
+  `required` in `vault.json` gains nothing — no single-method envelope
+  exists to open. Unlock failure is one uniform error: wrong passphrase,
+  wrong recovery key and tampered blob are indistinguishable (no oracle).
+- **Never-brick.** The passphrase and the recovery key are always enrolled
+  and cannot be removed; every envelope set must contain at least one
+  envelope needing no hardware, so the policy can only rise while a
+  non-hardware combination still exists. The invariant is enforced on every
+  re-wrap AND on every load — a violating (hand-edited, corrupted) file is
+  refused before it can strand the user.
+- **Escrows.** Each method's wrapping key is also stored wrapped *under the
+  VMK*, so enrolling a passkey / changing the policy works from an unlocked
+  session without re-prompting every factor. Honest assessment: an attacker
+  who obtains the VMK could also read the current wrapping keys — but the
+  VMK already decrypts everything the vault protects, so this adds no
+  capability; rotating a method replaces its escrow.
+- **Honest recovery caveat.** The recovery key is shown once at mint time and
+  never stored. Whoever holds it (the printout) can unlock a 1-required
+  vault; losing BOTH the passphrase and the printed recovery key means the
+  vault stays shut — there is no backdoor, which is the point. The offline
+  brute-force surface of `vault.json` is the passphrase envelope at the
+  stored Argon2id cost; the recovery-key and passkey envelopes sit at full
+  256-bit strength.
+- **Memory hygiene — the CD-33-deferred Tasks C/D are CLOSED for vault
+  keys.** All key material lives in dedicated `VirtualAlloc`ed,
+  `VirtualLock`ed pages (never the pagefile), zeroized before unlock/free on
+  drop; allocation fails closed if the pages cannot be locked. AEAD runs
+  in-place (plaintext never transits cipher-crate allocations); the Argon2
+  block matrix is caller-owned and zeroized after derivation. Bounded
+  residuals (internal scope, never surfaced, D-0044): transient stack copies
+  inside the crypto crates, the Argon2 matrix *during* a derivation, and
+  hibernation (`hiberfil.sys` snapshots even locked pages). The live
+  pagefile spot-check is the maintainer's acceptance step.
+- **Sealed app state.** Sensitive app state is sealed under the VMK
+  (`vault.seal`, AEAD with its own AAD domain) and decrypted only after
+  unlock; non-sensitive layout state stays in `state.db` (do not seal what
+  does not need sealing).
+- **PIN honesty.** A PIN is never a standalone vault envelope (too
+  low-entropy for an offline-attackable wrap). It belongs to the
+  authenticator (Windows Hello / security-key gate inside WebAuthn) or, at
+  most, to a later in-session quick-unlock that keeps the VMK in protected
+  memory.
+- **Passkey-PRF caveat (verify-first).** WebAuthn PRF maps to CTAP2
+  `hmac-secret`; security keys support it reliably, Windows Hello support is
+  in flux. The passkey sub-stage ships only after PRF is verified dependable
+  on the target — the foundation (passphrase + recovery + gate) never waits
+  on it.
 
 ## NetGuard
 
@@ -220,8 +282,10 @@ Residuals, precisely:
 - **The pagefile is addressed by keeping secrets out of it, not by disk encryption.**
   Disk encryption is transparent on a running, unlocked machine and is therefore *not*
   the control against a running-system attacker; the control is that sensitive data
-  never reaches the disk in the first place. See the note below on what secrets
-  currently exist.
+  never reaches the disk in the first place. Since CD-40 (D-0058) the vault's key
+  material is additionally `VirtualLock`ed out of the pagefile and zeroized on drop —
+  the CD-33-deferred Tasks C/D, closed against a real secret. See the vault section
+  above.
 - **Tor state persists by design** (`%LOCALAPPDATA%\CyberDesk\tor\state`). Entry-guard
   persistence is an anonymity *feature* — rotating guards every session raises exposure
   to a malicious guard. It is Tor's own security state, deliberately distinct from

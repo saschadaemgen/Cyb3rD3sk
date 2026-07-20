@@ -26,6 +26,7 @@ mod store;
 mod theme;
 mod tor;
 mod updates;
+mod vault;
 
 use std::process::ExitCode;
 
