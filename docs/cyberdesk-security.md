@@ -9,8 +9,16 @@ The surf zone (CEF) has no path to CARVILON functions (doors, cameras, time cloc
 
 ## Process boundaries and IPC
 
-- Rust host and CEF renderers are separated by a hard process boundary; the Chromium sandbox stays active.
-- IPC exclusively through an explicit allowlist of named commands (schema in cyberdesk-wire-format.md, emerging from CD-02).
+- Rust host and CEF renderers are separated by a hard process boundary.
+- The Chromium **OS sandbox is currently deferred** (D-0008: the cef-rs Windows
+  sandbox requires the bootstrap.exe launcher model, which breaks the plain
+  cargo-run path). This is a **tracked, time-boxed deviation** from the
+  "sandbox stays active" doctrine with a hard re-enablement gate before Season
+  5/6 (before daily-use browsing and before crypto lands) — recorded here so
+  the security doc never overstates the live posture.
+- IPC exclusively through an explicit allowlist of named commands (the full
+  schema is cyberdesk-wire-format.md). The bridge (`window.cefQuery`) exists
+  ONLY on `cyberdesk://` frames — a web page has no IPC surface at all.
 - No generic eval or passthrough channels.
 
 ## Keys and authorization (planned, Season 6)
@@ -217,11 +225,12 @@ Residuals, precisely:
   browsing content, and is not a forensic defect. It does, however, evidence *that* Tor
   was used (not where you went).
 - **Session restore is opt-in and honest.** "Quit & Save" persists layout, per-slot
-  mode, and URLs — never cookies, cache, or content — so a restored session brings back
-  the tabs but **not** the login state; you come back logged out. Plain Quit persists
-  nothing. Storing this metadata encrypted-at-rest is open (it is currently plaintext
-  `state.db`), and it is the one place a visited URL can reach disk — by explicit user
-  action.
+  mode, and — for **clearnet windows only** — URLs; a Tor window's URL is **never**
+  written (it returns as a real Tor window on the start page, D-0035). Never cookies,
+  cache, or content — a restored session brings back the tabs but **not** the login
+  state; you come back logged out. Plain Quit persists nothing. Storing this metadata
+  encrypted-at-rest is open (it is currently plaintext `state.db`), and it is the one
+  place a visited URL can reach disk — by explicit user action.
 - **`favorites` is on disk by intent**, and a favorite is a URL. It records what the
   user chose to keep, not where they have been; this is the bookmark/history split every
   ephemeral browser makes. Worth knowing it is there.

@@ -64,7 +64,8 @@ Nothing on the app path is throwaway work.
 
 ## Browser becomes CARVILON (Season 5)
 
-- Favorites and history in SQLite, own buttons away from the content
+- Favorites and history in SQLite, own buttons away from the content — **shipped
+  early** (CD-07 command palette + favorites; history RAM-only since CD-33)
 - Downloads land in the Files zone; context menu, JS dialogs, and popups in our own design
 - Request filter as adblock foundation (filter lists on the network level)
 - Later: Widevine for streaming DRM (plan for Google's license process), autofill via the Rust password core

@@ -3,13 +3,18 @@
 Project CARVILON CyberDesk - living document - Status: 2026-07-20
 Maintained by Claude Code (CC), updated in the same commit-set as the code it describes (D-0053).
 
-Deliberately thin for now - the formats emerge from CD-02 on. Rule: every interface change is documented here before it lands on main.
+Rule: every interface change is documented here in the same commit-set as the
+change (D-0053).
 
-## Host<->CEF IPC (planned)
+## Host<->CEF IPC (live)
 
-- Explicit allowlist of named commands. Documented per command: name, direction, fields, error cases.
-- No generic eval or passthrough channels.
-- First commands arrive with CD-02: frame handover (OSR texture), input forwarding (mouse/keyboard), navigation (load URL, back/forward).
+- Explicit allowlist of named commands — the sections below ARE the allowlist,
+  one section per command: name, direction, fields, error cases.
+- No generic eval or passthrough channels. The bridge (`window.cefQuery`) is
+  exposed only on `cyberdesk://` frames; web pages have no IPC surface.
+- Frame handover (OSR texture) and input forwarding are direct CEF surfaces
+  (on_paint / input events), not message-router commands; everything
+  command-shaped goes through the router and is listed here.
 
 ## Settings IPC (CD-03, live)
 
@@ -25,8 +30,9 @@ Transport: `window.cefQuery({ request, persistent: false, onSuccess, onFailure }
 ### `get_settings` (view -> host)
 
 - Request: `{"cmd":"get_settings"}`
-- Success: `{"feather_edges":<bool>,"animated_background":<bool>,"stay_foreground":<bool>,"purge_residue":<bool>,"glow_intensity":<int>,"search_engine":<str>,"tor_enabled":<bool>,"tor_default":<bool>,"fp_preset":<str>,"fp_custom":{…}}`
+- Success: `{"feather_edges":<bool>,"animated_background":<bool>,"stay_foreground":<bool>,"purge_residue":<bool>,"glow_intensity":<int>,"search_engine":<str>,"tor_enabled":<bool>,"tor_default":<bool>,"fp_preset":<str>,"fp_custom":{…},"screen_preset":<str>,"rotate_on_restart":<bool>,"rotate_auto":<bool>,"rotate_new_circuit":<bool>,"rotate_interval_min":<int>}`
   (`tor_enabled` / `tor_default` added in CD-15; `fp_preset` / `fp_custom` in CD-25;
+  `screen_preset` and the `rotate_*` identity-rotation keys in CD-29;
   `purge_residue` in CD-34.)
   - `purge_residue` (default true) — the on-launch browsing-residue purge (CD-34,
     D-0051).
@@ -38,8 +44,11 @@ Transport: `window.cefQuery({ request, persistent: false, onSuccess, onFailure }
     Ampel level a window inherits (CD-25; graded CD-30, factory default `green`).
     `yellow`/`red` are the former `standard`/`strict` (identical content); the
     old names still parse as aliases so persisted configs never silently change.
-  - `fp_custom` — the per-vector flags used when `fp_preset` is `custom`, e.g.
-    `{"on":<bool>,"strict":<bool>,"canvas":<bool>,"webgl":<bool>,"audio":<bool>,"metrics":<bool>,"nav":<bool>,"fonts":<bool>}`.
+  - `fp_custom` — the per-vector flags used when `fp_preset` is `custom`: one
+    boolean per vector key in the CD-29/CD-32 surface — `canvas`, `webgl`,
+    `gpu`, `audio`, `metrics`, `nav` (device profile), `fonts`, `timing`,
+    `media`, `math`, `viewport` (window size, CD-32) — plus the level flags the
+    config model carries (`harden::VECTOR_KEYS` is the authoritative order).
 - Failure: code 1 (malformed request JSON).
 
 ### `set_setting` (view -> host)
@@ -245,10 +254,18 @@ sets IPC" below.
 - `input` is the raw command-bar text; the host classifies it (URL vs. search):
   - contains `://` -> used verbatim (an explicit `http://` stays http)
   - `localhost` (optionally `:port`/`/path`), or a dot with no whitespace ->
-    `https://<input>`
+    `https://<input>` — except a `.onion` host, which defaults to
+    `http://<input>` (CD-35, D-0052: the onion transport is E2E-encrypted;
+    https-onion certificates are a later phase)
   - empty -> `about:blank`
-  - otherwise -> `https://www.google.com/search?q=<urlencoded>` (or the selected
-    search engine, CD-07)
+  - otherwise -> a search on the SELECTED engine (CD-07; factory default
+    DuckDuckGo, and every unknown-engine fallback is DuckDuckGo — never
+    silently Google, CD-27/D-0043)
+- Onion reroute (CD-35): a classified `.onion` target in a CLEARNET slot does
+  not navigate — the host reroutes to the refusal page
+  `cyberdesk://onion/?s=<slot>&u=<encoded target>` before any resolver is
+  consulted; the reply's `url` is then the refusal URL. Tor slots pass
+  `.onion` through unchanged.
 - Effect: loads the resolved URL in the target slot (spawning its browser if the
   slot is still lazy, CD-09) and disengages the command band (CD-12; a committed
   navigation is one of the band's hide triggers).
