@@ -5,6 +5,81 @@ Living document - maintained by Claude Code (CC), updated in the same
 commit-set as the change it records (D-0053). Append-only: historical entries
 are never rewritten; a superseded decision gets a new D-number forward.
 
+## D-0063 - 2026-07-22 - Vault passkey built: Windows Hello (WebAuthn PRF) as the 2FA second factor (supersedes CD-41 and the CD-40 1d deferral) (CD-43)
+
+*Decision.* The vault passkey is built to the CD-42 model: the master
+password is always required and the passkey is strictly the second factor
+(2FA), never a standalone unlock or a replacement; one passkey max; no
+recovery key. Windows Hello is first — enrollable and live-verifiable on the
+target machine with no hardware. The Hello PRF secret feeds the existing
+CD-40/CD-42 seam (`enroll_passkey` / `Factor::MethodSecret` → the
+`{password, passkey}` pair envelope); unlock in 2FA gathers the password and
+the Hello assertion, both combined to unwrap the VMK. Removing the passkey
+returns cleanly to password-only. The PRF secret is zeroized and
+memory-locked; no key material reaches the WebView. Headless self-checks
+cover FFI/plumbing/invariants; the live Hello loop is the maintainer's.
+Roadmap on the same seam: hardware keys (the very same v7 salt path,
+attachment widened) next, Google/Android via Credential Manager in the
+CARVILON Android app when the vault reaches Android, Linux platform
+authenticators (libfido2) if/when CyberDesk ships there.
+
+**Task-0 determination (source-verified before wiring).** The v8 FFI the
+CD-43 briefing anticipated is NOT needed — no self-declared structs, no
+crate bump:
+
+1. The assertion-time PRF path is **API v4-era**, complete in the pinned
+   `windows-sys 0.61.2` (v7 header): `pHmacSecretSaltValues` entered
+   `GET_ASSERTION_OPTIONS` at struct v6 (API v4) and the `pHmacSecret`
+   output entered `WEBAUTHN_ASSERTION` at struct v3 (API v4) — per
+   webauthn.h's own version-delta comment blocks. **API v8 added creation-
+   time eval only** (`pPRFGlobalEval` in MAKE_CREDENTIAL_OPTIONS v8,
+   `pHmacSecret` in ATTESTATION v7) plus credential hints. Chromium's source
+   confirms the split: its assertion-time PRF sets the salt structs with no
+   v8 gate, while PRF-on-create is gated `api_version >= 8` (feature
+   default-on in M147).
+2. **The DLL applies the WebAuthn-spec salt hashing by default** —
+   webauthn.h: "SALT values below by default are converted into RAW
+   Hmac-Secret values as per PRF extension - SHA-256(UTF8Encode(\"WebAuthn
+   PRF\") || 0x00 || Value)"; `WEBAUTHN_AUTHENTICATOR_HMAC_SECRET_VALUES_FLAG`
+   is the opt-in for callers passing pre-hashed RAW salts (Chromium's mode).
+   CyberDesk does NOT set the flag: the OS performs the spec hashing on the
+   stored per-passkey eval value, zero hashing is hand-rolled here, and the
+   derived secret equals what any spec-compliant PRF client would compute
+   from the same input.
+3. Enrollment therefore needs **two Hello prompts by CTAP design**
+   (MakeCredential enables hmac-secret — the classic BOOL extension plus the
+   v6 `bEnablePrf`; the PRF output only exists at assertion time, so an eval
+   assertion follows immediately). The v8 create-time eval is exactly the
+   convenience this build does not depend on. Unlock is one prompt.
+4. **Runtime reality on the target:** webauthn.dll on the dev/target machine
+   (build 26200.8894) reports **API version 9** — past the v8 wave that
+   shipped with Hello's hmac-secret capability (KB5077181, 26200.7840+).
+   The DLL version stays a proxy, so the AUTHORITATIVE capability check is
+   empirical: the enrollment's eval assertion either returns the 32-byte
+   secret or enrollment fails closed with the OS error name.
+5. `windows-sys 0.61.2` becomes a **direct dependency** — the exact version
+   already in the tree via cef + arti, so no new download and no pin change;
+   only the `Win32_Foundation` + `Win32_Networking_WindowsWebServices`
+   features light up. Linking is raw-dylib (`windows-link`) — no import
+   library, load-time binding against the OS DLL (always present on the
+   Windows-11-only target). Machine-generated bindings are deliberately
+   preferred over hand-transcribed structs for this pointer-heavy ABI.
+6. Adopted from the field: output structs are read **only up to the RETURNED
+   `dwVersion`** — Windows Hello has returned downlevel assertion structs
+   before, and reading past them is an access violation
+   (kanidm/webauthn-rs issue #262). The attestation blob itself is not
+   validated: the PRF output is the payload, and the vault's security rests
+   on the AEAD envelope (a wrong secret fails to unwrap — uniform error).
+   The credential's RP id is the stable local identifier `cyberdesk.local`
+   (native callers construct client data themselves; nothing verifies the
+   origin — it exists to keep the JSON spec-shaped and honest).
+
+*Why.* The passkey is integration work, not an impossibility: the OS
+supports Hello PRF, only our binding lagged — and the binding it needs
+turned out to be the one already pinned. Building Hello first makes the
+whole 2FA loop verifiable on the maintainer's own machine immediately,
+exactly matching the authoritative CD-42 model.
+
 ## D-0062 - 2026-07-21 - Vault unlock model is authoritative: mandatory master password (+ optional passkey 2FA); overridable complexity warning; no recovery key, no backdoor (CD-42)
 
 *Decision.* The vault requires a master password at first launch (the sole

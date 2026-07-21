@@ -27,6 +27,7 @@ mod theme;
 mod tor;
 mod updates;
 mod vault;
+mod webauthn;
 
 use std::process::ExitCode;
 
