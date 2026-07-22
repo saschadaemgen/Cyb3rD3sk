@@ -117,7 +117,7 @@ pub static COMPONENTS: &[ComponentRelease] = &[
     // could not get). REPLACE this whole entry with the real feed when it lands; bump
     // it alongside CARGO_PKG_VERSION until then. (To preview the "update available"
     // rendering, temporarily set a newer literal here.)
-    ComponentRelease { id: "cyberdesk", latest_known: "0.1.0", held_back: None },
+    ComponentRelease { id: "cyberdesk", latest_known: "0.0.1-alpha", held_back: None },
     // CEF core - latest-known = the CEF distribution we pin and vet (D-0002). Equal to
     // the installed crate constants (149.0.6) → "up to date", never a bare "INSTALLED".
     // Bump in lockstep with the CEF crate pin; declaring a newer CEF here before the

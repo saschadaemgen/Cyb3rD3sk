@@ -312,8 +312,16 @@ pub fn apply_appearance() {
 /// accent (CD-45, D-0065). One function, so a page cannot be served
 /// un-themed, and the semantic tokens (warn, error, success, the Ampel
 /// lamps) pass through untouched by construction.
-fn page_tokens(theme: &crate::theme::Theme) -> String {
-    crate::settings::appearance().css_vars(theme)
+fn page_tokens() -> String {
+    static THEME: OnceLock<crate::theme::Theme> = OnceLock::new();
+    crate::settings::appearance().css_vars(THEME.get_or_init(crate::theme::Theme::load))
+}
+
+/// The product label the `cyberdesk://` pages show, from the ONE version
+/// source the update panel also reads (`CARGO_PKG_VERSION`), so no surface
+/// can claim a version the build does not have.
+fn app_label() -> String {
+    format!("Cyb3rD3sk v{}", env!("CARGO_PKG_VERSION"))
 }
 
 /// Point the internal view at the settings page.
@@ -1830,28 +1838,26 @@ pub fn modifier_flags(shift: bool, ctrl: bool, alt: bool) -> u32 {
 /// single self-contained document (no sub-resource requests).
 fn settings_document() -> String {
     static DOC: OnceLock<String> = OnceLock::new();
-    DOC.get_or_init(|| {
-        let theme = crate::theme::Theme::load();
+    let doc = DOC.get_or_init(|| {
         include_str!("settings.html")
-            .replace("/*__TOKENS__*/", &page_tokens(&theme))
             .replace("/*__CSS__*/", include_str!("settings.css"))
             .replace("/*__JS__*/", include_str!("settings.js"))
-    })
-    .clone()
+    });
+    doc.replace("/*__TOKENS__*/", &page_tokens())
+        .replace("__APP_LABEL__", &app_label())
 }
 
 /// The command-bar HTML, built once (same inlining discipline as the settings
 /// page - one self-contained document, no sub-resource requests).
 fn command_document() -> String {
     static DOC: OnceLock<String> = OnceLock::new();
-    DOC.get_or_init(|| {
-        let theme = crate::theme::Theme::load();
+    let doc = DOC.get_or_init(|| {
         include_str!("command.html")
-            .replace("/*__TOKENS__*/", &page_tokens(&theme))
             .replace("/*__CSS__*/", include_str!("command.css"))
             .replace("/*__JS__*/", include_str!("command.js"))
-    })
-    .clone()
+    });
+    doc.replace("/*__TOKENS__*/", &page_tokens())
+        .replace("__APP_LABEL__", &app_label())
 }
 
 /// The own start page HTML, built once (same self-contained inlining discipline
@@ -1859,28 +1865,26 @@ fn command_document() -> String {
 /// empty slot (CD-14); zero network - no fonts, images, or remote resources.
 fn start_document() -> String {
     static DOC: OnceLock<String> = OnceLock::new();
-    DOC.get_or_init(|| {
-        let theme = crate::theme::Theme::load();
+    let doc = DOC.get_or_init(|| {
         include_str!("start.html")
-            .replace("/*__TOKENS__*/", &page_tokens(&theme))
             .replace("/*__CSS__*/", include_str!("start.css"))
             .replace("/*__JS__*/", include_str!("start.js"))
-    })
-    .clone()
+    });
+    doc.replace("/*__TOKENS__*/", &page_tokens())
+        .replace("__APP_LABEL__", &app_label())
 }
 
 /// The update-awareness info panel HTML, built once (same self-contained
 /// inlining discipline as the settings / command pages).
 fn info_document() -> String {
     static DOC: OnceLock<String> = OnceLock::new();
-    DOC.get_or_init(|| {
-        let theme = crate::theme::Theme::load();
+    let doc = DOC.get_or_init(|| {
         include_str!("info.html")
-            .replace("/*__TOKENS__*/", &page_tokens(&theme))
             .replace("/*__CSS__*/", include_str!("info.css"))
             .replace("/*__JS__*/", include_str!("info.js"))
-    })
-    .clone()
+    });
+    doc.replace("/*__TOKENS__*/", &page_tokens())
+        .replace("__APP_LABEL__", &app_label())
 }
 
 /// The vault lock page (CD-40, D-0058): the start-authorization gate's face.
@@ -1888,28 +1892,26 @@ fn info_document() -> String {
 /// renders masked counts and states pushed by the host.
 fn lock_document() -> String {
     static DOC: OnceLock<String> = OnceLock::new();
-    DOC.get_or_init(|| {
-        let theme = crate::theme::Theme::load();
+    let doc = DOC.get_or_init(|| {
         include_str!("lock.html")
-            .replace("/*__TOKENS__*/", &page_tokens(&theme))
             .replace("/*__CSS__*/", include_str!("lock.css"))
             .replace("/*__JS__*/", include_str!("lock.js"))
-    })
-    .clone()
+    });
+    doc.replace("/*__TOKENS__*/", &page_tokens())
+        .replace("__APP_LABEL__", &app_label())
 }
 
 /// The MF-zone tabbed viewer page (CD-18): Tor status + log stream, the full app
 /// log, and a reserved Terminal placeholder. Served into the permanent right zone.
 fn mfzone_document() -> String {
     static DOC: OnceLock<String> = OnceLock::new();
-    DOC.get_or_init(|| {
-        let theme = crate::theme::Theme::load();
+    let doc = DOC.get_or_init(|| {
         include_str!("mfzone.html")
-            .replace("/*__TOKENS__*/", &page_tokens(&theme))
             .replace("/*__CSS__*/", include_str!("mfzone.css"))
             .replace("/*__JS__*/", include_str!("mfzone.js"))
-    })
-    .clone()
+    });
+    doc.replace("/*__TOKENS__*/", &page_tokens())
+        .replace("__APP_LABEL__", &app_label())
 }
 
 /// The floating HUD strip page (CD-30 Task B): digital clock + live info fields
@@ -1917,14 +1919,13 @@ fn mfzone_document() -> String {
 /// Served into the permanent transparent top-right view.
 fn hud_document() -> String {
     static DOC: OnceLock<String> = OnceLock::new();
-    DOC.get_or_init(|| {
-        let theme = crate::theme::Theme::load();
+    let doc = DOC.get_or_init(|| {
         include_str!("hud.html")
-            .replace("/*__TOKENS__*/", &page_tokens(&theme))
             .replace("/*__CSS__*/", include_str!("hud.css"))
             .replace("/*__JS__*/", include_str!("hud.js"))
-    })
-    .clone()
+    });
+    doc.replace("/*__TOKENS__*/", &page_tokens())
+        .replace("__APP_LABEL__", &app_label())
 }
 
 /// The onion refusal page (CD-35 Task B): shown in a CLEARNET slot that was
@@ -1934,14 +1935,13 @@ fn hud_document() -> String {
 /// every internal page; zero network.
 fn onion_document() -> String {
     static DOC: OnceLock<String> = OnceLock::new();
-    DOC.get_or_init(|| {
-        let theme = crate::theme::Theme::load();
+    let doc = DOC.get_or_init(|| {
         include_str!("onion.html")
-            .replace("/*__TOKENS__*/", &page_tokens(&theme))
             .replace("/*__CSS__*/", include_str!("onion.css"))
             .replace("/*__JS__*/", include_str!("onion.js"))
-    })
-    .clone()
+    });
+    doc.replace("/*__TOKENS__*/", &page_tokens())
+        .replace("__APP_LABEL__", &app_label())
 }
 
 /// Scheme of a URL, for the command bar's lock/warn hint.
