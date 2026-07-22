@@ -717,7 +717,10 @@ impl Shell {
                 let (x, y, pw, ph) = self.internal_rect(w, h);
                 if cx >= x && cx <= x + pw && cy >= y && cy <= y + ph {
                     Some((Role::Internal, (x, y)))
-                } else if over_hud {
+                } else if over_hud && self.settings_slide >= 0.999 {
+                    // The HUD travels with the workspace, so while the layer
+                    // is still arriving its rect is not where it is drawn:
+                    // route nothing there until the motion has settled.
                     Some((Role::Hud, (hud.0, hud.1)))
                 } else {
                     None
@@ -1263,10 +1266,31 @@ impl Shell {
             Overlay::Info => self.info_rect(w, h),
             // Settings is a FULL-SCREEN layer (CD-44 Stage C): full width,
             // full height, so the page owns the whole geometry and can lay
-            // its sections out without a scrollbar crutch.
-            Overlay::Settings => (0.0, 0.0, w as f32, h as f32),
+            // its sections out without a scrollbar crutch. It ENTERS from
+            // above while the workspace leaves downward (CD-45 fix), so the
+            // rect carries the animation offset; the SIZE never changes.
+            Overlay::Settings => self.settings_layer_rect(w, h),
             _ => panel_rect(w, h),
         }
+    }
+
+    /// The settings layer's composited rect: full-size, offset vertically by
+    /// the slide progress so the layer travels in from the top edge and back
+    /// out the same way. Both the renderer and input routing read it through
+    /// [`Shell::internal_rect`], so the pixels and the hit test agree frame
+    /// by frame.
+    fn settings_layer_rect(&self, w: u32, h: u32) -> (f32, f32, f32, f32) {
+        let t = self.slide_shaped();
+        let y = -(1.0 - t) * h as f32;
+        (0.0, y.round(), w as f32, h as f32)
+    }
+
+    /// The eased slide progress, smoothstep-shaped: the same curve drives the
+    /// workspace leaving and the settings layer arriving, in opposite
+    /// directions, so the two motions read as one displacement.
+    fn slide_shaped(&self) -> f32 {
+        let t = self.settings_slide.clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
     }
 
     /// The workspace displacement in device px for the current slide
@@ -1275,11 +1299,7 @@ impl Shell {
     /// moves, so the layer reads as displacing the workspace rather than as
     /// a dialog dropped on top (CD-44 Stage C).
     fn workspace_offset(&self, h: u32) -> f32 {
-        // Ease-in-cubic on the eased progress: the columns leave slowly and
-        // accelerate away, which reads as deliberate rather than linear.
-        let t = self.settings_slide.clamp(0.0, 1.0);
-        let shaped = t * t * (3.0 - 2.0 * t);
-        (shaped * SETTINGS_SLIDE * h as f32).round()
+        (self.slide_shaped() * SETTINGS_SLIDE * h as f32).round()
     }
 
     /// The command band height in device px (a fixed token band; the ensembles
@@ -2506,11 +2526,22 @@ impl ApplicationHandler for Shell {
                 // `is_bar` now means the transparent CD-12 command band (vs the
                 // opaque settings card); `open` composites the internal view.
                 let is_bar = self.overlay == Overlay::Command;
-                let open = self.overlay != Overlay::Closed;
+                // The settings layer keeps compositing while it slides back
+                // out (CD-45 fix): without this it vanished on the first
+                // frame of the close, so the return motion was never seen.
+                let closing_settings =
+                    self.overlay == Overlay::Closed && self.settings_slide > 0.001;
+                let open = self.overlay != Overlay::Closed || closing_settings;
                 let bar_progress = 1.0;
                 let size = self.renderer.as_ref().map(|r| r.size());
                 if let Some((w, h)) = size {
-                    let internal = self.internal_rect(w, h);
+                    // While closing, the overlay is already Closed, so the
+                    // layer's own rect has to be asked for explicitly.
+                    let internal = if closing_settings {
+                        self.settings_layer_rect(w, h)
+                    } else {
+                        self.internal_rect(w, h)
+                    };
                     // Rects come from the ANIMATED frame (CD-11) - the same
                     // geometry input routing reads, so the reflow can never desync.
                     let disp = self.disp_slots();
@@ -2868,9 +2899,13 @@ impl ApplicationHandler for Shell {
             }
         }
 
-        // Keep the command band's internal view sized to the full-width band as
-        // the window changes (CD-12: the band spans the top, fixed height).
-        if self.overlay == Overlay::Command
+        // Keep the internal view sized to its overlay rect as the window
+        // changes. This covers EVERY overlay, not just the command band
+        // (CD-12): the full-screen settings layer (CD-44 Stage C) and the
+        // lock/setup card are window-sized too, and leaving the view at its
+        // old size made the page lay itself out for a window that no longer
+        // exists (reported live after CD-44).
+        if self.overlay != Overlay::Closed
             && let Some(r) = self.renderer.as_ref()
         {
             let (w, h) = r.size();
