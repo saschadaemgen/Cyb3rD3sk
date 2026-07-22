@@ -27,7 +27,11 @@ html {
 }
 
 body {
-  min-height: 100%;
+  /* Viewport units, NOT a percentage: a percentage min-height resolves
+     against the parent's HEIGHT (auto here) and collapses to content height,
+     which left the layer short of the window bottom in any window taller
+     than its content. The layer is always fullscreen. */
+  min-height: 100vh;
   background: transparent;            /* the wgpu compositor paints behind us */
   color: var(--text);
   font-family: "Segoe UI", system-ui, sans-serif;
@@ -37,9 +41,12 @@ body {
 .panel {
   width: 100%;
   min-height: 100%;
+  min-height: 100vh;
   padding: 1.5rem 1.8rem 1.8rem;
-  /* Translucent over the fixed background, not an opaque slab. */
-  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  /* No slab: the animated background belongs to the desktop and stays
+     visible behind and between the tiles (CD-45 follow-up). Only a faint
+     veil keeps the whole layer legible over a bright board. */
+  background: color-mix(in srgb, var(--bg) 30%, transparent);
   border: none;
   border-radius: 0;
   display: flex;
@@ -58,7 +65,8 @@ body {
      scale factor), so the reserve is fixed px too, not rem: page content must
      never sit under host chrome. */
   padding-right: 150px;
-  border-bottom: 1px solid var(--panel-border);
+  border-bottom: 1px solid color-mix(in srgb, var(--brand) 30%, var(--panel-border));
+  text-shadow: 0 1px 8px color-mix(in srgb, #000 70%, transparent);
 }
 .panel-title { display: flex; flex-direction: column; gap: 0.2rem; }
 /* The status line sits in the header and takes the slack, so the Close
@@ -89,6 +97,9 @@ h1 { font-size: 1.4rem; font-weight: 600; letter-spacing: 0.3px; }
      1920, more on an ultrawide, one on a narrow window. */
   column-width: 23rem;
   column-gap: 1.1rem;
+  /* Absorb the trailing card margin of the last row, so the layer does not
+     grow a scrollbar for a sliver of leftover space. */
+  margin-bottom: -1.1rem;
 }
 
 /* Each section is a card that is never split across a column boundary. */
@@ -101,9 +112,12 @@ h1 { font-size: 1.4rem; font-weight: 600; letter-spacing: 0.3px; }
   display: block;
   width: 100%;
   margin: 0 0 1.1rem;
-  background: color-mix(in srgb, var(--bg) 42%, transparent);
-  border: 1px solid color-mix(in srgb, var(--panel-border) 80%, transparent);
+  /* Readable over the live background without hiding it: the tile is a
+     dark glass pane, and its edge catches the accent. */
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  border: 1px solid color-mix(in srgb, var(--brand) 22%, var(--panel-border));
   border-radius: var(--corner-radius);
+  box-shadow: 0 6px 26px color-mix(in srgb, #000 55%, transparent);
   padding: 0.85rem 1rem 0.95rem;
 }
 

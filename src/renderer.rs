@@ -1825,6 +1825,10 @@ impl SurfaceRenderer {
         scale: f32,
         overlay_open: bool,
         is_bar: bool,
+        // The overlay is the full-screen, transparent settings layer: it
+        // casts no zone shadow (CD-45 follow-up), because the living
+        // background is meant to stay visible behind its tiles.
+        overlay_is_layer: bool,
         bar_progress: f32,
         gear_hover: f32,
         info: &InfoGlyph,
@@ -1859,11 +1863,13 @@ impl SurfaceRenderer {
         for s in sides {
             zones.push([s.0, s.1, s.2, s.3]);
         }
-        // The settings card dims its full rect (opaque). The CD-12 command band
-        // is transparent - only its floating pills paint - so it casts NO zone
-        // shadow (dimming the whole band would darken the Pulse Grid across the
-        // top even where nothing shows).
-        if overlay_open && !is_bar {
+        // An OPAQUE overlay (the info card, the lock card) dims the background
+        // under its rect. Two do not: the CD-12 command band paints only its
+        // floating pills, and the full-screen settings layer is a frame rather
+        // than a slab since CD-45 - the living background belongs to the
+        // desktop and stays visible behind and between its tiles, so dimming
+        // the whole screen would flatten exactly what the layer is showing.
+        if overlay_open && !is_bar && !overlay_is_layer {
             zones.push([panel.0, panel.1, panel.2, panel.3]);
         }
         let _ = bar_progress;

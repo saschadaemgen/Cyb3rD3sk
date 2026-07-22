@@ -42,6 +42,11 @@ const SETTINGS_EASE: f32 = 0.16;
 /// entirely before the layer is fully opaque.
 const SETTINGS_SLIDE: f32 = 1.12;
 
+/// How long the settings layer waits for its first painted frame before it
+/// opens regardless (CD-45 follow-up). Long enough for a local page to paint,
+/// short enough that a missing repaint is never a visible stall.
+const SETTINGS_PAINT_WAIT: Duration = Duration::from_millis(250);
+
 /// Ease a scalar toward a target by factor `k` (per frame), snapping when it
 /// is within epsilon so the animation actually settles (and the shell can
 /// stop requesting frames).
@@ -229,6 +234,7 @@ pub fn run(windowed: bool) {
         red_slots: 0,
         lock_view_started: false,
         settings_slide: 0.0,
+        settings_awaiting_paint: None,
         cef_inited: false,
         views_started: false,
         scale: 1.0,
@@ -288,6 +294,13 @@ struct Shell {
     /// 1 (workspace fully slid away, settings owns the screen). Eased both
     /// ways per frame (CD-44 Stage C); the background never moves with it.
     settings_slide: f32,
+    /// Set when the layer is opened: the motion waits until its view has
+    /// painted at the current size (CD-45 follow-up), otherwise a stale or
+    /// half-sized texture slides in and then pops to the real content. The
+    /// instant is a deadline, not just a flag: if the view never repaints
+    /// (nothing changed, so CEF has nothing to do), the layer opens anyway
+    /// rather than hanging off-screen.
+    settings_awaiting_paint: Option<Instant>,
     window: Option<Arc<Window>>,
     renderer: Option<SurfaceRenderer>,
     theme: Theme,
@@ -1753,6 +1766,8 @@ impl Shell {
         browser::show_internal_settings();
         browser::set_focus(Role::Slot(self.active_slot), false);
         browser::set_focus(Role::Internal, true);
+        // Hold the motion until the layer has painted at this size.
+        self.settings_awaiting_paint = Some(Instant::now());
     }
 
     /// Close the settings layer back to `Closed`. The single close path: Esc,
@@ -2517,11 +2532,16 @@ impl ApplicationHandler for Shell {
                 let time = self.start.elapsed().as_secs_f32();
                 // Advance the settings layer's workspace displacement (CD-44
                 // Stage C): eased both ways, once per rendered frame.
-                self.settings_slide = ease_to(
-                    self.settings_slide,
-                    if self.overlay == Overlay::Settings { 1.0 } else { 0.0 },
-                    SETTINGS_EASE,
-                );
+                // The layer only starts moving once its page has painted at
+                // the current size: a stale texture sliding in and popping is
+                // exactly what made the effect look broken.
+                let ready = match self.settings_awaiting_paint {
+                    None => true,
+                    Some(since) => since.elapsed() >= SETTINGS_PAINT_WAIT,
+                };
+                let want_open = self.overlay == Overlay::Settings && ready;
+                self.settings_slide =
+                    ease_to(self.settings_slide, if want_open { 1.0 } else { 0.0 }, SETTINGS_EASE);
                 let (scale, hover) = (self.scale, self.gear_hover);
                 // `is_bar` now means the transparent CD-12 command band (vs the
                 // opaque settings card); `open` composites the internal view.
@@ -2532,6 +2552,9 @@ impl ApplicationHandler for Shell {
                 let closing_settings =
                     self.overlay == Overlay::Closed && self.settings_slide > 0.001;
                 let open = self.overlay != Overlay::Closed || closing_settings;
+                // Whether the composited overlay IS the full-screen settings
+                // layer (opening, settled, or sliding back out).
+                let settings_layer = self.overlay == Overlay::Settings || closing_settings;
                 let bar_progress = 1.0;
                 let size = self.renderer.as_ref().map(|r| r.size());
                 if let Some((w, h)) = size {
@@ -2625,6 +2648,9 @@ impl ApplicationHandler for Shell {
                             scale,
                             open,
                             is_bar,
+                            // The settings layer is transparent (CD-45
+                            // follow-up), so it casts no zone shadow.
+                            open && !is_bar && settings_layer,
                             bar_progress,
                             hover,
                             &info,
@@ -2658,6 +2684,7 @@ impl ApplicationHandler for Shell {
                 self.applied_internal = (iw as u32, ih as u32);
             }
             browser::create_browser_url(Role::Internal, hwnd, browser::LOCK_URL);
+            browser::internal_left_settings();
             browser::set_focus(Role::Internal, true);
             let purpose = if crate::vault::has_vault() { "unlock_pass" } else { "setup_pass" };
             let _ = crate::vault::begin_capture(purpose);
@@ -2970,15 +2997,23 @@ impl ApplicationHandler for Shell {
         }
 
         // Upload freshly painted frames into their textures (per slot + overlay).
+        let want_internal = self.applied_internal;
+        let mut internal_painted = None;
         if let Some(r) = self.renderer.as_mut() {
             for &id in &self.order {
                 browser::with_dirty_frame(Role::Slot(id), |data, w, h| {
                     r.upload_slot(id, data, w, h)
                 });
             }
-            browser::with_dirty_frame(Role::Internal, |data, w, h| r.upload_panel(data, w, h));
+            internal_painted =
+                browser::with_dirty_frame(Role::Internal, |data, w, h| r.upload_panel(data, w, h));
             browser::with_dirty_frame(Role::MfZone, |data, w, h| r.upload_mfzone(data, w, h));
             browser::with_dirty_frame(Role::Hud, |data, w, h| r.upload_hud(data, w, h));
+        }
+        // A paint at the size we asked for means the layer holds the real page
+        // and may start moving (CD-45 follow-up).
+        if internal_painted == Some(want_internal) {
+            self.settings_awaiting_paint = None;
         }
 
         // Opt-in web-isolation self-test: try to steer the internal view onto the

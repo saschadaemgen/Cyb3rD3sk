@@ -318,14 +318,34 @@ fn page_tokens(theme: &crate::theme::Theme) -> String {
 
 /// Point the internal view at the settings page.
 pub fn show_internal_settings() {
+    // Skip the navigation when the view already holds the settings document
+    // (CD-45 follow-up): re-loading it threw away the painted texture, so the
+    // opening layer slid in blank and then popped to content. Reopening now
+    // shows the real page from the first frame.
+    if INTERNAL_URL.lock().unwrap().as_deref() == Some(SETTINGS_URL) {
+        return;
+    }
     load_url(Role::Internal, SETTINGS_URL);
+    *INTERNAL_URL.lock().unwrap() = Some(SETTINGS_URL.to_string());
+}
+
+/// The document the internal view currently holds, so a repeat navigation to
+/// the same page can be skipped (see [`show_internal_settings`]).
+static INTERNAL_URL: Mutex<Option<String>> = Mutex::new(None);
+
+/// Note that the internal view was pointed somewhere else (the command band,
+/// the info panel, the lock page), so the next settings open navigates again.
+pub fn internal_left_settings() {
+    *INTERNAL_URL.lock().unwrap() = None;
 }
 /// Point the internal view at the command bar page.
 pub fn show_internal_command() {
+    internal_left_settings();
     load_url(Role::Internal, COMMAND_URL);
 }
 /// Point the internal view at the update-awareness info panel (CD-13).
 pub fn show_internal_info() {
+    internal_left_settings();
     load_url(Role::Internal, INFO_URL);
 }
 
@@ -1632,12 +1652,18 @@ fn render_remove_cfg(id: c_int) {
 // --- Handoffs to the main thread --------------------------------------------
 
 /// If a fresh CEF frame has arrived for `role`, hand its BGRA bytes to `f`.
-pub fn with_dirty_frame(role: Role, f: impl FnOnce(&[u8], u32, u32)) {
+/// Hand a freshly painted frame to the caller. Returns the frame's size when
+/// one was pending, so the shell can tell whether a view has actually painted
+/// since it was navigated or resized (CD-45 follow-up: the settings layer
+/// waits for that before it animates in).
+pub fn with_dirty_frame(role: Role, f: impl FnOnce(&[u8], u32, u32)) -> Option<(u32, u32)> {
     let mut fb = view(role).frame.lock().unwrap();
     if fb.dirty {
         f(&fb.data, fb.width, fb.height);
         fb.dirty = false;
+        return Some((fb.width, fb.height));
     }
+    None
 }
 
 /// Take a pending cursor icon requested by a view.
