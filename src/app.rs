@@ -32,6 +32,24 @@ const BAND_FADE_LINGER: Duration = Duration::from_millis(300);
 /// - the same host-side interpolation pattern as the top-bar slide.
 const FRAME_EASE: f32 = 0.22;
 
+/// Per-frame ease factor for the settings layer's workspace displacement
+/// (CD-44 Stage C). Slower than the frame reflow so the slide reads as a
+/// deliberate movement rather than a snap, and eased in BOTH directions.
+const SETTINGS_EASE: f32 = 0.16;
+
+/// How far the workspace travels while the settings layer takes over, as a
+/// fraction of the window height. Past 1.0 the columns clear the bottom edge
+/// entirely before the layer is fully opaque.
+const SETTINGS_SLIDE: f32 = 1.12;
+
+/// Ease a scalar toward a target by factor `k` (per frame), snapping when it
+/// is within epsilon so the animation actually settles (and the shell can
+/// stop requesting frames).
+fn ease_to(cur: f32, target: f32, k: f32) -> f32 {
+    let next = cur + (target - cur) * k;
+    if (target - next).abs() < 0.001 { target } else { next }
+}
+
 /// Exponentially ease a rect toward a target by factor `k` (per frame).
 fn ease_rect(cur: slots::Rect, target: slots::Rect, k: f32) -> slots::Rect {
     slots::Rect {
@@ -210,6 +228,7 @@ pub fn run(windowed: bool) {
         red_flash_until: None,
         red_slots: 0,
         lock_view_started: false,
+        settings_slide: 0.0,
         cef_inited: false,
         views_started: false,
         scale: 1.0,
@@ -265,6 +284,10 @@ struct Shell {
     /// The lock view has been created (one-shot, the locked sibling of
     /// `views_started`).
     lock_view_started: bool,
+    /// The settings layer's displacement progress, 0 (workspace in place) to
+    /// 1 (workspace fully slid away, settings owns the screen). Eased both
+    /// ways per frame (CD-44 Stage C); the background never moves with it.
+    settings_slide: f32,
     window: Option<Arc<Window>>,
     renderer: Option<SurfaceRenderer>,
     theme: Theme,
@@ -1213,8 +1236,25 @@ impl Shell {
         match self.overlay {
             Overlay::Command => (0.0, 0.0, w as f32, self.band_height()),
             Overlay::Info => self.info_rect(w, h),
+            // Settings is a FULL-SCREEN layer (CD-44 Stage C): full width,
+            // full height, so the page owns the whole geometry and can lay
+            // its sections out without a scrollbar crutch.
+            Overlay::Settings => (0.0, 0.0, w as f32, h as f32),
             _ => panel_rect(w, h),
         }
+    }
+
+    /// The workspace displacement in device px for the current slide
+    /// progress: how far slots and side zones travel DOWN while the settings
+    /// layer takes over. The background is drawn independently and never
+    /// moves, so the layer reads as displacing the workspace rather than as
+    /// a dialog dropped on top (CD-44 Stage C).
+    fn workspace_offset(&self, h: u32) -> f32 {
+        // Ease-in-cubic on the eased progress: the columns leave slowly and
+        // accelerate away, which reads as deliberate rather than linear.
+        let t = self.settings_slide.clamp(0.0, 1.0);
+        let shaped = t * t * (3.0 - 2.0 * t);
+        (shaped * SETTINGS_SLIDE * h as f32).round()
     }
 
     /// The command band height in device px (a fixed token band; the ensembles
@@ -2411,6 +2451,13 @@ impl ApplicationHandler for Shell {
 
             WindowEvent::RedrawRequested => {
                 let time = self.start.elapsed().as_secs_f32();
+                // Advance the settings layer's workspace displacement (CD-44
+                // Stage C): eased both ways, once per rendered frame.
+                self.settings_slide = ease_to(
+                    self.settings_slide,
+                    if self.overlay == Overlay::Settings { 1.0 } else { 0.0 },
+                    SETTINGS_EASE,
+                );
                 let (scale, hover) = (self.scale, self.gear_hover);
                 // `is_bar` now means the transparent CD-12 command band (vs the
                 // opaque settings card); `open` composites the internal view.
@@ -2426,6 +2473,11 @@ impl ApplicationHandler for Shell {
                     // While the vault gate is closed (CD-40) no slot and no side
                     // zone exists - the frame is the Pulse Grid and the lock card,
                     // nothing else (an honest empty shell, not placeholders).
+                    // The settings layer displaces the workspace downward
+                    // (CD-44 Stage C). Applied to the COMPOSITED rects only:
+                    // the animated frame and input routing keep their real
+                    // geometry, and the background never moves.
+                    let dy = self.workspace_offset(h);
                     let slot_views: Vec<SlotView> = if self.overlay == Overlay::Lock {
                         Vec::new()
                     } else {
@@ -2433,7 +2485,7 @@ impl ApplicationHandler for Shell {
                             .iter()
                             .enumerate()
                             .map(|(p, &id)| SlotView {
-                                rect: (disp[p].x, disp[p].y, disp[p].w, disp[p].h),
+                                rect: (disp[p].x, disp[p].y + dy, disp[p].w, disp[p].h),
                                 loading: self.loading[id],
                                 active: id == self.active_slot,
                                 index: id,
@@ -2445,8 +2497,8 @@ impl ApplicationHandler for Shell {
                         [(0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0)]
                     } else {
                         [
-                            (self.disp_left.x, self.disp_left.y, self.disp_left.w, self.disp_left.h),
-                            (self.disp_right.x, self.disp_right.y, self.disp_right.w, self.disp_right.h),
+                            (self.disp_left.x, self.disp_left.y + dy, self.disp_left.w, self.disp_left.h),
+                            (self.disp_right.x, self.disp_right.y + dy, self.disp_right.w, self.disp_right.h),
                         ]
                     };
                     // The topmost overlay pass carries the favorite-drag visuals
@@ -2477,7 +2529,12 @@ impl ApplicationHandler for Shell {
                     // the mutable renderer borrow below (as is the HUD rect, CD-30).
                     let glow =
                         settings::glow_intensity() * self.rotation_glow_factor() * self.red_glow_factor();
-                    let hud = self.hud_rect();
+                    // The HUD strip belongs to the workspace, so it travels
+                    // with it (CD-44 Stage C).
+                    let hud = {
+                        let (hx, hy, hw, hh) = self.hud_rect();
+                        (hx, hy + dy, hw, hh)
+                    };
                     if let Some(r) = self.renderer.as_mut() {
                         r.render(
                             time,
@@ -2754,6 +2811,8 @@ impl ApplicationHandler for Shell {
         if browser::take_overlay_close() {
             match self.overlay {
                 Overlay::Info => self.close_info(),
+                // The settings layer's own Close button (CD-44 Stage C).
+                Overlay::Settings => self.close_settings(),
                 _ => self.disengage(),
             }
         }

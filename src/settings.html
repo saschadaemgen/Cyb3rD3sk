@@ -14,13 +14,24 @@
   <main class="panel">
     <header class="panel-head">
       <span class="mark"></span>
-      <div>
+      <div class="panel-title">
         <h1>Settings</h1>
         <p class="sub">CARVILON CyberDesk</p>
       </div>
+      <p class="status" id="status"></p>
+      <button class="btn close" id="settings-close" type="button">Close</button>
     </header>
 
-    <section class="rows">
+    <!-- Sectioned grid (CD-44 Stage C): the layer owns the full screen, so
+         sections flow into as many columns as the width allows (three at
+         1920, more on an ultrawide) instead of stacking inside a scrolling
+         box. Built to grow: a new section is one more card, and each card is
+         already an independent block, so per-section reveal animation can be
+         added later without a rewrite. -->
+    <div class="sections">
+
+    <section class="rows" aria-label="Display and search">
+      <h2 class="section-head">Display and search</h2>
       <div class="row">
         <div class="label">
           <span class="name">Search engine</span>
@@ -201,11 +212,14 @@
            visible (CD-43 review fix). -->
       <div class="vault-err" id="vault-err" hidden></div>
 
-      <p class="honesty">The vault wraps one master key that only your master
+      <details class="more">
+        <summary>What this does</summary>
+        <p class="honesty">The vault wraps one master key that only your master
       password opens - there is no recovery key and no backdoor, by
       design. If the master password is forgotten, the vault cannot be opened.
       While you type it, the CyberDesk core captures it directly into locked
       memory - no page ever sees a keystroke.</p>
+      </details>
     </section>
 
     <section class="rows tor-section" aria-label="On-disk privacy">
@@ -224,18 +238,20 @@
       <!-- Live status + confidence readout (truthful by construction: both numbers are
            measured, never asserted). "On disk now" is the working profile CEF scaffolds
            while running; it holds no browsing content and is wiped at the next launch. -->
-      <dl class="tor-info">
+      <details class="more">
+        <summary>What this does</summary>
+        <dl class="tor-info">
         <div><dt>Last launch</dt><dd id="residue-last">-</dd></div>
         <div><dt>On disk now</dt><dd id="residue-now">-</dd></div>
       </dl>
-
-      <p class="honesty">Everything you browse lives only in memory and is gone when
+        <p class="honesty">Everything you browse lives only in memory and is gone when
       CyberDesk closes. As a standing safeguard, each launch also wipes any browsing
       cache or content that ever reached the disk - so <strong>nothing you browsed
       survives on disk</strong>, even if an update ever wrote some by accident. It only
       ever touches the browsing profile: your <strong>Tor state</strong> (so its
       protection carries across restarts) and your <strong>saved session</strong> are
       never touched.</p>
+      </details>
     </section>
 
     <!-- Per-window Tor (CD-15). Copy rule (D-0044): state what it does, confidently
@@ -280,16 +296,18 @@
         <span class="soon">Coming</span>
       </div>
 
-      <dl class="tor-info">
+      <details class="more">
+        <summary>What this does</summary>
+        <dl class="tor-info">
         <div><dt>Tor engine</dt><dd id="tor-version">arti -</dd></div>
         <div><dt>Circuit isolation</dt><dd>Each window uses its own Tor circuit, so two Tor windows can't be linked to each other.</dd></div>
       </dl>
-
-      <p class="honesty">Tor mode routes that window through the Tor network: sites
+        <p class="honesty">Tor mode routes that window through the Tor network: sites
       see a Tor exit address, <strong>never your IP</strong>, and every window rides
       its own isolated circuit. It works together with the always-on tracking
       resistance below - one layer hides where you connect from, the other keeps
       your browser from being profiled and recognised.</p>
+      </details>
     </section>
 
     <!-- Fingerprinting hardening (CD-16 / CD-25, D-0039 / D-0040). Global preset +
@@ -392,7 +410,9 @@
           <div class="switch" data-fp="viewport" role="switch" tabindex="0" aria-checked="true"><span class="knob"></span></div></div>
       </div>
 
-      <dl class="tor-info">
+      <details class="more">
+        <summary>What this does</summary>
+        <dl class="tor-info">
         <div><dt>What it does</dt><dd>Solves every measurable fingerprint vector:
         stable signals are clamped to common values (your local fonts are hidden
         behind a standard set, GPU strings and screen and window size read as an
@@ -404,17 +424,20 @@
         (User-Agent), and language are left untouched and mutually consistent - no
         half-spoofing that would make you <em>more</em> identifiable.</dd></div>
       </dl>
-
-      <p class="honesty">Tracking resistance makes you hard to <strong>profile and
+        <p class="honesty">Tracking resistance makes you hard to <strong>profile and
       link</strong> across sites and sessions: stable signals are clamped to common
       values and measured signals carry fresh per-session noise, so the fingerprint
       a tracker records today doesn't match the one it sees tomorrow. For IP
       anonymity, add CyberDesk's built-in <strong>per-window Tor</strong> (above) -
       the two layers are designed to work together.</p>
+      </details>
 
-      <!-- Per-session identity rotation (CD-29). Re-seeds the fingerprint so a fresh,
-           unlinkable identity is produced - manually, automatically, or each launch. -->
-      <h2 class="section-head" style="margin-top:18px;">New identity</h2>
+    </section>
+
+    <!-- Per-session identity rotation (CD-29). Re-seeds the fingerprint so a fresh,
+         unlinkable identity is produced - manually, automatically, or each launch. -->
+    <section class="rows tor-section" aria-label="New identity">
+      <h2 class="section-head">New identity</h2>
 
       <div class="row">
         <div class="label">
@@ -458,16 +481,19 @@
         </div>
       </div>
 
-      <p class="honesty">A new identity re-seeds the noise your browser adds to every
+      <details class="more">
+        <summary>What this does</summary>
+        <p class="honesty">A new identity re-seeds the noise your browser adds to every
       fingerprint surface, so a fresh set of sessions can't be linked to the old one.
       It works strongest <strong>between</strong> pages and sessions: the per-window
       <em>New identity now</em> button (in each window's tracking-resistance menu) and
       <em>on restart</em> reload with a fresh identity immediately, while automatic
       rotation re-seeds the basis for what you open next and drives the countdown on
       the grid.</p>
+      </details>
     </section>
 
-    <p class="status" id="status"></p>
+    </div>
   </main>
 
   <!-- Two-confirmation safety gate (CD-25). Shown before any WEAKENING of hardening

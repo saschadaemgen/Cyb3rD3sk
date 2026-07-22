@@ -7,60 +7,110 @@
    would otherwise override the UA's [hidden] { display: none }. */
 [hidden] { display: none !important; }
 
+/* Full-screen settings layer (CD-44 Stage C). The host gives this page the
+   whole window and slides the workspace out of the way behind it; the Pulse
+   Grid stays fixed, so the panel is deliberately translucent and lets it
+   show through. One rem-based scale drives everything: 1920x1080 is the base
+   geometry and it stays correct out to roughly 5200 wide. */
+html {
+  /* ~15px at 1920, ~16.5px at 2560, capped so an ultrawide does not turn
+     into a poster. Every size below is in rem, so the whole layer scales. */
+  font-size: clamp(14px, 0.78vw, 19px);
+}
+
 html, body {
   height: 100%;
   background: transparent;            /* the wgpu compositor paints behind us */
   color: var(--text);
   font-family: "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
+  /* The layer never scrolls horizontally: the section grid reflows instead. */
+  overflow-x: hidden;
 }
 
 .panel {
   width: 100%;
   min-height: 100%;
-  padding: 34px 38px;
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: var(--corner-radius);
+  padding: 2.2rem 2.8rem 2.8rem;
+  /* Translucent over the fixed background, not an opaque slab. */
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: none;
+  border-radius: 0;
   display: flex;
   flex-direction: column;
-  gap: 26px;
+  gap: 1.6rem;
 }
 
 .panel-head {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding-bottom: 22px;
+  gap: 1.1rem;
+  padding-bottom: 1.3rem;
   border-bottom: 1px solid var(--panel-border);
 }
+.panel-title { display: flex; flex-direction: column; gap: 0.2rem; }
+/* The status line sits in the header and takes the slack, so the Close
+   button stays hard right at every width. */
+.panel-head .status { margin-left: auto; text-align: right; }
+.btn.close { flex: none; }
 
 .mark {
-  width: 34px;
-  height: 34px;
+  width: 2.3rem;
+  height: 2.3rem;
   border-radius: 50%;
   border: 2px solid var(--brand);
   box-shadow: 0 0 14px color-mix(in srgb, var(--brand) 55%, transparent);
   flex: none;
 }
 
-h1 { font-size: 20px; font-weight: 600; letter-spacing: 0.3px; }
-.sub { font-size: 12px; color: var(--text-dim); letter-spacing: 2px; text-transform: uppercase; }
+h1 { font-size: 1.4rem; font-weight: 600; letter-spacing: 0.3px; }
+.sub { font-size: 0.8rem; color: var(--text-dim); letter-spacing: 2px; text-transform: uppercase; }
 
-.rows { display: flex; flex-direction: column; gap: 8px; }
+/* The section grid: as many columns as the width comfortably allows (three
+   at 1920, more on an ultrawide), each card an independent block that can
+   later animate in on its own. `align-items: start` keeps cards at their
+   natural height instead of stretching them to the tallest sibling. */
+.sections {
+  /* Balanced multi-column, not a row grid: the browser packs the cards into
+     as many equal-height columns as the width allows, so the layer fills the
+     screen instead of leaving one tall column to scroll. Four columns at
+     1920, more on an ultrawide, one on a narrow window. */
+  column-width: 27rem;
+  column-gap: 1.4rem;
+}
 
+/* Each section is a card that is never split across a column boundary. */
+.sections > section {
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  display: inline-block;    /* keeps the card atomic inside the column flow */
+  width: 100%;
+  margin: 0 0 1.4rem;
+  background: color-mix(in srgb, var(--bg) 42%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-border) 80%, transparent);
+  border-radius: var(--corner-radius);
+  padding: 1.1rem 1.3rem 1.3rem;
+}
+
+.rows { display: flex; flex-direction: column; gap: 0.4rem; }
+
+/* Rows wrap instead of squeezing their control, so a label like
+   "Password + passkey" can never be clipped mid-word (CD-44 Stage C). */
 .row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
-  padding: 16px 4px;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.85rem 0.2rem;
   border-bottom: 1px solid color-mix(in srgb, var(--panel-border) 55%, transparent);
 }
+.row > .label { flex: 1 1 14rem; min-width: 0; }
+.row:last-child { border-bottom: none; }
 
 .label { display: flex; flex-direction: column; gap: 4px; }
-.name { font-size: 15px; font-weight: 500; }
-.hint { font-size: 12.5px; color: var(--text-dim); }
+.name { font-size: 0.98rem; font-weight: 500; }
+.hint { font-size: 0.82rem; color: var(--text-dim); line-height: 1.45; }
 
 /* Toggle switch */
 .switch {
@@ -198,12 +248,12 @@ h1 { font-size: 20px; font-weight: 600; letter-spacing: 0.3px; }
 .status.error { color: #E0736B; }
 
 /* Per-window Tor section (CD-15). */
-.tor-section { margin-top: 6px; }
+.tor-section { margin-top: 0; }
 .section-head {
-  font-size: 12px; letter-spacing: 2px; text-transform: uppercase;
-  color: var(--text-dim); font-weight: 600;
-  display: flex; align-items: center; gap: 12px;
-  padding: 6px 2px 2px;
+  font-size: 0.78rem; letter-spacing: 2px; text-transform: uppercase;
+  color: var(--brand); font-weight: 600;
+  display: flex; align-items: center; gap: 0.7rem;
+  padding: 0.1rem 0.1rem 0.5rem;
 }
 .tor-status {
   font-size: 11px; letter-spacing: 0.5px; text-transform: none; font-weight: 500;
@@ -219,8 +269,9 @@ h1 { font-size: 20px; font-weight: 600; letter-spacing: 0.3px; }
 }
 /* New-circuit action button (CD-18). */
 .btn {
-  font: inherit; font-size: 13px; flex: none;
-  padding: 8px 16px; border-radius: 999px;
+  font: inherit; font-size: 0.85rem; flex: none;
+  white-space: nowrap;                 /* never clip a control label */
+  padding: 0.5rem 1rem; border-radius: 999px;
   border: 1px solid var(--brand); background: transparent; color: var(--brand);
   cursor: pointer; transition: background 0.12s ease, color 0.12s ease;
 }
@@ -396,8 +447,34 @@ h1 { font-size: 20px; font-weight: 600; letter-spacing: 0.3px; }
 }
 .vault-hello[hidden] { display: none; }
 
+/* Collapsible explanation per section (CD-44 Stage C). The copy is unchanged
+   and one click away; the card stops being a wall of prose, which is what
+   let the layer fit the screen without a scrollbar crutch. */
+.more { margin-top: 0.7rem; }
+.more > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  padding: 0.35rem 0.1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.more > summary::-webkit-details-marker { display: none; }
+.more > summary::before {
+  content: "";
+  width: 0.42rem; height: 0.42rem;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 140ms ease;
+}
+.more[open] > summary::before { transform: rotate(45deg); }
+.more > summary:hover { color: var(--brand); }
+
 /* Config surface (CD-40 1c): policy buttons + the KDF re-tune form. */
-.vault-policy { display: flex; gap: 8px; }
+.vault-policy { display: flex; gap: 0.5rem; flex-wrap: wrap; }
 .btn.pol.active {
   border-color: var(--brand);
   color: var(--brand);

@@ -28,6 +28,15 @@
     });
   }
 
+  // The full-screen layer covers the gear (CD-44 Stage C), so the page
+  // carries its own way out. Esc closes it too, from the host side.
+  var closeBtn = document.getElementById("settings-close");
+  if (closeBtn) {
+    closeBtn.addEventListener("click", function () {
+      query({ cmd: "close_settings" }).catch(function () {});
+    });
+  }
+
   function switchEl(key) {
     return document.querySelector('.switch[data-key="' + key + '"]');
   }

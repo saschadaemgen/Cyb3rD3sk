@@ -2524,10 +2524,17 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
             set_vault_state(&state);
             Ok(state)
         }
-        // Open the settings card (CD-30: the HUD Ampel's "Custom…" - the
+        // Open the settings layer (CD-30: the HUD Ampel's "Custom…" - the
         // per-vector view lives there). Queued for the main thread.
         "open_settings" => {
             OPEN_SETTINGS.store(true, Ordering::Relaxed);
+            Ok(serde_json::json!({ "ok": true }).to_string())
+        }
+        // Close it again from the page's own Close button (CD-44 Stage C):
+        // the full-screen layer covers the gear, so the page needs its own
+        // way out. Queued like every other overlay transition.
+        "close_settings" => {
+            request_overlay_close();
             Ok(serde_json::json!({ "ok": true }).to_string())
         }
         // `mf_tab` (CD-30) was RETIRED in CD-31 (D-0048): the MF zone's width is
