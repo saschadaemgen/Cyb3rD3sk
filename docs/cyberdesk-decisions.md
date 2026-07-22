@@ -56,7 +56,15 @@ crate bump:
    shipped with Hello's hmac-secret capability (KB5077181, 26200.7840+).
    The DLL version stays a proxy, so the AUTHORITATIVE capability check is
    empirical: the enrollment's eval assertion either returns the 32-byte
-   secret or enrollment fails closed with the OS error name.
+   secret or enrollment fails closed with an honest error (the module's
+   explicit no-PRF-output message naming the KB when the call succeeds but
+   carries no `pHmacSecret`; the OS error name on an HRESULT failure) —
+   and best-effort-deletes the credential it just created, so a failed
+   enrollment leaves no orphan in Windows Settings (review finding, fixed
+   before ship). Enabling 2FA afterwards is itself a confirm-gated
+   informed-consent step, host-revalidated: from then on a lost Hello
+   credential means an unrecoverable vault — the D-0062 no-backdoor stance
+   carried to its 2FA consequence.
 5. `windows-sys 0.61.2` becomes a **direct dependency** — the exact version
    already in the tree via cef + arti, so no new download and no pin change;
    only the `Win32_Foundation` + `Win32_Networking_WindowsWebServices`

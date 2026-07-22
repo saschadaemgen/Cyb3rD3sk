@@ -320,10 +320,12 @@ h1 { font-size: 20px; font-weight: 600; letter-spacing: 0.3px; }
 .vault-err {
   font-size: 12.5px;
   padding: 8px 11px;
+  margin: 6px 0;
   border-radius: 8px;
   border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
   color: var(--warn);
 }
+.vault-err[hidden] { display: none; }
 .vault-actions { display: flex; gap: 10px; }
 
 /* The live strength meter + parked weak override (CD-42 Task B): drawn from
@@ -363,6 +365,18 @@ h1 { font-size: 20px; font-weight: 600; letter-spacing: 0.3px; }
 .vweak-text { font-size: 12.5px; line-height: 1.55; color: var(--warn); }
 #vault-weak-use { align-self: flex-start; border-color: var(--warn); color: var(--warn); }
 #vault-weak-use:hover { background: var(--warn); color: var(--bg); }
+
+/* The Hello-modal hint (CD-43): visible while the host holds a Windows
+   Hello prompt open on a worker. */
+.vault-hello {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  padding: 10px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+}
+.vault-hello[hidden] { display: none; }
 
 /* Config surface (CD-40 1c): policy buttons + the KDF re-tune form. */
 .vault-policy { display: flex; gap: 8px; }

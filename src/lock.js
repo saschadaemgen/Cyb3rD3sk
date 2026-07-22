@@ -102,6 +102,7 @@
     }
 
     var setup = s.capture === "setup_pass" || s.capture === "setup_confirm";
+    var twofa = s.required === 2 && !setup;
     if (setup) {
       titleEl.textContent = "Set your master password";
       subtitleEl.textContent = "First launch";
@@ -112,14 +113,19 @@
       consequenceEl.hidden = false;
     } else {
       titleEl.textContent = "Vault locked";
-      subtitleEl.textContent = "Start authorization";
-      hintEl.textContent =
-        "Enter your master password. Keystrokes go to the CyberDesk core only — " +
-        "no page ever sees them.";
+      subtitleEl.textContent = twofa ? "Start authorization · two-factor" : "Start authorization";
+      hintEl.textContent = twofa
+        ? "Two-factor unlock: enter your master password, then confirm with " +
+          "Windows Hello. Keystrokes go to the CyberDesk core only — no page ever sees them."
+        : "Enter your master password. Keystrokes go to the CyberDesk core only — " +
+          "no page ever sees them.";
       consequenceEl.hidden = true;
     }
 
-    if (s.busy) {
+    if (s.hello === "assert") {
+      // The host holds the Hello modal open — the second factor (CD-43).
+      setStatus("Second factor: confirm with Windows Hello…", true);
+    } else if (s.busy) {
       setStatus(setup ? "Creating the vault…" : "Checking…", true);
     } else if (s.error) {
       setStatus(s.error, false);

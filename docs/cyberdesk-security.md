@@ -1,6 +1,6 @@
 # CyberDesk - Security
 
-Project CARVILON CyberDesk - living document - Status: 2026-07-21 (through CD-40 Stage 1 / D-0061)
+Project CARVILON CyberDesk - living document - Status: 2026-07-22 (through CD-43 / D-0063)
 Maintained by Claude Code (CC), updated in the same commit-set as the code it describes (D-0053).
 
 ## Iron law
@@ -28,8 +28,9 @@ the config surface (1c, D-0060) are live (`src/vault.rs`, `app.rs` gate,
 `cyberdesk://lock/`, the settings vault section, the HUD Vault field); CD-42
 (D-0062) set the authoritative unlock model on top: a **mandatory master
 password** as the sole root, an optional passkey as the only additional
-factor, **no recovery key**. The passkey-PRF layer is source-verified and
-honestly deferred (D-0061 — see the passkey caveat below). The standing laws
+factor, **no recovery key**. The passkey is LIVE via Windows Hello /
+WebAuthn PRF (CD-43, D-0063 — see the passkey section below; it supersedes
+the D-0061 deferral). The standing laws
 hold **by construction**: no key material in memory before authentication
 (the app boots into a lock view — no slots, no MF zone, no HUD — and the
 workspace is created only after the VMK exists; on first launch that view IS
@@ -112,50 +113,69 @@ The model, precisely:
   authenticator (Windows Hello / security-key gate inside WebAuthn) or, at
   most, to a later in-session quick-unlock that keeps the VMK in protected
   memory.
-- **Passkey-PRF caveat (verify-first — DETERMINATION, CD-40 1d, D-0061).**
-  WebAuthn PRF maps to CTAP2 `hmac-secret`; the PRF-derived secret would wrap
-  the VMK as a device-bound envelope, enrolled only from an unlocked session.
-  Source-verified state on the target (Windows 11, build 26200):
-  - The Win32 `webauthn.dll` client API is fully present in `windows-sys`
-    0.61.2 — **already in our dependency tree** (pulled by `cef` + `arti`),
-    behind the `Win32_Networking_WindowsWebServices` feature, so enrolling
-    needs a feature-enable (or `webauthn-authenticator-rs`), not a new crate
-    download. The binding is at **API version 7**; the raw hmac-secret salt
-    path (`WEBAUTHN_HMAC_SECRET_SALT` + `WEBAUTHN_AUTHENTICATOR_HMAC_SECRET_VALUES_FLAG`)
-    is present at v7.
-  - **Security keys (e.g. YubiKey) via CTAP2 `hmac-secret`: supported
-    reliably** through that v7 path — the established, buildable route.
-  - **Windows Hello platform-authenticator PRF is in flux:** it landed only
-    in the **February 2026 cumulative update (KB5077181, Windows 25H2 build
-    26200.7840+)**, and the convenience "PRF eval" path needs **API version
-    8**, which the pinned `windows-sys` 0.61.2 (v7) does not expose. Our
-    target reports build 26200 (25H2) but whether KB5077181 is installed is a
-    live-machine fact — the maintainer's check.
-  - The native `WebAuthNAuthenticatorGetAssertion` call needs a real HWND, a
-    physical authenticator, and a user-presence gesture; it cannot run in any
-    headless/unit path, so its only verification is a live run (Sascha's, per
-    acceptance #7).
-
-  **Determination:** PRF is not *dependably* available on the target as a
-  blanket guarantee — Windows Hello needs a specific KB + an API-v8 crate we
-  do not pin, and the security-key path, while buildable, cannot be verified
-  even once without hardware + a live run. So the passkey sub-stage is an
-  **honest, flagged deferral** (acceptance #3 sanctions this explicitly). What
-  is already proven ready: the envelope layer treats a passkey as an opaque
-  32-byte method secret — `vault::enroll_passkey` + `Factor::MethodSecret`
-  are implemented and unit-tested under the D-0062 model (the passkey
-  enrolls from an unlocked session as the only additional factor, never
-  unlocks alone, and pairs with the password under 2FA). The remaining,
-  bounded work: enable the WebAuthn feature (or add
-  `webauthn-authenticator-rs`), turn a real authenticator's PRF output into
-  that 32-byte secret via a persisted per-vault salt, wire it into the
-  existing `enroll_passkey` seam, and add the passkey assertion step to the
-  2FA unlock flow at the gate. The foundation (master password + gate +
-  config surface + memory hygiene) ships now and never waits on it. Until it
-  lands, no passkey can be enrolled, so the 2FA policy cannot be enabled —
-  the host refuses `required = 2` without an enrolled passkey, which also
-  means no unlockable-only-with-hardware state can arise before the unlock
-  flow can serve it.
+- **Passkey via Windows Hello — SHIPPED (CD-43, D-0063; supersedes the
+  D-0061 deferral and CD-41).** WebAuthn PRF maps to CTAP2 `hmac-secret`;
+  the PRF-derived 32-byte secret is the passkey's wrapping key, strictly the
+  **2FA second factor** (one passkey max, never a standalone unlock — no
+  envelope without the password exists, structurally). The integration
+  (`src/webauthn.rs`):
+  - **Task-0 determination:** the assertion-time PRF path is API v4-era and
+    complete in the pinned `windows-sys 0.61.2` (v7 header) — API v8 added
+    create-time eval only, so **no v8 FFI and no crate bump** were needed.
+    `windows-sys` became a direct dependency (exact in-tree version, feature
+    enable only, raw-dylib linking). The installed `webauthn.dll` on the
+    target reports API v9.
+  - **No custom cryptography:** the DLL itself applies the WebAuthn-spec
+    salt hashing (`SHA-256("WebAuthn PRF" || 0x00 || value)`) to the
+    per-passkey random eval value — CyberDesk passes the stored value and
+    never touches a hash. The eval value and the credential id are
+    persisted on the passkey method, non-secret by design (they gate
+    nothing; the secret only exists inside the authenticator's response
+    after Hello user verification).
+  - **Enrollment** (unlocked session only): modal MakeCredential (platform
+    attachment, user verification REQUIRED, hmac-secret extension +
+    `bEnablePrf`) followed by the first PRF eval assertion — two Hello
+    prompts by CTAP design (the PRF output only exists at assertion time).
+    The eval assertion is the AUTHORITATIVE capability check: on a build
+    without Hello hmac-secret (pre-KB5077181) enrollment fails closed with
+    an honest error — the module's explicit no-PRF-output message naming
+    the KB (the OS call succeeds but returns a downlevel assertion / no
+    `pHmacSecret`), or the OS error name on an HRESULT failure. Never a
+    half-enrolled state, on either side: a failed enrollment best-effort-
+    deletes the OS credential it just created, so retries cannot accumulate
+    orphaned passkeys in Windows Settings.
+  - **2FA unlock:** host-captured password, then the Hello assertion; both
+    factors combined open the `{password, passkey}` pair envelope. A
+    failed/cancelled Hello step reports honestly (no password was checked —
+    no oracle) and preserves the typed entry in locked memory for a
+    one-Enter retry. A factor mismatch after a successful assertion stays
+    the uniform "unlock failed".
+  - **Memory hygiene extends to the PRF secret (CD-43 Task D):** it lands
+    directly in a `VirtualLock`ed `SecretBuf`; the DLL's output buffer is
+    zeroized in place before `WebAuthNFreeAssertion`; the eval-value stack
+    copy is zeroized after the call. Bounded residuals (same internal-scope
+    honesty as the crypto crates): copies inside `webauthn.dll` / the
+    credential broker during the call, and the credential's CredRandom
+    inside the authenticator (that one is the design — it is what makes the
+    factor device-bound). Attestation blobs are not validated: the PRF
+    output is the payload, and the vault's security rests on the AEAD
+    envelope.
+  - **Removal never bricks:** removing the passkey (refused while the 2FA
+    policy requires it; drop to password-only first — a confirm-gated
+    weakening) re-mints the `{password}` envelope, then best-effort-deletes
+    the OS credential. Output-struct reads are gated on the RETURNED
+    `dwVersion` (a Hello-specific downlevel-struct crash documented in the
+    field — kanidm/webauthn-rs #262).
+  - **Verification split (Task E):** headless self-checks cover the DLL
+    link + API level, marshalling helpers, cred-id/salt persistence, the
+    pair-envelope round-trip with a mock PRF secret, and every invariant;
+    the live enroll + 2FA unlock (real Hello prompts, user presence) is the
+    maintainer's — the modal call cannot run headless by design.
+  - **Roadmap on the same seam:** hardware security keys (CTAP2
+    hmac-secret, the very same v7 salt path with attachment widened) after
+    Hello; Google/Android passkeys via Credential Manager in the CARVILON
+    Android app when the vault reaches Android; Linux platform
+    authenticators (libfido2) if/when CyberDesk ships there.
 - **The gate, precisely (1b, D-0059; mandatory setup, CD-42).** A closed
   gate creates ONLY the lock view — unlocking an existing vault, or the
   mandatory first-launch master-password setup when none exists (no skip, no

@@ -2053,6 +2053,9 @@ impl ApplicationHandler for Shell {
         );
         self.scale = window.scale_factor() as f32;
         let renderer = SurfaceRenderer::new(window.clone(), self.theme.clone());
+        // Register the shell HWND with the vault: the Windows Hello modal
+        // (passkey enroll/assert, CD-43) parents on it from worker threads.
+        crate::vault::set_shell_hwnd(window_hwnd(&window));
         self.window = Some(window);
         self.renderer = Some(renderer);
 

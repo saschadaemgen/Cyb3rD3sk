@@ -629,6 +629,15 @@ the count changes). Payload:
   meter runs on the host's locked input.
 - `weak_pending` (CD-42 Task B) — a weak submit (score < 3) is parked on the
   prominent warning; only `vault_accept_weak` proceeds.
+- `hello` (CD-43) — `"enroll" | "assert" | null`: a Windows Hello modal is
+  open on a vault worker (passkey enrollment / the 2FA unlock second
+  factor); the pages render a "follow the Windows Hello prompt" hint.
+- `webauthn` (CD-43) — `{ "available": bool, "api": n }`: the OS WebAuthn
+  capability snapshot for the honest config surface (whether the passkey
+  path can be offered at all, and the webauthn.dll API level).
+- `methods[]` passkey entries additionally mirror nothing secret: the
+  credential id and PRF eval salt stay host-side in `vault.json` (non-secret
+  there, but the page has no use for them — counts and states only).
 - `capture` additionally takes `change_pass` / `change_confirm` /
   `retune_kdf` (1c, unlocked-session flows).
 
@@ -667,13 +676,15 @@ Request `{ "cmd": "vault_lock" }` → `{ "ok": true }`. Queues "lock now": the
 shell wipes key material and relaunches itself cold (D-0059) — every CEF child
 process dies with it, and the next boot is the gate.
 
-### `vault_set_policy` (view -> host, 1c)
+### `vault_set_policy` (view -> host, 1c; both directions gated since CD-43)
 
 Request `{ "cmd": "vault_set_policy", "required": 1|2, "confirm": bool }`.
 Re-mints the envelope structurally (unlocked sessions only): 1 =
 password-only, 2 = password + passkey (refused without an enrolled passkey).
-DROPPING 2FA is a weakening: the host refuses without `confirm` regardless
-of what the page showed (D-0040 discipline). Reply = state JSON; also pushed.
+BOTH directions are confirm-gated and host-revalidated regardless of what
+the page showed (D-0040 discipline): dropping 2FA is a weakening; ENABLING
+2FA is an informed-consent step (a lost passkey then means an unrecoverable
+vault — no recovery key, by design; D-0063). Reply = state JSON; also pushed.
 
 ### `vault_retune_kdf` (view -> host, 1c)
 
@@ -690,7 +701,25 @@ new password), then re-derived under the staged params on a worker thread.
 Request `{ "cmd": "vault_remove_method", "id": "passkey-…" }`. The passkey is
 the only removable method — the core refuses removing the master password,
 and refuses removing the passkey while the 2FA policy requires it (switch to
-password-only first).
+password-only first). After the vault commit, the OS-side Hello credential
+is deleted best-effort (CD-43) — the vault never depends on it.
+
+### `vault_enroll_passkey` (view -> host, CD-43)
+
+Request `{ "cmd": "vault_enroll_passkey" }`. Enroll THE passkey via Windows
+Hello. Host-validated: unlocked session only, no passkey enrolled (one max),
+OS WebAuthn available. The modal MakeCredential + first PRF-eval assertion
+run on a vault worker (two Hello prompts); the page sees only
+`busy`/`hello` state — no credential material ever rides the IPC. Success
+re-wraps `vault.json` with the new method and makes the 2FA policy toggle
+available; failure (including a dismissed prompt) surfaces the honest OS
+error in `error`. Reply = state JSON; also pushed.
+
+Unlock under 2FA needs no new command: the same Enter on the lock page
+submits the password, and the HOST runs the Hello assertion as the second
+step (`hello: "assert"` in the push while the modal is up). A failed Hello
+step preserves the typed password (host-side, locked memory) so one Enter
+retries; there is no Hello-only unlock, structurally.
 
 Key handling while a capture is active (host-side, `app.rs`): printable text →
 buffer; Backspace → UTF-8-aware delete; Enter → advance the flow (derivations

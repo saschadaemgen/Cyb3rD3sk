@@ -73,8 +73,8 @@ Nothing on the app path is throwaway work.
 ## Crypto + authorization (Season 6)
 
 - **Vault — foundation SHIPPED (CD-40, D-0058/D-0059/D-0060/D-0061);
-  authoritative unlock model SHIPPED (CD-42, D-0062); passkey wiring
-  VERIFIED+DEFERRED**: crypto core (`src/vault.rs`) — envelope key management
+  authoritative unlock model SHIPPED (CD-42, D-0062); Windows Hello passkey
+  SHIPPED (CD-43, D-0063)**: crypto core (`src/vault.rs`) — envelope key management
   (one random VMK; Argon2id master-password envelope; passkey-PRF as the only
   optional additional factor), escrow-based re-wrap from an unlocked session,
   sealed app state under the VMK, `VirtualLock`ed + zeroized key memory
@@ -94,15 +94,23 @@ Nothing on the app path is throwaway work.
   bypass. Config + tile surface — enrolled methods, password-only /
   password+passkey policy (host-gated weakening), Argon2id cost re-tune
   (verified before re-derive), change-master-password, HUD Vault field; no
-  recovery-key controls exist. Passkey via WebAuthn PRF — source-verified and
-  HONESTLY DEFERRED (D-0061): security-key CTAP2 hmac-secret is buildable via
-  the in-tree Win32 API (windows-sys 0.61.2, v7); Windows Hello PRF needs the
-  Feb-2026 KB5077181 + API v8 (not pinned) and the native call needs a live
-  run — so the determination + the proven envelope seam (enroll_passkey,
-  unit-tested) + an honest "coming" UI ship; the bounded native wiring (and
-  the 2FA passkey step at the gate) lands once PRF is confirmed on the
-  device. Until then no passkey can be enrolled and 2FA cannot be enabled
-  (host-refused). If a 2FA-loss safety net is ever wanted, an optional
+  recovery-key controls exist. Passkey via Windows Hello / WebAuthn PRF —
+  SHIPPED (CD-43, D-0063, superseding the D-0061 deferral and CD-41):
+  `src/webauthn.rs` over the in-tree windows-sys 0.61.2 (the v7 header's
+  API-v4-era hmac-secret salt path; no v8 FFI needed — v8 is create-time
+  eval only; the DLL applies the WebAuthn-spec salt hashing itself), enroll
+  from the unlocked session (two Hello prompts: MakeCredential + first PRF
+  eval — the authoritative capability check), 2FA unlock = host-captured
+  password + Hello assertion opening the pair envelope, remove returns
+  cleanly to password-only + best-effort OS-credential cleanup; headless
+  self-checks + mock-platform runtime flow, the live Hello loop is the
+  maintainer's. NEXT on the same seam: hardware security keys (CTAP2
+  hmac-secret, same v7 salt path with attachment widened — live-verify when
+  a key is available); Google/Android platform passkeys via the Credential
+  Manager API in the CARVILON Android app (separate Kotlin codebase,
+  sequenced when the vault reaches Android); Linux platform authenticators
+  (libfido2) if/when CyberDesk ships on Linux. If a 2FA-loss safety net is
+  ever wanted, an optional
   recovery key is a small additive change — deliberately out of scope
   (D-0062). Auto-lock via the event engine is a later stage (event-engine
   dependency).

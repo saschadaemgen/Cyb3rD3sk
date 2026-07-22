@@ -2514,6 +2514,16 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
             set_vault_state(&state);
             Ok(state)
         }
+        // Enroll THE passkey via Windows Hello (CD-43): host-validated
+        // (unlocked, none enrolled, platform available); the modal
+        // MakeCredential + first PRF eval run on a vault worker — the page
+        // only sees busy/hello state, never any credential material.
+        "vault_enroll_passkey" => {
+            crate::vault::begin_hello_enroll().map_err(|e| (3, e))?;
+            let state = crate::vault::state_json();
+            set_vault_state(&state);
+            Ok(state)
+        }
         // Open the settings card (CD-30: the HUD Ampel's "Custom…" — the
         // per-vector view lives there). Queued for the main thread.
         "open_settings" => {

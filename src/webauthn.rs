@@ -258,14 +258,18 @@ pub fn enroll(hwnd: isize, salt: &[u8; KEY_LEN]) -> Result<EnrolledPasskey> {
         pvExtension: (&mut enable as *mut BOOL).cast(),
     }];
 
-    let mut opts = WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS::default();
-    opts.dwVersion = WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS_CURRENT_VERSION;
-    opts.dwTimeoutMilliseconds = TIMEOUT_MS;
-    opts.Extensions = WEBAUTHN_EXTENSIONS { cExtensions: 1, pExtensions: ext.as_mut_ptr() };
-    opts.dwAuthenticatorAttachment = WEBAUTHN_AUTHENTICATOR_ATTACHMENT_PLATFORM;
-    opts.dwUserVerificationRequirement = WEBAUTHN_USER_VERIFICATION_REQUIREMENT_REQUIRED;
-    opts.dwAttestationConveyancePreference = WEBAUTHN_ATTESTATION_CONVEYANCE_PREFERENCE_NONE;
-    opts.bEnablePrf = 1;
+    // Everything not named is zero/null (the Default is `mem::zeroed`), and
+    // the version stamp is the v7 CURRENT constant of the pinned bindings.
+    let opts = WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS {
+        dwVersion: WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS_CURRENT_VERSION,
+        dwTimeoutMilliseconds: TIMEOUT_MS,
+        Extensions: WEBAUTHN_EXTENSIONS { cExtensions: 1, pExtensions: ext.as_mut_ptr() },
+        dwAuthenticatorAttachment: WEBAUTHN_AUTHENTICATOR_ATTACHMENT_PLATFORM,
+        dwUserVerificationRequirement: WEBAUTHN_USER_VERIFICATION_REQUIREMENT_REQUIRED,
+        dwAttestationConveyancePreference: WEBAUTHN_ATTESTATION_CONVEYANCE_PREFERENCE_NONE,
+        bEnablePrf: 1,
+        ..Default::default()
+    };
 
     let mut attestation: *mut WEBAUTHN_CREDENTIAL_ATTESTATION = std::ptr::null_mut();
     let hr = unsafe {
@@ -290,13 +294,18 @@ pub fn enroll(hwnd: isize, salt: &[u8; KEY_LEN]) -> Result<EnrolledPasskey> {
 
     // Read gated on the RETURNED dwVersion (never past it — issue #262
     // lesson): the credential id is a v1 field; bPrfEnabled is v5+ and only
-    // informational here (the eval assertion below is the real proof).
+    // informational here (the eval assertion below is the real proof). The
+    // id buffer is null-checked BEFORE slicing — an absent Win32 buffer is
+    // NULL + zero count, and `from_raw_parts(NULL, 0)` is library UB.
     let cred_id;
     let prf_acked;
     unsafe {
         let a = &*attestation;
-        cred_id =
-            std::slice::from_raw_parts(a.pbCredentialId, a.cbCredentialId as usize).to_vec();
+        cred_id = if a.pbCredentialId.is_null() || a.cbCredentialId == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(a.pbCredentialId, a.cbCredentialId as usize).to_vec()
+        };
         prf_acked = if a.dwVersion >= 5 { a.bPrfEnabled != 0 } else { false };
         WebAuthNFreeCredentialAttestation(attestation);
     }
@@ -311,8 +320,17 @@ pub fn enroll(hwnd: isize, salt: &[u8; KEY_LEN]) -> Result<EnrolledPasskey> {
     }
 
     // First PRF evaluation — the authoritative capability check AND the
-    // method secret in one step.
-    let secret = assert(hwnd, &cred_id, salt)?;
+    // method secret in one step. If it fails (cancelled second prompt, or a
+    // Hello build without hmac-secret), the just-created credential is
+    // deleted best-effort: a failed enrollment must not accumulate orphaned
+    // passkeys in Windows Settings — no half-enrolled state, OS side either.
+    let secret = match assert(hwnd, &cred_id, salt) {
+        Ok(s) => s,
+        Err(e) => {
+            delete_platform_credential(&cred_id);
+            return Err(e);
+        }
+    };
     tracing::info!("hello: credential enrolled, PRF secret derived (api v{v})");
     Ok(EnrolledPasskey { cred_id, secret })
 }
@@ -366,13 +384,17 @@ pub fn assert(hwnd: isize, cred_id: &[u8], salt: &[u8; KEY_LEN]) -> Result<Secre
         pCredWithHmacSecretSaltList: std::ptr::null_mut(),
     };
 
-    let mut opts = WEBAUTHN_AUTHENTICATOR_GET_ASSERTION_OPTIONS::default();
-    opts.dwVersion = WEBAUTHN_AUTHENTICATOR_GET_ASSERTION_OPTIONS_CURRENT_VERSION;
-    opts.dwTimeoutMilliseconds = TIMEOUT_MS;
-    opts.dwAuthenticatorAttachment = WEBAUTHN_AUTHENTICATOR_ATTACHMENT_PLATFORM;
-    opts.dwUserVerificationRequirement = WEBAUTHN_USER_VERIFICATION_REQUIREMENT_REQUIRED;
-    opts.pAllowCredentialList = &mut allow;
-    opts.pHmacSecretSaltValues = &mut salt_values;
+    // Everything not named is zero/null; notably dwFlags stays 0 (no RAW
+    // flag — the DLL applies the WebAuthn-PRF spec hashing, see above).
+    let opts = WEBAUTHN_AUTHENTICATOR_GET_ASSERTION_OPTIONS {
+        dwVersion: WEBAUTHN_AUTHENTICATOR_GET_ASSERTION_OPTIONS_CURRENT_VERSION,
+        dwTimeoutMilliseconds: TIMEOUT_MS,
+        dwAuthenticatorAttachment: WEBAUTHN_AUTHENTICATOR_ATTACHMENT_PLATFORM,
+        dwUserVerificationRequirement: WEBAUTHN_USER_VERIFICATION_REQUIREMENT_REQUIRED,
+        pAllowCredentialList: &mut allow,
+        pHmacSecretSaltValues: &mut salt_values,
+        ..Default::default()
+    };
 
     let mut assertion: *mut WEBAUTHN_ASSERTION = std::ptr::null_mut();
     let hr = unsafe {
@@ -389,9 +411,11 @@ pub fn assert(hwnd: isize, cred_id: &[u8], salt: &[u8; KEY_LEN]) -> Result<Secre
 
     // Extract the PRF output — reads gated on the RETURNED dwVersion
     // (pHmacSecret is a v3+ field; a downlevel struct means the OS did not
-    // evaluate hmac-secret at all). Zeroize the DLL-owned bytes before the
-    // free (bounded residual: internal copies beyond this pointer are the
-    // DLL's / broker's — documented in cyberdesk-security.md).
+    // evaluate hmac-secret at all). WHATEVER the outcome, any PRF bytes the
+    // DLL handed back are zeroized in place before the free — the wipe runs
+    // on every path where pHmacSecret is non-null, not just success
+    // (bounded residual: internal copies beyond this pointer are the DLL's /
+    // broker's — documented in cyberdesk-security.md).
     let result = unsafe {
         let a = &*assertion;
         if a.dwVersion < WEBAUTHN_ASSERTION_VERSION_3 {
@@ -408,21 +432,23 @@ pub fn assert(hwnd: isize, cred_id: &[u8], salt: &[u8; KEY_LEN]) -> Result<Secre
             ))
         } else {
             let out = &mut *a.pHmacSecret;
-            if out.cbFirst as usize != KEY_LEN || out.pbFirst.is_null() {
+            let first_len = out.cbFirst as usize;
+            let secret = if first_len != KEY_LEN || out.pbFirst.is_null() {
                 Err(WebAuthnError::Response(format!(
                     "unexpected PRF output length {}",
                     out.cbFirst
                 )))
             } else {
-                let bytes = std::slice::from_raw_parts_mut(out.pbFirst, out.cbFirst as usize);
-                let secret = SecretBuf::copy_of(bytes)
-                    .map_err(|e| WebAuthnError::Response(e.to_string()));
-                bytes.zeroize();
-                if !out.pbSecond.is_null() && out.cbSecond > 0 {
-                    std::slice::from_raw_parts_mut(out.pbSecond, out.cbSecond as usize).zeroize();
-                }
-                secret
+                SecretBuf::copy_of(std::slice::from_raw_parts(out.pbFirst, first_len))
+                    .map_err(|e| WebAuthnError::Response(e.to_string()))
+            };
+            if !out.pbFirst.is_null() && first_len > 0 {
+                std::slice::from_raw_parts_mut(out.pbFirst, first_len).zeroize();
             }
+            if !out.pbSecond.is_null() && out.cbSecond > 0 {
+                std::slice::from_raw_parts_mut(out.pbSecond, out.cbSecond as usize).zeroize();
+            }
+            secret
         }
     };
     unsafe { WebAuthNFreeAssertion(assertion) };

@@ -640,13 +640,19 @@
       // The config surface (1c): methods, policy, KDF cost — unlocked only.
       var config = document.getElementById("vault-config");
       config.hidden = s.vault !== "unlocked" || capturing;
+      // The Hello-modal hint rides outside the config gate: it must stay
+      // visible while busy (config hides during the enroll worker).
+      document.getElementById("vault-hello").hidden =
+        !(s.hello && s.vault === "unlocked");
       if (!config.hidden) {
         var parts = [];
-        var hasPasskey = (s.methods || []).some(function (m) { return m.kind === "passkey"; });
+        var passkey = null;
         for (var i = 0; i < (s.methods || []).length; i++) {
           var m = s.methods[i];
+          if (m.kind === "passkey") passkey = m;
           parts.push((KINDS[m.kind] || m.kind) + (m.removable ? "" : " (always present)"));
         }
+        var hasPasskey = !!passkey;
         document.getElementById("vault-methods").textContent =
           parts.length ? parts.join(" · ") : "—";
         var p1 = document.getElementById("vault-pol-1");
@@ -657,6 +663,30 @@
         // just keeps the button honest).
         p2.disabled = !hasPasskey;
         p2.title = hasPasskey ? "" : "Requires an enrolled passkey";
+        // The passkey row (CD-43): add when none, remove when enrolled —
+        // honest platform state when WebAuthn is unavailable.
+        var wa = s.webauthn || {};
+        var addBtn = document.getElementById("vault-pk-add");
+        var rmBtn = document.getElementById("vault-pk-remove");
+        var pkHint = document.getElementById("vault-pk-hint");
+        addBtn.hidden = hasPasskey;
+        rmBtn.hidden = !hasPasskey;
+        if (hasPasskey) {
+          rmBtn.dataset.id = passkey.id;
+          rmBtn.disabled = s.required === 2;
+          rmBtn.title = s.required === 2 ? "Required by two-factor unlock — switch to password-only first" : "";
+          pkHint.textContent = passkey.label +
+            " · enrolled " + new Date(passkey.created_ms).toLocaleDateString() +
+            " — the second factor when two-factor unlock is on.";
+        } else if (!wa.available) {
+          addBtn.disabled = true;
+          addBtn.title = "Windows WebAuthn is unavailable on this system";
+          pkHint.textContent = "The optional second factor — Windows WebAuthn is unavailable on this system (API v" + (wa.api || 0) + ").";
+        } else {
+          addBtn.disabled = false;
+          addBtn.title = "";
+          pkHint.textContent = "The optional second factor — with two-factor unlock on, password and passkey are both required.";
+        }
         if (s.kdf) {
           document.getElementById("vault-kdf-hint").textContent =
             Math.round(s.kdf.m_cost_kib / 1024) + " MiB · " + s.kdf.t_cost +
@@ -710,12 +740,32 @@
       });
     }
 
-    // Policy: turning 2FA on applies directly (strengthening); dropping back
-    // to password-only is a weakening — two-step confirm, and the HOST
-    // refuses without the flag.
+    // Policy: BOTH directions are two-step armed + host-gated. Turning 2FA
+    // on is an informed-consent step (a lost passkey then means an
+    // unrecoverable vault — no recovery key, by design); dropping back to
+    // password-only is a weakening.
     var polArmed = null;
-    document.getElementById("vault-pol-2").addEventListener("click", function () {
-      applyState(query({ cmd: "vault_set_policy", required: 2 }));
+    var pol2Armed = null;
+    var pol2 = document.getElementById("vault-pol-2");
+    pol2.addEventListener("click", function () {
+      if (pol2.classList.contains("active")) return;
+      if (pol2Armed) {
+        clearTimeout(pol2Armed);
+        pol2Armed = null;
+        pol2.textContent = "Password + passkey";
+        applyState(query({ cmd: "vault_set_policy", required: 2, confirm: true }));
+        return;
+      }
+      errEl.textContent = "With two-factor unlock on, the vault opens only with password AND passkey. " +
+        "If the passkey is ever lost, the vault cannot be opened — there is no recovery key, by design. " +
+        "Click again to confirm.";
+      errEl.hidden = false;
+      pol2.textContent = "Confirm two-factor";
+      pol2Armed = setTimeout(function () {
+        pol2.textContent = "Password + passkey";
+        pol2Armed = null;
+        errEl.hidden = true;
+      }, 6000);
     });
     var pol1 = document.getElementById("vault-pol-1");
     pol1.addEventListener("click", function () {
@@ -776,6 +826,31 @@
 
     document.getElementById("vault-change").addEventListener("click", function () {
       applyState(query({ cmd: "vault_begin_capture", purpose: "change_pass" }));
+    });
+
+    // Passkey add: the host runs the modal Windows Hello flow on a worker;
+    // this page just triggers and renders busy/hello state.
+    document.getElementById("vault-pk-add").addEventListener("click", function () {
+      applyState(query({ cmd: "vault_enroll_passkey" }));
+    });
+
+    // Passkey remove: two-step armed confirm (a removed passkey means 2FA
+    // is no longer available until re-enrolled).
+    var pkArmed = null;
+    var pkRemove = document.getElementById("vault-pk-remove");
+    pkRemove.addEventListener("click", function () {
+      if (pkArmed) {
+        clearTimeout(pkArmed);
+        pkArmed = null;
+        pkRemove.textContent = "Remove";
+        applyState(query({ cmd: "vault_remove_method", id: pkRemove.dataset.id }));
+        return;
+      }
+      pkRemove.textContent = "Confirm remove";
+      pkArmed = setTimeout(function () {
+        pkRemove.textContent = "Remove";
+        pkArmed = null;
+      }, 3000);
     });
 
     query({ cmd: "get_vault_state" }).then(function (r) {

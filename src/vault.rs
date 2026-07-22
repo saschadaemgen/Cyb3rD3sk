@@ -76,6 +76,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicIsize, Ordering};
 
 use argon2::{Algorithm, Argon2, Block, Params, Version};
 use blake2::{Blake2s256, Digest};
@@ -451,12 +452,18 @@ pub struct Method {
     pub label: String,
     /// Mint time (unix epoch ms) for honest status display.
     pub created_ms: u64,
-    /// Passphrase methods only: the Argon2id cost parameters…
+    /// Passphrase methods only: the Argon2id cost parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kdf: Option<KdfParams>,
-    /// …and the per-method random salt (hex).
+    /// The per-method random salt, hex. For the passphrase it feeds Argon2id;
+    /// for the passkey it is the PRF eval value the OS converts per the
+    /// WebAuthn spec (CD-43, D-0063). Non-secret either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub salt: Option<String>,
+    /// Passkey methods only: the WebAuthn credential id (hex, non-secret) —
+    /// the allowlist entry for the unlock-time Hello assertion (CD-43).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cred_id: Option<String>,
 }
 
 /// One VMK envelope: the VMK wrapped by the combined key of `method_ids`
@@ -771,6 +778,7 @@ pub fn create(passphrase: &[u8], kdf: &KdfParams, now_ms: u64) -> Result<NewVaul
             created_ms: now_ms,
             kdf: Some(*kdf),
             salt: Some(hex_encode(&salt)),
+            cred_id: None,
         },
         pp_key,
     )];
@@ -866,12 +874,16 @@ fn unwrap_all_escrows(file: &VaultFile, vmk: &SecretBuf) -> Result<Vec<(Method, 
 /// Enroll THE passkey (at most one, D-0062) from an unlocked session. At
 /// password-only the envelope set is unchanged — the passkey gains an escrow
 /// so a later switch to 2FA can mint the pair envelope; it opens nothing on
-/// its own. Re-wraps the VMK; the vault data is untouched.
+/// its own. Re-wraps the VMK; the vault data is untouched. `cred_id` and
+/// `prf_salt` (both hex, non-secret) are the Hello assertion inputs (CD-43);
+/// a mock/test enrollment passes None.
 pub fn enroll_passkey(
     file: &VaultFile,
     vmk: &SecretBuf,
     label: &str,
     secret: &[u8],
+    cred_id: Option<String>,
+    prf_salt: Option<String>,
     now_ms: u64,
 ) -> Result<VaultFile> {
     if secret.len() != KEY_LEN {
@@ -891,7 +903,8 @@ pub fn enroll_passkey(
             label: label.to_string(),
             created_ms: now_ms,
             kdf: None,
-            salt: None,
+            salt: prf_salt,
+            cred_id,
         },
         SecretBuf::copy_of(secret)?,
     ));
@@ -1263,6 +1276,10 @@ struct Runtime {
     /// warning until the page's explicit "use it anyway" IPC (the informed
     /// override) — Enter never overrides, and further typing re-evaluates.
     weak_pending: bool,
+    /// A Windows Hello modal is up on a worker: `"enroll"` (passkey
+    /// enrollment, two prompts) or `"assert"` (the 2FA unlock step). Drives
+    /// the pages' "follow the Windows Hello prompt" hint (CD-43).
+    hello: Option<&'static str>,
     busy: bool,
     error: Option<String>,
     outcome: Option<Outcome>,
@@ -1292,6 +1309,7 @@ fn rt() -> &'static Mutex<Runtime> {
             pending_pass: None,
             strength: None,
             weak_pending: false,
+            hello: None,
             busy: false,
             error: None,
             outcome: None,
@@ -1306,6 +1324,107 @@ fn rt() -> &'static Mutex<Runtime> {
 /// Does this capture type a NEW master password (the meter's home)?
 fn captures_new_password(kind: Option<CaptureKind>) -> bool {
     matches!(kind, Some(CaptureKind::SetupPass) | Some(CaptureKind::ChangePass))
+}
+
+// --- Windows Hello bridge (CD-43, D-0063) -----------------------------------
+
+/// The shell's top-level window handle, registered once at boot — the Hello
+/// modal's parent. Workers read it without the runtime lock.
+static SHELL_HWND: AtomicIsize = AtomicIsize::new(0);
+
+pub fn set_shell_hwnd(hwnd: isize) {
+    SHELL_HWND.store(hwnd, Ordering::Relaxed);
+}
+
+fn shell_hwnd() -> isize {
+    SHELL_HWND.load(Ordering::Relaxed)
+}
+
+/// The unit suite must never pop a Hello prompt: under `cfg(test)` the
+/// platform seam answers from this injectable mock instead of webauthn.dll.
+/// `None` = the mock "platform" is unavailable.
+#[cfg(test)]
+fn test_prf() -> &'static Mutex<Option<Vec<u8>>> {
+    use std::sync::OnceLock;
+    static PRF: OnceLock<Mutex<Option<Vec<u8>>>> = OnceLock::new();
+    PRF.get_or_init(|| Mutex::new(None))
+}
+
+/// The credential id the test mock "mints" — asserted back at unlock so the
+/// cred-id plumbing is exercised end to end.
+#[cfg(test)]
+const TEST_CRED_ID: &[u8] = b"mock-hello-credential";
+
+/// Platform enroll: create the Hello credential and derive the PRF secret
+/// (two modal prompts — see webauthn.rs). Returns (credential id, secret).
+fn platform_enroll(hwnd: isize, salt: &[u8; KEY_LEN]) -> std::result::Result<(Vec<u8>, SecretBuf), String> {
+    #[cfg(test)]
+    {
+        let _ = (hwnd, salt);
+        return match test_prf().lock().unwrap().as_ref() {
+            Some(s) => Ok((
+                TEST_CRED_ID.to_vec(),
+                SecretBuf::copy_of(s).map_err(|e| e.to_string())?,
+            )),
+            None => Err("mock platform unavailable".into()),
+        };
+    }
+    #[cfg(all(not(test), windows))]
+    {
+        let e = crate::webauthn::enroll(hwnd, salt).map_err(|e| e.to_string())?;
+        Ok((e.cred_id, e.secret))
+    }
+    #[cfg(all(not(test), not(windows)))]
+    {
+        let _ = (hwnd, salt);
+        Err("Windows Hello is unavailable on this platform".into())
+    }
+}
+
+/// Platform assert: the unlock-time Hello step — one modal prompt, returns
+/// the PRF-derived method secret for the stored (cred id, salt).
+fn platform_assert(
+    hwnd: isize,
+    cred_id: &[u8],
+    salt: &[u8; KEY_LEN],
+) -> std::result::Result<SecretBuf, String> {
+    #[cfg(test)]
+    {
+        let _ = (hwnd, salt);
+        if cred_id != TEST_CRED_ID {
+            return Err("mock: unknown credential id".into());
+        }
+        return match test_prf().lock().unwrap().as_ref() {
+            Some(s) => SecretBuf::copy_of(s).map_err(|e| e.to_string()),
+            None => Err("mock platform unavailable".into()),
+        };
+    }
+    #[cfg(all(not(test), windows))]
+    {
+        crate::webauthn::assert(hwnd, cred_id, salt).map_err(|e| e.to_string())
+    }
+    #[cfg(all(not(test), not(windows)))]
+    {
+        let _ = (hwnd, cred_id, salt);
+        Err("Windows Hello is unavailable on this platform".into())
+    }
+}
+
+/// The platform capability snapshot for the honest config surface:
+/// (available, webauthn.dll API version).
+fn platform_info() -> (bool, u32) {
+    #[cfg(test)]
+    {
+        (test_prf().lock().unwrap().is_some(), 0)
+    }
+    #[cfg(all(not(test), windows))]
+    {
+        (crate::webauthn::available(), crate::webauthn::api_version())
+    }
+    #[cfg(all(not(test), not(windows)))]
+    {
+        (false, 0)
+    }
 }
 
 /// Recompute (or drop) the strength snapshot to match the current capture.
@@ -1496,11 +1615,14 @@ pub fn key_submit() {
                 return; // empty Enter: nothing to do
             }
             // The password is the always-required factor; under 2FA the
-            // passkey assertion joins as a host-driven WebAuthn step here
-            // (D-0061 go-live) — until then a 2FA vault cannot exist, since
-            // no passkey can be enrolled.
+            // Windows Hello assertion joins as the host-driven second step
+            // (CD-43) — both factors together open the pair envelope.
             let pass = r.input.take();
-            spawn_unlock(&mut r, pass);
+            if r.file.as_ref().map(|f| f.required).unwrap_or(1) >= 2 {
+                spawn_unlock_2fa(&mut r, pass);
+            } else {
+                spawn_unlock(&mut r, pass);
+            }
         }
         CaptureKind::SetupPass => {
             let len = r.input.as_ref().map(|i| i.len).unwrap_or(0);
@@ -1741,10 +1863,12 @@ pub fn retune_kdf(m_cost_kib: u32, t_cost: u32, p_cost: u32, confirm: bool) -> s
 
 /// Change the unlock policy from the unlocked session: 1 = password-only,
 /// 2 = password + passkey (2FA; needs the passkey enrolled — the core
-/// refuses otherwise). Structural (a full envelope re-mint); DROPPING 2FA is
-/// a weakening and needs the confirm flag — the host re-validates the D-0040
-/// gate rather than trusting the page. Cheap (AEAD only, no KDF), so it runs
-/// synchronously.
+/// refuses otherwise). Structural (a full envelope re-mint); BOTH directions
+/// are confirm-gated and host-revalidated (D-0040 discipline): dropping 2FA
+/// is a weakening, and ENABLING it is an informed-consent step — from then
+/// on a lost Hello credential means an unrecoverable vault (no recovery
+/// key, by design — the D-0062 stance, extended by D-0063). Cheap (AEAD
+/// only, no KDF), so it runs synchronously.
 pub fn set_policy(required: u8, confirm: bool) -> std::result::Result<(), String> {
     let mut r = rt().lock().unwrap();
     if r.busy {
@@ -1756,6 +1880,13 @@ pub fn set_policy(required: u8, confirm: bool) -> std::result::Result<(), String
     if required < file.required && !confirm {
         return Err("lowering the unlock policy requires confirmation".into());
     }
+    if required >= 2 && file.required < 2 && !confirm {
+        return Err(
+            "enabling two-factor unlock requires confirmation — if the passkey is ever \
+             lost, the vault cannot be opened (there is no recovery key, by design)"
+                .into(),
+        );
+    }
     let new = set_required(file, vmk, required).map_err(|e| e.to_string())?;
     new.save_to(&r.dir.join("vault.json")).map_err(|e| e.to_string())?;
     r.file = Some(new);
@@ -1765,7 +1896,9 @@ pub fn set_policy(required: u8, confirm: bool) -> std::result::Result<(), String
 
 /// Remove the enrolled passkey (the only removable method — the core refuses
 /// removing the password, and refuses removing the passkey while the 2FA
-/// policy requires it). Synchronous like `set_policy` (AEAD only).
+/// policy requires it). Synchronous like `set_policy` (AEAD only). The
+/// OS-side Hello credential is deleted best-effort AFTER the vault state is
+/// committed — the vault never depends on the OS credential store.
 pub fn remove_enrolled_method(id: &str) -> std::result::Result<(), String> {
     let mut r = rt().lock().unwrap();
     if r.busy {
@@ -1774,10 +1907,107 @@ pub fn remove_enrolled_method(id: &str) -> std::result::Result<(), String> {
     let (Some(file), Some(vmk)) = (r.file.as_ref(), r.vmk.as_ref()) else {
         return Err("vault is not unlocked".into());
     };
+    #[cfg(all(not(test), windows))]
+    let removed_cred = file.methods.iter().find(|m| m.id == id).and_then(|m| m.cred_id.clone());
     let new = remove_method(file, vmk, id).map_err(|e| e.to_string())?;
     new.save_to(&r.dir.join("vault.json")).map_err(|e| e.to_string())?;
     r.file = Some(new);
     r.error = None;
+    #[cfg(all(not(test), windows))]
+    if let Some(hex) = removed_cred
+        && let Ok(cred) = hex_decode(&hex)
+    {
+        // Detached best-effort cleanup: this fn runs on the CEF UI thread
+        // (the IPC handler) and still holds the runtime lock — the broker
+        // call must block neither (CD-38 law). The vault result committed
+        // above never depends on it.
+        std::thread::spawn(move || crate::webauthn::delete_platform_credential(&cred));
+    }
+    Ok(())
+}
+
+/// Begin Windows Hello passkey enrollment from the unlocked session (CD-43
+/// Task A). Host-validated: unlocked, no passkey yet (one max), platform
+/// available. The modal MakeCredential + first PRF eval run on a worker
+/// (two Hello prompts, by CTAP design — the PRF output only exists at
+/// assertion time); success re-wraps the vault file with the new method.
+/// At password-only the envelope set is unchanged — enrolling is what makes
+/// the 2FA policy switch AVAILABLE, it never changes the policy itself.
+pub fn begin_hello_enroll() -> std::result::Result<(), String> {
+    let mut r = rt().lock().unwrap();
+    if r.busy {
+        return Err("busy".into());
+    }
+    let (Some(file), Some(vmk)) = (r.file.clone(), r.vmk.as_ref().and_then(|v| v.try_clone().ok()))
+    else {
+        return Err("vault is not unlocked".into());
+    };
+    if file.methods.iter().any(|m| m.kind == MethodKind::Passkey) {
+        return Err("a passkey is already enrolled — remove it first".into());
+    }
+    let (available, api) = platform_info();
+    if !available {
+        return Err(format!(
+            "Windows WebAuthn is unavailable on this system (API v{api})"
+        ));
+    }
+    r.busy = true;
+    r.hello = Some("enroll");
+    r.error = None;
+    let dir = r.dir.clone();
+    drop(r);
+    let hwnd = shell_hwnd();
+    std::thread::spawn(move || {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let result: std::result::Result<VaultFile, String> = (|| {
+            // The PRF eval value: per-passkey random, persisted non-secret on
+            // the method (the OS applies the WebAuthn-spec hashing, D-0063).
+            let salt: [u8; KEY_LEN] = rand_array().map_err(|e| e.to_string())?;
+            let (cred_id, secret) = platform_enroll(hwnd, &salt)?;
+            let vault_side: Result<VaultFile> = (|| {
+                let new = enroll_passkey(
+                    &file,
+                    &vmk,
+                    "Windows Hello",
+                    secret.as_slice(),
+                    Some(hex_encode(&cred_id)),
+                    Some(hex_encode(&salt)),
+                    now_ms,
+                )?;
+                new.save_to(&dir.join("vault.json"))?;
+                Ok(new)
+            })();
+            match vault_side {
+                Ok(new) => Ok(new),
+                Err(e) => {
+                    // The OS credential was minted but the vault could not
+                    // commit it — delete the orphan best-effort, so a failed
+                    // enrollment leaves no half-enrolled state on either side.
+                    #[cfg(all(not(test), windows))]
+                    crate::webauthn::delete_platform_credential(&cred_id);
+                    Err(e.to_string())
+                }
+            }
+        })();
+        let mut r = rt().lock().unwrap();
+        r.busy = false;
+        r.hello = None;
+        match result {
+            Ok(new) => {
+                r.file = Some(new);
+                r.error = None;
+                r.outcome = Some(Outcome::Rewrapped);
+                tracing::info!("hello passkey enrolled — 2FA is now available");
+            }
+            Err(e) => {
+                r.error = Some(e);
+                r.outcome = Some(Outcome::RewrapFailed);
+            }
+        }
+    });
     Ok(())
 }
 
@@ -1820,6 +2050,96 @@ fn spawn_unlock(r: &mut Runtime, pass: Option<SecretInput>) {
                 r.error = Some("unlock failed".into());
                 r.capture = Some(CaptureKind::UnlockPass);
                 r.input = SecretInput::new().ok();
+                r.outcome = Some(Outcome::UnlockFailed);
+            }
+        }
+    });
+}
+
+/// 2FA unlock (CD-43 Task B): the captured master password PLUS the Windows
+/// Hello assertion, combined to open the `{password, passkey}` pair
+/// envelope. The Hello modal shows while `hello = "assert"`. A failed or
+/// cancelled Hello step returns to the password prompt WITH the typed entry
+/// preserved (it stays in locked memory throughout) — retrying costs one
+/// Enter, not a re-type; and since no password was checked yet, the message
+/// is honest without being an oracle. There is NO Hello-only unlock: without
+/// the password no envelope can open, structurally.
+fn spawn_unlock_2fa(r: &mut Runtime, pass: Option<SecretInput>) {
+    let Some(file) = r.file.clone() else {
+        r.error = Some(r.broken.clone().unwrap_or_else(|| "vault unavailable".into()));
+        r.outcome = Some(Outcome::UnlockFailed);
+        r.input = SecretInput::new().ok();
+        return;
+    };
+    let Some(pk) = file.methods.iter().find(|m| m.kind == MethodKind::Passkey).cloned() else {
+        // A 2FA flag with no passkey cannot load (assert_model refuses it);
+        // fail closed anyway rather than trusting that invariant here.
+        r.error = Some("two-factor vault has no passkey method".into());
+        r.outcome = Some(Outcome::UnlockFailed);
+        r.input = SecretInput::new().ok();
+        return;
+    };
+    r.busy = true;
+    r.hello = Some("assert");
+    r.error = None;
+    let dir = r.dir.clone();
+    let hwnd = shell_hwnd();
+    std::thread::spawn(move || {
+        let asserted: std::result::Result<SecretBuf, String> = (|| {
+            let cred = hex_decode(pk.cred_id.as_deref().unwrap_or(""))
+                .map_err(|_| "the passkey has no usable credential id".to_string())?;
+            if cred.is_empty() {
+                return Err("the passkey has no usable credential id".into());
+            }
+            let salt: [u8; KEY_LEN] = hex_decode(pk.salt.as_deref().unwrap_or(""))
+                .ok()
+                .and_then(|v| v.try_into().ok())
+                .ok_or_else(|| "the passkey has no usable PRF salt".to_string())?;
+            platform_assert(hwnd, &cred, &salt)
+        })();
+        match asserted {
+            Ok(secret) => {
+                let mut factors: Vec<Factor<'_>> = Vec::new();
+                if let Some(p) = pass.as_ref() {
+                    factors.push(Factor::Passphrase(p.as_slice()));
+                }
+                factors.push(Factor::MethodSecret { id: &pk.id, secret: secret.as_slice() });
+                let result = unlock(&file, &factors);
+                drop(factors);
+                let sealed = result.as_ref().ok().map(|vmk| load_sealed(&dir, vmk));
+                let mut r = rt().lock().unwrap();
+                r.busy = false;
+                r.hello = None;
+                match result {
+                    Ok(vmk) => {
+                        r.vmk = Some(vmk);
+                        r.sealed = sealed;
+                        r.capture = None;
+                        r.input = None;
+                        r.pending_pass = None;
+                        r.error = None;
+                        r.outcome = Some(Outcome::Unlocked);
+                        tracing::info!("vault unlocked (password + passkey)");
+                    }
+                    Err(_) => {
+                        // Uniform by design (VaultError::Crypto carries no
+                        // oracle) — the Hello step succeeded, so this is a
+                        // factor mismatch, indistinguishable which.
+                        r.error = Some("unlock failed".into());
+                        r.capture = Some(CaptureKind::UnlockPass);
+                        r.input = SecretInput::new().ok();
+                        r.outcome = Some(Outcome::UnlockFailed);
+                    }
+                }
+            }
+            Err(e) => {
+                // The Hello step itself failed — before any password check.
+                let mut r = rt().lock().unwrap();
+                r.busy = false;
+                r.hello = None;
+                r.error = Some(e);
+                r.capture = Some(CaptureKind::UnlockPass);
+                r.input = pass; // the typed password survives for a retry
                 r.outcome = Some(Outcome::UnlockFailed);
             }
         }
@@ -1978,6 +2298,10 @@ pub fn state_json() -> String {
             "suggestions": s.suggestions,
         })
     });
+    // Honest platform capability for the config surface (CD-43): whether the
+    // OS WebAuthn layer can serve the passkey path at all, and the Hello
+    // modal state while a worker holds one open.
+    let (wa_available, wa_api) = platform_info();
     serde_json::json!({
         "vault": vault,
         "capture": r.capture.map(|c| c.as_str()),
@@ -1987,6 +2311,8 @@ pub fn state_json() -> String {
         "kdf": kdf,
         "strength": strength,
         "weak_pending": r.weak_pending,
+        "hello": r.hello,
+        "webauthn": { "available": wa_available, "api": wa_api },
         "busy": r.busy,
         "error": r.error,
         "broken": r.broken,
@@ -2066,6 +2392,7 @@ fn test_reset_runtime(dir: &Path, kdf: KdfParams) {
         pending_pass: None,
         strength: None,
         weak_pending: false,
+        hello: None,
         busy: false,
         error: None,
         outcome: None,
@@ -2164,7 +2491,7 @@ mod tests {
     fn two_factor_policy_is_structural_not_a_flag() {
         let nv = fresh();
         let prf = SecretBuf::random(KEY_LEN).unwrap(); // stands in for the PRF output
-        let with_pk = enroll_passkey(&nv.file, &nv.vmk, "YubiKey 5", prf.as_slice(), NOW)
+        let with_pk = enroll_passkey(&nv.file, &nv.vmk, "YubiKey 5", prf.as_slice(), None, None, NOW)
             .expect("enroll from unlocked session");
         let pk_id = with_pk
             .methods
@@ -2227,7 +2554,7 @@ mod tests {
     fn passkey_is_additional_never_a_replacement() {
         let nv = fresh();
         let prf = SecretBuf::random(KEY_LEN).unwrap();
-        let with_pk = enroll_passkey(&nv.file, &nv.vmk, "YubiKey 5", prf.as_slice(), NOW)
+        let with_pk = enroll_passkey(&nv.file, &nv.vmk, "YubiKey 5", prf.as_slice(), None, None, NOW)
             .expect("enroll from unlocked session");
         assert_eq!(with_pk.methods.len(), 2);
         assert_eq!(
@@ -2256,7 +2583,7 @@ mod tests {
         // At most one passkey (D-0062).
         let prf2 = SecretBuf::random(KEY_LEN).unwrap();
         assert!(matches!(
-            enroll_passkey(&with_pk, &nv.vmk, "Second key", prf2.as_slice(), NOW),
+            enroll_passkey(&with_pk, &nv.vmk, "Second key", prf2.as_slice(), None, None, NOW),
             Err(VaultError::Policy(_))
         ));
 
@@ -2298,6 +2625,7 @@ mod tests {
             created_ms: NOW,
             kdf: None,
             salt: None,
+            cred_id: None,
         });
         bad.escrows.push(Escrow {
             method_id: "passkey-dead".into(),
@@ -2320,6 +2648,7 @@ mod tests {
             created_ms: NOW,
             kdf: None,
             salt: None,
+            cred_id: None,
         });
         assert!(matches!(assert_model(&twin), Err(VaultError::Policy(_))));
 
@@ -2614,8 +2943,8 @@ mod tests {
         // --- The config surface, driven end to end while unlocked -----------
 
         // Policy: 2FA needs an enrolled passkey — none exists, so the switch
-        // refuses regardless of any confirm flag (CD-42 Task D).
-        assert!(set_policy(2, false).is_err(), "2FA without a passkey is refused");
+        // refuses even WITH the consent flag (CD-42 Task D).
+        assert!(set_policy(2, true).is_err(), "2FA without a passkey is refused");
         assert!(state_json().contains("\"required\":1"));
 
         // Change the master password to a WEAK one via the informed override
@@ -2662,6 +2991,103 @@ mod tests {
         key_submit();
         assert_eq!(wait_outcome(), Outcome::Rewrapped);
         assert!(state_json().contains("\"m_cost_kib\":16384"));
+
+        // --- CD-43: Hello passkey enroll + 2FA unlock (mock platform) -------
+
+        // No mock "platform" installed → enrollment is host-refused, honestly.
+        assert!(begin_hello_enroll().is_err(), "platform unavailable is refused");
+
+        // Enroll through the platform seam: the worker mints the credential
+        // id + PRF secret, re-wraps the file, and 2FA becomes available.
+        const PRF: [u8; KEY_LEN] = [0x5a; KEY_LEN];
+        *test_prf().lock().unwrap() = Some(PRF.to_vec());
+        begin_hello_enroll().expect("enroll via the mock platform");
+        assert_eq!(wait_outcome(), Outcome::Rewrapped);
+        assert!(begin_hello_enroll().is_err(), "one passkey max");
+        let state: serde_json::Value = serde_json::from_str(&state_json()).unwrap();
+        let pk_id = state["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["kind"] == "passkey")
+            .expect("passkey enrolled")["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // The persisted method carries the assertion inputs — non-secret
+        // credential id + PRF eval salt, hex (CD-43 plumbing check).
+        {
+            let r = rt().lock().unwrap();
+            let m = r
+                .file
+                .as_ref()
+                .unwrap()
+                .methods
+                .iter()
+                .find(|m| m.kind == MethodKind::Passkey)
+                .unwrap();
+            assert_eq!(hex_decode(m.cred_id.as_deref().unwrap()).unwrap(), TEST_CRED_ID);
+            assert_eq!(hex_decode(m.salt.as_deref().unwrap()).unwrap().len(), KEY_LEN);
+        }
+
+        // 2FA on: enabling is an informed-consent step (D-0063 — a lost
+        // passkey then means an unrecoverable vault), so the bare switch is
+        // host-refused; with the acknowledgment it applies. The passkey is
+        // then locked in by the policy.
+        assert!(
+            set_policy(2, false).is_err(),
+            "enabling 2FA without the consent flag is refused"
+        );
+        set_policy(2, true).expect("2FA with a passkey enrolled + consent");
+        assert!(
+            remove_enrolled_method(&pk_id).is_err(),
+            "the 2FA policy refuses removing its second factor"
+        );
+
+        // Relock → 2FA unlock: password + the (mock) Hello assertion.
+        test_reset_runtime(&dir, TEST_KDF);
+        assert!(begin_hello_enroll().is_err(), "enrollment needs the unlocked session");
+        begin_capture("unlock_pass").unwrap();
+        key_text("password");
+        key_submit();
+        assert_eq!(wait_outcome(), Outcome::Unlocked);
+        assert!(is_unlocked(), "password + passkey assertion together open the pair envelope");
+
+        // Wrong password + a VALID assertion still fails — uniform error.
+        test_reset_runtime(&dir, TEST_KDF);
+        begin_capture("unlock_pass").unwrap();
+        key_text("not the password");
+        key_submit();
+        assert_eq!(wait_outcome(), Outcome::UnlockFailed);
+        assert!(state_json().contains("unlock failed"));
+
+        // A failed Hello step reports honestly (no password was checked, so
+        // no oracle) and PRESERVES the typed password for a one-Enter retry.
+        *test_prf().lock().unwrap() = None;
+        key_text("password");
+        key_submit();
+        assert_eq!(wait_outcome(), Outcome::UnlockFailed);
+        assert!(state_json().contains("mock platform unavailable"));
+        assert!(
+            state_json().contains("\"chars\":8"),
+            "the typed password survives a failed second factor"
+        );
+        *test_prf().lock().unwrap() = Some(PRF.to_vec());
+        key_submit(); // one Enter retries with the preserved entry
+        assert_eq!(wait_outcome(), Outcome::Unlocked);
+
+        // Dropping back: 2FA→password-only is a weakening (confirm-gated);
+        // then the passkey removes cleanly — no brick (CD-43 Task C).
+        assert!(set_policy(1, false).is_err(), "dropping 2FA needs confirmation");
+        set_policy(1, true).unwrap();
+        remove_enrolled_method(&pk_id).expect("passkey removable at password-only");
+        test_reset_runtime(&dir, TEST_KDF);
+        begin_capture("unlock_pass").unwrap();
+        key_text("password");
+        key_submit();
+        assert_eq!(wait_outcome(), Outcome::Unlocked);
+        assert!(is_unlocked(), "password-only unlock works after removal");
 
         // Lock request queues a relaunch; wipe drops every secret.
         request_lock();
