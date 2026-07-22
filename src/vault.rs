@@ -1276,6 +1276,10 @@ struct Runtime {
     /// warning until the page's explicit "use it anyway" IPC (the informed
     /// override) - Enter never overrides, and further typing re-evaluates.
     weak_pending: bool,
+    /// The banked first entry was a deliberately accepted weak password
+    /// (CD-46): the confirm step states that as settled fact in its summary
+    /// line, and never warns about it again - the decision is already made.
+    weak_accepted: bool,
     /// A Windows Hello modal is up on a worker: `"enroll"` (passkey
     /// enrollment, two prompts) or `"assert"` (the 2FA unlock step). Drives
     /// the pages' "follow the Windows Hello prompt" hint (CD-43).
@@ -1313,6 +1317,7 @@ fn rt() -> &'static Mutex<Runtime> {
             pending_pass: None,
             strength: None,
             weak_pending: false,
+            weak_accepted: false,
             hello: None,
             offer_passkey: false,
             busy: false,
@@ -1638,6 +1643,7 @@ pub fn key_escape() {
         // One step back: drop the banked first entry, re-type it.
         Some(CaptureKind::SetupConfirm) => {
             r.pending_pass = None;
+            r.weak_accepted = false;
             r.capture = Some(CaptureKind::SetupPass);
             r.input = SecretInput::new().ok();
             r.error = None;
@@ -1645,6 +1651,7 @@ pub fn key_escape() {
         }
         Some(CaptureKind::ChangeConfirm) => {
             r.pending_pass = None;
+            r.weak_accepted = false;
             r.capture = Some(CaptureKind::ChangePass);
             r.input = SecretInput::new().ok();
             r.error = None;
@@ -1704,6 +1711,7 @@ pub fn key_submit() {
                 return;
             }
             r.pending_pass = r.input.take();
+            r.weak_accepted = false;
             r.input = SecretInput::new().ok();
             r.capture = Some(CaptureKind::SetupConfirm);
             r.error = None;
@@ -1711,13 +1719,19 @@ pub fn key_submit() {
         }
         CaptureKind::SetupConfirm => {
             let confirm = r.input.take();
-            let first = r.pending_pass.take();
-            let (Some(first), Some(confirm)) = (first, confirm) else { return };
+            let Some(first) = r.pending_pass.take() else { return };
+            let Some(confirm) = confirm else {
+                r.pending_pass = Some(first);
+                return;
+            };
             if first.as_slice() != confirm.as_slice() {
-                r.error = Some("the two entries do not match - start again".into());
-                r.capture = Some(CaptureKind::SetupPass);
+                // STAY on step 2 (CD-46 Stage A): the chosen password is
+                // still banked, only the confirmation is cleared. Rewinding
+                // to step 1 threw away a correct choice over a typo in the
+                // re-type, and the silent step change read as a new screen.
+                r.pending_pass = Some(first);
+                r.error = Some("The two entries do not match".into());
                 r.input = SecretInput::new().ok();
-                refresh_strength(&mut r);
                 return;
             }
             drop(confirm);
@@ -1739,6 +1753,7 @@ pub fn key_submit() {
                 return;
             }
             r.pending_pass = r.input.take();
+            r.weak_accepted = false;
             r.input = SecretInput::new().ok();
             r.capture = Some(CaptureKind::ChangeConfirm);
             r.error = None;
@@ -1746,13 +1761,16 @@ pub fn key_submit() {
         }
         CaptureKind::ChangeConfirm => {
             let confirm = r.input.take();
-            let first = r.pending_pass.take();
-            let (Some(first), Some(confirm)) = (first, confirm) else { return };
+            let Some(first) = r.pending_pass.take() else { return };
+            let Some(confirm) = confirm else {
+                r.pending_pass = Some(first);
+                return;
+            };
             if first.as_slice() != confirm.as_slice() {
-                r.error = Some("the two entries do not match - start again".into());
-                r.capture = Some(CaptureKind::ChangePass);
+                // Same rule as setup: stay on the confirm step (CD-46).
+                r.pending_pass = Some(first);
+                r.error = Some("The two entries do not match".into());
                 r.input = SecretInput::new().ok();
-                refresh_strength(&mut r);
                 return;
             }
             drop(confirm);
@@ -1814,6 +1832,7 @@ pub fn accept_weak() -> std::result::Result<(), String> {
         _ => return Err("no weak entry is awaiting confirmation".into()),
     };
     r.weak_pending = false;
+    r.weak_accepted = true;
     r.pending_pass = r.input.take();
     r.input = SecretInput::new().ok();
     r.capture = Some(next);
@@ -2015,19 +2034,29 @@ pub fn remove_enrolled_method(id: &str) -> std::result::Result<(), String> {
 /// the 2FA policy switch AVAILABLE, it never changes the policy itself.
 pub fn begin_hello_enroll() -> std::result::Result<(), String> {
     let mut r = rt().lock().unwrap();
+    // Every refusal is also written into the STATE (CD-46 Stage B): a control
+    // in a security product must never fail silently, and a message that
+    // lives only in the IPC rejection can be wiped by the next state push.
+    macro_rules! refuse {
+        ($msg:expr) => {{
+            let m: String = $msg;
+            r.error = Some(m.clone());
+            return Err(m);
+        }};
+    }
     if r.busy {
-        return Err("busy".into());
+        refuse!("busy".to_string());
     }
     let (Some(file), Some(vmk)) = (r.file.clone(), r.vmk.as_ref().and_then(|v| v.try_clone().ok()))
     else {
-        return Err("vault is not unlocked".into());
+        refuse!("The vault is not unlocked.".to_string());
     };
     if file.methods.iter().any(|m| m.kind == MethodKind::Passkey) {
-        return Err("a passkey is already enrolled - remove it first".into());
+        refuse!("A passkey is already enrolled. Remove it before adding another.".to_string());
     }
     let (available, api, hello_ready) = platform_info();
     if !available {
-        return Err(format!(
+        refuse!(format!(
             "Windows WebAuthn is unavailable on this system (API v{api})"
         ));
     }
@@ -2036,11 +2065,11 @@ pub fn begin_hello_enroll() -> std::result::Result<(), String> {
     // up front with the actual next step instead.
     #[cfg(all(not(test), windows))]
     if !hello_ready {
-        return Err(crate::webauthn::HELLO_SETUP_HINT.into());
+        refuse!(crate::webauthn::HELLO_SETUP_HINT.to_string());
     }
     #[cfg(any(test, not(windows)))]
     if !hello_ready {
-        return Err("the platform authenticator is not available".into());
+        refuse!("The platform authenticator is not available.".to_string());
     }
     r.busy = true;
     r.hello = Some("enroll");
@@ -2303,9 +2332,13 @@ fn spawn_setup(r: &mut Runtime, pass: SecretInput) {
         r.pending_pass = None;
         r.strength = None;
         r.weak_pending = false;
-        // Offer the passkey right after the master password (CD-44 D1) -
-        // optional, declinable, and only where it can actually be taken up.
-        r.offer_passkey = platform_info().2;
+        // Offer the passkey right after the master password (CD-44 D1),
+        // wherever the passkey path exists at all. It is raised even when
+        // Windows Hello is not set up yet (CD-46): the offer then explains
+        // what to do instead of hiding the feature's existence, which is why
+        // it never appeared on a machine without a Hello PIN. Declining or
+        // continuing both simply end the step.
+        r.offer_passkey = platform_info().0;
         r.outcome = Some(Outcome::SetupDone);
         tracing::info!("vault created - session unlocked");
     });
@@ -2320,6 +2353,68 @@ pub fn request_lock() {
 pub fn take_relaunch() -> bool {
     let mut r = rt().lock().unwrap();
     std::mem::take(&mut r.relaunch)
+}
+
+/// Destroy the vault and return the app to first-launch setup (CD-46 Stage
+/// C). This is the in-product form of what previously required quitting and
+/// deleting files by hand.
+///
+/// It is TOTAL by design: with no recovery key (D-0062), everything the vault
+/// protects goes with it, including the sealed identity seed. The caller must
+/// pass `confirm` (the host re-validates the two-step confirmation rather
+/// than trusting the page, the D-0040 discipline), and the session must be
+/// unlocked, so a reset is an act of someone who can already open the vault.
+///
+/// The files are removed, every secret is wiped from memory, and the shell
+/// relaunches cold: the next boot finds no vault and opens the mandatory
+/// setup, exactly like a fresh install.
+pub fn reset_vault(confirm: bool) -> std::result::Result<(), String> {
+    let mut r = rt().lock().unwrap();
+    if r.busy {
+        return Err("busy".into());
+    }
+    if !confirm {
+        return Err("resetting the vault requires confirmation".into());
+    }
+    // Only from an unlocked session: whoever resets must already be able to
+    // open the vault. A broken (unloadable) vault is the one exception, since
+    // it can never be unlocked and resetting is the only way forward.
+    if r.vmk.is_none() && r.broken.is_none() {
+        return Err("the vault is not unlocked".into());
+    }
+    let dir = r.dir.clone();
+    let mut failed: Vec<String> = Vec::new();
+    for name in ["vault.json", "vault.seal"] {
+        let path = dir.join(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => failed.push(format!("{name}: {e}")),
+        }
+    }
+    if !failed.is_empty() {
+        // Fail LOUDLY and leave the vault intact rather than half-deleted.
+        let msg = format!("the vault could not be removed ({})", failed.join("; "));
+        r.error = Some(msg.clone());
+        return Err(msg);
+    }
+    // Drop every secret and every trace of the old vault from this session.
+    r.file = None;
+    r.broken = None;
+    r.vmk = None;
+    r.sealed = None;
+    r.input = None;
+    r.pending_pass = None;
+    r.strength = None;
+    r.weak_pending = false;
+    r.weak_accepted = false;
+    r.capture = None;
+    r.error = None;
+    // A cold relaunch is the proven teardown (D-0059): every CEF child dies
+    // with the process, and the next boot IS the first-launch gate.
+    r.relaunch = true;
+    tracing::warn!("vault reset: files removed, relaunching into first-launch setup");
+    Ok(())
 }
 
 pub fn take_outcome() -> Option<Outcome> {
@@ -2408,6 +2503,8 @@ pub fn state_json() -> String {
         "kdf": kdf,
         "strength": strength,
         "weak_pending": r.weak_pending,
+        "weak_accepted": r.weak_accepted,
+        "has_choice": r.pending_pass.is_some(),
         "hello": r.hello,
         "offer_passkey": r.offer_passkey,
         "webauthn": { "available": wa_available, "api": wa_api, "hello_ready": wa_hello },
@@ -2490,6 +2587,7 @@ fn test_reset_runtime(dir: &Path, kdf: KdfParams) {
         pending_pass: None,
         strength: None,
         weak_pending: false,
+        weak_accepted: false,
         hello: None,
         offer_passkey: false,
         busy: false,
@@ -2995,18 +3093,26 @@ mod tests {
         );
         key_submit(); // strong → straight to the confirm step
         assert!(state_json().contains("setup_confirm"));
-        key_text("not the same at all");
-        key_submit();
         assert!(
-            state_json().contains("do not match"),
-            "mismatching confirm restarts setup with an error"
+            state_json().contains("\"has_choice\":true"),
+            "the chosen password is banked for the confirm step"
         );
 
+        // A mismatch STAYS on step 2 (CD-46 Stage A): the chosen password is
+        // kept, only the confirmation is cleared, and the error is plain.
+        key_text("not the same at all");
+        key_submit();
+        assert!(state_json().contains("The two entries do not match"));
+        assert!(
+            state_json().contains("setup_confirm"),
+            "a mismatch must not rewind to step 1 and discard a correct choice"
+        );
+        assert!(state_json().contains("\"chars\":0"), "the confirm entry is cleared");
+        assert!(state_json().contains("\"has_choice\":true"), "the choice survives");
+
         // Esc semantics (CD-44 A1): with text it clears the ENTRY only; on
-        // an empty confirm step it goes BACK one step; on the mandatory
-        // first step it never aborts the flow.
-        key_text(STRONG);
-        key_submit(); // → confirm step again
+        // an empty confirm step it goes BACK one step (dropping the banked
+        // choice); on the mandatory first step it never aborts the flow.
         key_text("abc");
         key_escape();
         assert!(state_json().contains("\"chars\":0"), "Esc clears the entry");
@@ -3018,6 +3124,10 @@ mod tests {
         assert!(
             state_json().contains("setup_pass"),
             "empty Esc steps back to the first entry"
+        );
+        assert!(
+            state_json().contains("\"has_choice\":false"),
+            "stepping back re-opens the choice"
         );
         key_escape();
         assert!(
@@ -3034,11 +3144,12 @@ mod tests {
         assert!(!gate_closed(), "setup opens the gate");
         assert!(dir.join("vault.json").exists());
         // The first-run passkey offer (CD-44 D1) is a UI step only: it is
-        // raised solely where a passkey could actually be taken up, the
-        // vault is already usable, and declining just ends the step.
+        // raised wherever the passkey PATH exists (CD-46: even without a
+        // Hello PIN, where it explains the next step instead of hiding the
+        // feature), the vault is already usable, and answering ends the step.
         assert!(
             !passkey_offer_open(),
-            "no offer without a usable platform authenticator"
+            "no offer when the platform has no passkey path at all"
         );
 
         // A sealed tenant written while unlocked…
@@ -3229,6 +3340,36 @@ mod tests {
         key_submit();
         assert_eq!(wait_outcome(), Outcome::Unlocked);
         assert!(is_unlocked(), "password-only unlock works after removal");
+
+        // --- CD-46 Stage C: reset the vault ---------------------------------
+
+        // The confirmation is re-validated HERE, not trusted from the page.
+        assert!(reset_vault(false).is_err(), "a reset without confirmation is refused");
+        assert!(dir.join("vault.json").exists(), "the refused reset touched nothing");
+
+        // A locked session cannot reset: whoever wipes the vault must already
+        // be able to open it.
+        test_reset_runtime(&dir, TEST_KDF);
+        assert!(is_locked());
+        assert!(reset_vault(true).is_err(), "a locked session cannot reset");
+        assert!(dir.join("vault.json").exists(), "the refused reset touched nothing");
+
+        begin_capture("unlock_pass").unwrap();
+        key_text("password");
+        key_submit();
+        assert_eq!(wait_outcome(), Outcome::Unlocked);
+        sealed_set("identity_seed", "00aa11bb");
+
+        // The real thing: files gone, secrets dropped, the next boot is the
+        // mandatory first-launch setup, and a relaunch is queued.
+        reset_vault(true).expect("an unlocked, confirmed reset proceeds");
+        assert!(!dir.join("vault.json").exists(), "the vault file is gone");
+        assert!(!dir.join("vault.seal").exists(), "the sealed store is gone");
+        assert!(!has_vault(), "the next boot finds no vault");
+        assert!(!is_unlocked(), "the session holds no key material after a reset");
+        assert!(gate_closed(), "a fresh boot lands on the mandatory setup");
+        assert_eq!(sealed_get("identity_seed"), None, "the sealed identity went with it");
+        assert!(take_relaunch(), "the reset queues the cold relaunch");
 
         // Lock request queues a relaunch; wipe drops every secret.
         request_lock();

@@ -82,6 +82,36 @@ technical limits, where they genuinely exist, live in internal docs
 (`docs/cyberdesk-security.md`), never in UI, marketing, or demos. The README
 counts as a product surface under this rule.
 
+## UI is verified by rendering, never by reasoning (CD-46, D-0066) - binding
+
+**Any claim about layout must come from a rendered page, not from reading the
+CSS.** Before a UI change is called done, load the actual page in a real
+browser engine, drive it through every state it can be in, and **measure**:
+element rectangles, visibility, hit areas, `scrollWidth` vs `clientWidth`,
+`scrollHeight` vs `clientHeight`, and how much things move between states.
+Numbers decide, not judgement.
+
+Concretely, for any changed page:
+
+* build the page the way the host builds it (token/CSS/JS substitution) into a
+  temp file, open it in headless Chromium, and script it through each state;
+* measure per state, and diff the states against each other - a stable-looking
+  panel that jumps 130px between two steps is a defect that no amount of
+  reading the stylesheet reveals;
+* check overflow at more than one viewport, including a short one;
+* screenshot the states and look at them.
+
+*Why:* in CD-44 a static reading of the CSS cleared a layout that, when
+actually rendered, overflowed by 125px with two of five columns empty
+(`display:inline-block` silently disables the multicol balancer), and a Close
+button sat entirely inside another control's hit circle. In CD-46 a change
+that read as an improvement made the entry field move 68% further than before.
+Both were found only by measuring. Estimating layout is guessing, and guessing
+about the surface the user is looking at is how a trust product loses trust.
+
+This rule stands with the crate-first rule above: read the source, render the
+page, do not reason about either from memory.
+
 ## No desktop scraping
 
 Never screen-capture the user's desktop or any foreign window for verification.

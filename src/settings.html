@@ -246,6 +246,13 @@
           <button class="btn" id="vault-pk-add" type="button" hidden>Add passkey&hellip;</button>
           <button class="btn" id="vault-pk-remove" type="button" hidden>Remove</button>
         </div>
+        <div class="row">
+          <div class="label">
+            <span class="name">Reset vault</span>
+            <span class="hint">Deletes the vault and starts over at first launch. Everything it protects is destroyed: there is no recovery key, by design.</span>
+          </div>
+          <button class="btn danger" id="vault-reset" type="button">Reset&hellip;</button>
+        </div>
         <div class="vault-hello" id="vault-hello" hidden>Follow the Windows Hello
         prompts - enrolling confirms twice (once to create the passkey,
         once to derive its vault secret).</div>

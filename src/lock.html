@@ -31,36 +31,56 @@
         <div class="sub" id="subtitle">Start authorization</div>
       </div>
     </div>
-    <p class="body" id="hint">
-      Enter your master password. The field below is already focused: what you
-      type goes straight into the CyberDesk core, never to any page.
-    </p>
-    <div class="entry live" id="entry" aria-label="master password entry">
-      <div class="dots" id="dots"></div>
-      <div class="caret" id="caret"></div>
-      <span class="placeholder" id="placeholder">Type your master password</span>
-    </div>
-    <!-- The live strength meter (CD-42): rendered PURELY from the
-         host-computed score/criteria push. Shown only while a new master
-         password is being typed. -->
-    <div class="meter" id="meter" hidden>
-      <div class="meter-bar"><span id="meter-fill"></span></div>
-      <div class="meter-row">
-        <span id="meter-label">&nbsp;</span>
-        <span class="crit" id="crit-len">12+ characters</span>
+    <!-- ONE panel, one step at a time (CD-46 Stage A). The panel is anchored
+         at the top and everything ABOVE the field keeps a fixed height, so
+         advancing a step never moves the field: a panel that jumped as it
+         grew was what read as a second window opening (measured, D-0066).
+         Only one field-like box is ever present, and the step-1 choice is
+         replaced by a plain summary line at step 2, never a second dotted
+         field. -->
+    <div class="step" id="step">
+      <div class="step-badge" id="step-badge" hidden>Step 1 of 2</div>
+      <p class="body" id="hint">
+        Enter your master password. The field below is already focused: what
+        you type goes straight into the CyberDesk core, never to any page.
+      </p>
+      <div class="entry live" id="entry" aria-label="master password entry">
+        <div class="dots" id="dots"></div>
+        <div class="caret" id="caret"></div>
+        <span class="placeholder" id="placeholder">Type your master password</span>
       </div>
-      <div class="meter-fb" id="meter-fb" hidden></div>
+      <!-- The settled choice, at step 2 only: a statement, not a control, and
+           placed BELOW the field so nothing above the field changes size
+           between the two steps (the field must not move, CD-46). -->
+      <div class="chosen" id="chosen" hidden>
+        <span class="chosen-tick" aria-hidden="true"></span>
+        <span id="chosen-text">Password chosen</span>
+        <span class="chosen-note" id="chosen-note" hidden>weak, accepted</span>
+      </div>
+      <!-- The live strength meter (CD-42): rendered PURELY from the
+           host-computed score/criteria push. Shown only while a NEW password
+           is being chosen; the confirm step measures nothing, so it has no
+           meter (showing one there would be a second lie). -->
+      <div class="meter" id="meter" hidden>
+        <div class="meter-bar"><span id="meter-fill"></span></div>
+        <div class="meter-row">
+          <span id="meter-label">&nbsp;</span>
+          <span class="crit" id="crit-len">12+ characters</span>
+        </div>
+      </div>
+      <!-- The decision point: one warning block that carries the verdict, the
+           host's own reasons, and the override. Shown ONLY while the host has
+           a weak entry staged, and never after the decision is made. -->
+      <div class="weak" id="weak" hidden>
+        <div class="weak-text">This password is weak: it could be guessed.
+        Keep typing to strengthen it, or use it anyway. The choice is yours.</div>
+        <div class="weak-why" id="weak-why" hidden></div>
+        <button class="btn weak-use" id="weak-use" type="button">Use this weak password anyway</button>
+      </div>
+      <div class="status" id="status" hidden></div>
     </div>
-    <!-- The parked weak submit: shown ONLY while the host has a weak entry
-         staged (CD-44 A2: this block and the meter must always agree). -->
-    <div class="weak" id="weak" hidden>
-      <div class="weak-text">This password is weak: it could be guessed.
-      Keep typing to strengthen it, or use it anyway. The choice is yours.</div>
-      <button class="btn weak-use" id="weak-use" type="button">Use this weak password anyway</button>
-    </div>
-    <div class="status" id="status" hidden></div>
-    <!-- The honest no-recovery consequence (CD-42): shown during setup,
-         plainly, so the choice of master password is informed. -->
+    <!-- The honest no-recovery consequence (CD-42): stated once, calmly, at
+         the point where the password is chosen. -->
     <p class="consequence" id="consequence" hidden>
       Your master password is the only key. CyberDesk keeps no recovery key
       and no backdoor: if the master password is forgotten, the vault cannot
@@ -72,7 +92,7 @@
          stays the required root either way (CD-42). -->
     <div class="offer" id="offer" hidden>
       <div class="offer-head">Add a passkey?</div>
-      <p class="offer-text">Windows Hello can act as a second factor: with
+      <p class="offer-text" id="offer-text">Windows Hello can act as a second factor: with
       two-factor unlock on, CyberDesk asks for your master password and a
       Hello confirmation. It is optional, and you can add or remove it later
       in Settings.</p>

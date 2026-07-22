@@ -24,9 +24,13 @@
   var meterFill = document.getElementById("meter-fill");
   var meterLabel = document.getElementById("meter-label");
   var critLen = document.getElementById("crit-len");
-  var meterFb = document.getElementById("meter-fb");
   var weakEl = document.getElementById("weak");
+  var weakWhy = document.getElementById("weak-why");
   var weakUse = document.getElementById("weak-use");
+  var stepEl = document.getElementById("step");
+  var stepBadge = document.getElementById("step-badge");
+  var chosenEl = document.getElementById("chosen");
+  var chosenNote = document.getElementById("chosen-note");
   var offerEl = document.getElementById("offer");
   var offerAdd = document.getElementById("offer-add");
   var offerSkip = document.getElementById("offer-skip");
@@ -76,8 +80,12 @@
   // criteria and the warning can never disagree (CD-44 A2).
   function renderMeter(s) {
     var st = s.strength;
+    // The meter belongs to the CHOICE step only. The confirm step checks a
+    // match, it measures nothing, so it shows no meter (CD-46 Stage A).
     var show = !!st && (s.capture === "setup_pass" || s.capture === "change_pass");
     meterEl.hidden = !show;
+    // The warning lives at the decision point and only while the decision is
+    // still open: never over a choice already made.
     weakEl.hidden = !(show && s.weak_pending);
     if (!show) return;
     meterEl.className = "meter s" + st.score;
@@ -85,11 +93,25 @@
     meterLabel.textContent = s.chars ? SCORE_LABELS[st.score] : " ";
     critLen.textContent = (st.len_ok ? "✓ " : "") + st.target_len + "+ characters";
     critLen.className = st.len_ok ? "crit met" : "crit";
+    // The host's own reasons go INSIDE the warning block, so the verdict is
+    // stated once instead of twice in two different registers.
     var fb = [];
     if (st.warning) fb.push(st.warning);
     if (st.suggestions && st.suggestions.length) fb = fb.concat(st.suggestions);
-    meterFb.hidden = !fb.length;
-    meterFb.textContent = fb.join(" ");
+    weakWhy.hidden = !fb.length;
+    weakWhy.textContent = fb.join(" ");
+  }
+
+  // Which step the panel is on, so a real step CHANGE can animate in place
+  // rather than the panel jumping to a new size (CD-46 Stage A).
+  var lastStep = null;
+
+  function markStep(step) {
+    if (step === lastStep) return;
+    lastStep = step;
+    stepEl.classList.remove("turn");
+    void stepEl.offsetWidth;   // restart the animation
+    stepEl.classList.add("turn");
   }
 
   function render(s) {
@@ -103,10 +125,13 @@
     // The first-run passkey offer (CD-44 D1): the vault is already set up,
     // so the entry and the meter step aside for one optional question.
     if (s.offer_passkey) {
+      markStep("offer");
       offerEl.hidden = false;
       entryEl.hidden = true;
       meterEl.hidden = true;
       weakEl.hidden = true;
+      chosenEl.hidden = true;
+      stepBadge.hidden = true;
       consequenceEl.hidden = true;
       placeholderEl.hidden = true;
       titleEl.textContent = "Master password set";
@@ -115,9 +140,23 @@
         "Your vault is ready. One optional extra: a passkey as the second factor.";
       footEl.textContent = "";
       var busyHello = s.hello === "enroll";
+      var wa = s.webauthn || {};
+      // Honest about this machine (CD-46 Stage B): when Windows Hello has no
+      // PIN, fingerprint or face yet, the offer says so and names the next
+      // step rather than presenting an action that cannot succeed.
+      var ready = wa.hello_ready !== false;
+      offerAdd.hidden = !ready;
       offerAdd.disabled = busyHello;
       offerAdd.textContent = busyHello ? "Follow Windows Hello…" : "Set up passkey";
       offerSkip.disabled = busyHello;
+      offerSkip.textContent = ready ? "Not now" : "Continue";
+      document.getElementById("offer-text").textContent = ready
+        ? "Windows Hello can act as a second factor: with two-factor unlock on, " +
+          "CyberDesk asks for your master password and a Hello confirmation. It is " +
+          "optional, and you can add or remove it later in Settings."
+        : "Windows Hello is not set up on this device yet, so there is nothing to " +
+          "enrol right now. Add a PIN, fingerprint or face in Windows Settings > " +
+          "Accounts > Sign-in options, then add the passkey any time in Settings.";
       setStatus(s.error || (busyHello
         ? "Confirm twice with Windows Hello: once to create the passkey, once to derive its vault secret."
         : null), !s.error);
@@ -137,50 +176,72 @@
       placeholderEl.hidden = true;
       meterEl.hidden = true;
       weakEl.hidden = true;
+      chosenEl.hidden = true;
+      stepBadge.hidden = true;
       footEl.textContent = "";
       return;
     }
 
     var twofa = s.required === 2;
     var placeholder = "";
+    var chosen = false;
     var foot = "Enter continues · Backspace edits · Esc clears the entry · Ctrl+V pastes";
 
     switch (s.capture) {
       case "setup_pass":
-        titleEl.textContent = "Set your master password";
-        subtitleEl.textContent = "First launch · step 1 of 2";
+        markStep("setup1");
+        titleEl.textContent = "Choose your master password";
+        subtitleEl.textContent = "First launch";
+        stepBadge.hidden = false;
+        stepBadge.textContent = "Step 1 of 2";
         hintEl.textContent =
-          "Choose the password that protects CyberDesk. The field below is " +
-          "already focused: what you type goes straight into the CyberDesk " +
-          "core, never to any page.";
+          "This password protects CyberDesk. The field below is already " +
+          "focused: what you type goes straight into the CyberDesk core, " +
+          "never to any page.";
         consequenceEl.hidden = false;
         placeholder = "Type your master password";
         break;
       case "setup_confirm":
-        titleEl.textContent = "Set your master password";
-        subtitleEl.textContent = "First launch · step 2 of 2";
+        markStep("setup2");
+        titleEl.textContent = "Confirm your master password";
+        subtitleEl.textContent = "First launch";
+        stepBadge.hidden = false;
+        stepBadge.textContent = "Step 2 of 2";
         hintEl.textContent =
-          "Re-type the same password to confirm it. Enter creates the vault.";
-        consequenceEl.hidden = false;
+          "Type it once more, so a typo cannot lock you out of your own vault.";
+        // The choice is stated, not re-warned about, and never as a second
+        // field (CD-46 Stage A).
+        chosen = true;
+        consequenceEl.hidden = true;
         placeholder = "Re-type your master password";
-        foot = "Enter creates the vault · Esc on an empty field goes back one step";
+        foot = "Enter creates the vault · Esc goes back to step 1";
         break;
       case "change_pass":
-        titleEl.textContent = "Change your master password";
-        subtitleEl.textContent = "Step 1 of 2";
+        markStep("change1");
+        titleEl.textContent = "Choose a new master password";
+        subtitleEl.textContent = "Change";
+        stepBadge.hidden = false;
+        stepBadge.textContent = "Step 1 of 2";
         hintEl.textContent = "Type the new master password.";
         consequenceEl.hidden = true;
         placeholder = "Type the new master password";
         break;
       case "change_confirm":
-        titleEl.textContent = "Change your master password";
-        subtitleEl.textContent = "Step 2 of 2";
-        hintEl.textContent = "Re-type the new password to confirm it.";
+        markStep("change2");
+        titleEl.textContent = "Confirm your new master password";
+        subtitleEl.textContent = "Change";
+        stepBadge.hidden = false;
+        stepBadge.textContent = "Step 2 of 2";
+        hintEl.textContent = "Type it once more to confirm the change.";
+        chosen = true;
         consequenceEl.hidden = true;
         placeholder = "Re-type the new password";
+        foot = "Enter applies the change · Esc goes back to step 1";
         foot = "Enter applies · Esc on an empty field goes back one step";
         break;
       default:
+        markStep("unlock");
+        stepBadge.hidden = true;
         titleEl.textContent = "Vault locked";
         subtitleEl.textContent = twofa
           ? "Start authorization · two-factor"
@@ -189,14 +250,19 @@
           ? "Two-factor unlock: enter your master password, then confirm with " +
             "Windows Hello. The field is already focused; keystrokes go to " +
             "the CyberDesk core only."
-          : "Enter your master password. The field below is already focused: " +
-            "what you type goes straight into the CyberDesk core, never to " +
-            "any page.";
+          : "Enter your master password. The field is already focused: what " +
+            "you type goes straight into the core, never to any page.";
         consequenceEl.hidden = true;
         placeholder = "Enter your master password";
         foot = "Enter unlocks · Backspace edits · Esc clears the entry · Ctrl+V pastes";
         break;
     }
+
+    // The settled choice, at the confirm step only: one line of plain text,
+    // never a second field. It states that a weak password was accepted, and
+    // does not warn about it again (CD-46 Stage A).
+    chosenEl.hidden = !(chosen && s.has_choice);
+    chosenNote.hidden = !s.weak_accepted;
 
     // The placeholder is the neutral empty state (never a verdict).
     placeholderEl.textContent = placeholder;

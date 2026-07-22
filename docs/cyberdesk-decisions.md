@@ -5,6 +5,71 @@ Living document - maintained by Claude Code (CC), updated in the same
 commit-set as the change it records (D-0053). Append-only: historical entries
 are never rewritten; a superseded decision gets a new D-number forward.
 
+## D-0066 - 2026-07-22 - The setup panel is anchored, not centred; the vault gains an in-product reset; and UI is verified by rendering, never by reasoning (CD-46)
+
+*Decision.* Three things, one theme: what the user actually sees is the only
+evidence that counts.
+
+**One panel, one field, one step at a time.** The first-launch master password
+flow now presents exactly one entry field at any moment, with an explicit step
+indicator ("Step 1 of 2" / "Step 2 of 2"). Confirming does not open anything:
+step 1's field is replaced in place by a settled summary line, which is
+deliberately not a box that could be mistaken for a second field, and the step
+content cross-fades and rises 8px inside the same panel. A mismatched
+confirmation stays on step 2 with the chosen password still banked and only
+the confirmation cleared, so a typo in the repeat no longer discards a correct
+choice. The strength meter and the weak warning belong to step 1 only; at step
+2 there is nothing left to evaluate. Esc steps back one step and never aborts
+the mandatory setup.
+
+*The real cause of "two password fields".* Measured in a real browser, the
+page never showed more than one field, in any state, in any frame. What it did
+show was a panel that changed height on every step while being vertically
+centred, so the field moved 78px, and three stacked amber blocks that stated
+the same weak verdict twice. The perception was accurate; the diagnosis in the
+report was not. The fix is therefore layout, not markup: the panel is
+top-anchored (`align-items: flex-start` plus a fixed top offset), the hint
+above the field reserves two lines, and the summary sits BELOW the field so it
+cannot push it. Measured result: the panel top moves 0.0px and the field 0.3px
+across the whole setup sequence, where before they moved 118.7px and 78.3px.
+
+**Every control produces a visible outcome.** The Add passkey button could
+previously do nothing at all: several host-side refusals returned an error to
+the IPC caller without writing it into the vault state the page renders, and
+a disabled button was styled exactly like a live one and fires no click event
+in the first place. Refusals are now written into the state at every exit,
+the state is pushed on both outcomes of the enroll worker, and a disabled
+control is visibly disabled. The first-run offer is raised wherever the
+passkey path exists at all, including when Windows Hello has no PIN enrolled,
+where it explains the missing step instead of hiding the feature.
+
+**Reset vault, in the product, double-confirmed and host-revalidated.**
+`vault::reset_vault(confirm)` deletes `vault.json` and `vault.seal`, drops
+every secret from memory and queues the cold relaunch, after which the next
+boot IS the first-launch gate. It refuses without the confirmation flag and
+refuses unless the session is unlocked (a broken, unloadable vault is the one
+exception, since it can never be unlocked and resetting is the only way
+forward), and it fails loudly leaving the vault intact if a file cannot be
+removed. The settings dialog reuses the two-confirmation gate built for
+weakening protection, with its own copy: the accent never carries meaning
+(D-0065), so the destructive control takes its colour from the semantic
+palette. This is total by design and says so: with no recovery key (D-0062),
+the master password, any passkey and the sealed identity seed go together.
+
+**UI is verified by rendering, never by reasoning.** Recorded as a binding
+rule in `CLAUDE.md`. Any claim about layout must come from a rendered page
+driven through every state and measured: rectangles, visibility, hit areas,
+overflow, and the delta between states. Reading the stylesheet is not
+evidence. This rule exists because it has now failed twice at real cost: in
+CD-44 a static reading cleared a layout that actually overflowed by 125px
+with two of five columns empty (`display:inline-block` silently disables
+Chromium's multicol balancer) and a Close button that sat entirely inside
+another control's hit circle; in CD-46 a change that read as an improvement
+moved the entry field 131.8px, 68% worse than the defect it was meant to fix,
+and was caught only because the page was measured again. The short-window
+media query in `lock.css` is likewise a measured number, not a guess: the
+tallest state is 627px, which starts overflowing below a 705px viewport.
+
 ## D-0065 - 2026-07-22 - Appearance: user accent colour across the whole desktop, and a data-driven template architecture (Template 1 = Cyber) (CD-45)
 
 *Decision.* Settings gains an Appearance section with a user-selectable accent

@@ -104,6 +104,23 @@ The model, precisely:
   policy - are enforced on every re-wrap AND on every load; a violating
   (hand-edited, corrupted) file is refused. The offline brute-force surface
   of `vault.json` is the password envelope at the stored Argon2id cost.
+- **Reset vault: the only way out, and it is total (CD-46, D-0066).** Because
+  there is no recovery key, the sole answer to a vault the user no longer
+  wants or can no longer live with is to destroy it and start over.
+  `reset_vault(confirm)` deletes `vault.json` and `vault.seal`, drops every
+  secret from the runtime and relaunches cold into the mandatory first-launch
+  setup. Everything the vault protected goes with it: the master password,
+  any enrolled passkey, and the sealed store including the identity seed.
+  That total loss is stated in the confirmation copy, in both steps, before
+  anything is deleted. Two guards make this an act of the vault's owner
+  rather than of whoever walks past an unlocked screen or a hostile page: the
+  host re-validates the confirmation flag instead of trusting the page (the
+  D-0040 discipline), and it refuses unless the session is **unlocked**, so a
+  reset can only be performed by someone who could already open the vault.
+  The one exception is a vault that failed to load at all: it can never be
+  unlocked, so refusing there would leave no way forward. A file that cannot
+  be removed aborts the reset loudly and leaves the vault intact rather than
+  half-deleted.
 - **Escrows.** Each method's wrapping key is also stored wrapped *under the
   VMK*, so enrolling a passkey / changing the policy works from an unlocked
   session without re-prompting every factor. (At password-only an enrolled

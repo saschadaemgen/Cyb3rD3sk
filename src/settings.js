@@ -462,23 +462,31 @@
   var gateBody = document.getElementById("gate-body");
   var gateCancel = document.getElementById("gate-cancel");
   var gateConfirm = document.getElementById("gate-confirm");
-  var gatePending = null, gateStep = 1;
+  var gatePending = null, gateStep = 1, gateCopy = null;
 
+  // The copy carries both steps. The defaults are the hardening-weakening
+  // wording the gate was built for (CD-25); the vault reset (CD-46 Stage C)
+  // passes its own, because "weaken" is the wrong word for destroying a vault.
   function openGate(copy, onConfirm) {
     gatePending = onConfirm; gateStep = 1;
+    gateCopy = copy;
     gateTitle.textContent = copy.title;
     gateBody.innerHTML = copy.body;
-    gateConfirm.textContent = "Weaken anyway";
+    gateCancel.textContent = copy.cancel || "Keep protected";
+    gateConfirm.textContent = copy.confirm || "Weaken anyway";
     gate.hidden = false;
   }
-  function closeGate() { gate.hidden = true; gatePending = null; gateStep = 1; }
+  function closeGate() {
+    gate.hidden = true; gatePending = null; gateCopy = null; gateStep = 1;
+  }
   gateCancel.addEventListener("click", function () { closeGate(); });
   gateConfirm.addEventListener("click", function () {
     if (gateStep === 1) {
       gateStep = 2;
-      gateBody.innerHTML = "This lowers <strong>your own</strong> protection. Continue anyway? " +
+      gateBody.innerHTML = (gateCopy && gateCopy.body2) ||
+        "This lowers <strong>your own</strong> protection. Continue anyway? " +
         "You can restore full protection here at any time.";
-      gateConfirm.textContent = "Yes, weaken protection";
+      gateConfirm.textContent = (gateCopy && gateCopy.confirm2) || "Yes, weaken protection";
       return;
     }
     var fn = gatePending; closeGate(); if (fn) fn();
@@ -874,11 +882,14 @@
           addBtn.title = "Windows WebAuthn is unavailable on this system";
           pkHint.textContent = "The optional second factor. Windows WebAuthn is unavailable on this system (API v" + (wa.api || 0) + ").";
         } else if (!wa.hello_ready) {
-          // Honest live state (CD-44 A3): Hello has no PIN/biometric set up,
-          // so enrolling would fail. Say what to do, do not offer a dead
-          // button, and re-check on every push so it lights up by itself.
-          addBtn.disabled = true;
-          addBtn.title = "Set up Windows Hello first";
+          // Honest live state (CD-44 A3), and NEVER silent (CD-46 Stage B):
+          // the button stays live, so a click always produces a visible
+          // answer from the host (the exact next step), instead of a control
+          // that looks clickable and does nothing. The prerequisite is also
+          // stated up front, and the row re-checks itself so it clears the
+          // moment Hello is configured.
+          addBtn.disabled = false;
+          addBtn.title = "Windows Hello is not set up on this device yet";
           pkHint.textContent = "The optional second factor. Windows Hello is not set up on this device yet: " +
             "add a PIN, fingerprint or face in Windows Settings > Accounts > Sign-in options, then this becomes available.";
         } else {
@@ -1068,6 +1079,27 @@
         pkRemove.textContent = "Remove";
         pkArmed = null;
       }, 3000);
+    });
+
+    // Reset vault (CD-46 Stage C): the most destructive action in the product,
+    // so it takes the same two-confirmation gate as weakening protection, with
+    // its own copy. The host re-validates the confirmation and refuses unless
+    // the session is unlocked; the shell then relaunches into first-launch
+    // setup, which is why nothing here needs to re-render afterwards.
+    document.getElementById("vault-reset").addEventListener("click", function () {
+      openGate({
+        title: "Reset the vault?",
+        body: "This <strong>deletes the vault</strong> and everything it protects: your master " +
+          "password, any enrolled passkey, and the sealed identity seed. There is <strong>no " +
+          "recovery key</strong> - that is by design, and it means nothing here can be brought back.",
+        body2: "CyberDesk will restart and ask you to set a new master password, exactly like a " +
+          "fresh install. This <strong>cannot be undone</strong>. Reset now?",
+        cancel: "Keep my vault",
+        confirm: "Continue",
+        confirm2: "Yes, delete the vault"
+      }, function () {
+        applyState(query({ cmd: "vault_reset", confirm: true }));
+      });
     });
 
     query({ cmd: "get_vault_state" }).then(function (r) {

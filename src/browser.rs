@@ -2647,14 +2647,29 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
             set_vault_state(&state);
             Ok(state)
         }
+        // Destroy the vault and return to first-launch setup (CD-46 Stage C).
+        // Host-revalidated like every other destructive action: the `confirm`
+        // flag must be present, whatever the page claims to have shown.
+        "vault_reset" => {
+            let confirm = v.get("confirm").and_then(|c| c.as_bool()).unwrap_or(false);
+            let done = crate::vault::reset_vault(confirm);
+            let state = crate::vault::state_json();
+            set_vault_state(&state);
+            done.map_err(|e| (3, e))?;
+            Ok(state)
+        }
         // Enroll THE passkey via Windows Hello (CD-43): host-validated
         // (unlocked, none enrolled, platform available); the modal
         // MakeCredential + first PRF eval run on a vault worker - the page
         // only sees busy/hello state, never any credential material.
         "vault_enroll_passkey" => {
-            crate::vault::begin_hello_enroll().map_err(|e| (3, e))?;
+            // Push the state on BOTH outcomes (CD-46 Stage B): a refusal is
+            // written into the state by the vault, so pushing it here is what
+            // makes the reason visible instead of the click doing nothing.
+            let started = crate::vault::begin_hello_enroll();
             let state = crate::vault::state_json();
             set_vault_state(&state);
+            started.map_err(|e| (3, e))?;
             Ok(state)
         }
         // Open the settings layer (CD-30: the HUD Ampel's "Custom…" - the
