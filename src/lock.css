@@ -5,6 +5,13 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* The hidden attribute must ALWAYS win (CD-44 A2): author `display` rules on
+   a class would otherwise override the UA's [hidden] { display: none } and
+   make a "hidden" element visible - exactly the bug that kept the weak
+   warning on screen regardless of actual strength. Belt and braces for the
+   whole page. */
+[hidden] { display: none !important; }
+
 html, body {
   height: 100%;
   background: transparent;
@@ -46,8 +53,11 @@ h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.3px; }
 
 .body { font-size: 13px; line-height: 1.55; color: var(--text-dim); }
 
-/* The masked entry: dots rendered from the HOST-pushed character count. */
+/* The masked entry: dots rendered from the HOST-pushed character count.
+   While the host is capturing, the field IS focused - `.live` shows it
+   (CD-44 A1: clear focus indication; the field never pretends otherwise). */
 .entry {
+  position: relative;
   min-height: 46px;
   display: flex;
   align-items: center;
@@ -56,6 +66,23 @@ h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.3px; }
   border: 1px solid var(--panel-border);
   border-radius: 8px;
   overflow: hidden;
+  cursor: text;
+}
+.entry.live {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand) 35%, transparent),
+              0 0 14px color-mix(in srgb, var(--brand) 18%, transparent);
+}
+.entry.pulse { animation: entrypulse 260ms ease-out; }
+@keyframes entrypulse {
+  0% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 55%, transparent); }
+}
+.placeholder {
+  font-size: 13px;
+  color: var(--text-dim);
+  opacity: 0.55;
+  pointer-events: none;
+  user-select: none;
 }
 
 .dots { display: flex; flex-wrap: wrap; gap: 5px; }

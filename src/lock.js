@@ -1,9 +1,11 @@
-// Vault lock page logic (CD-40, D-0058; unlock model per CD-42, D-0062).
+// Vault lock page logic (CD-40/CD-42/CD-43; flow + ergonomics CD-44 A1/A2).
 // Renders the vault state the host pushes (window.cdVault) / serves on load
 // (get_vault_state). Two modes from the same push: unlock (a vault exists)
 // and mandatory first-launch setup (none does). No secret ever reaches this
 // page: the host consumes the keyboard while capturing and this page draws
-// dots from a character COUNT. Wire format: docs/cyberdesk-wire-format.md.
+// dots from a character COUNT. The entry is ALWAYS focused while this page
+// is up (the host owns the keyboard); the UI shows that instead of
+// pretending to be an input. Wire format: docs/cyberdesk-wire-format.md.
 
 (function () {
   "use strict";
@@ -15,6 +17,8 @@
   var dotsEl = document.getElementById("dots");
   var statusEl = document.getElementById("status");
   var consequenceEl = document.getElementById("consequence");
+  var placeholderEl = document.getElementById("placeholder");
+  var footEl = document.getElementById("foot");
   var quitEl = document.getElementById("quit");
   var meterEl = document.getElementById("meter");
   var meterFill = document.getElementById("meter-fill");
@@ -26,26 +30,6 @@
 
   // The host's zxcvbn score 0..4, verbalized (D-0044: confident, accurate).
   var SCORE_LABELS = ["Very weak", "Weak", "Fair", "Strong", "Very strong"];
-
-  // Render the live meter from the HOST-computed snapshot (score, criteria,
-  // canned feedback) — the password itself never reaches this page.
-  function renderMeter(s) {
-    var st = s.strength;
-    var show = !!st && (s.capture === "setup_pass" || s.capture === "change_pass");
-    meterEl.hidden = !show;
-    weakEl.hidden = !s.weak_pending;
-    if (!show) return;
-    meterEl.className = "meter s" + st.score;
-    meterFill.style.width = s.chars ? (((st.score + 1) * 20) + "%") : "0";
-    meterLabel.textContent = s.chars ? SCORE_LABELS[st.score] : " ";
-    critLen.textContent = (st.len_ok ? "✓ " : "") + st.target_len + "+ characters";
-    critLen.className = st.len_ok ? "crit met" : "crit";
-    var fb = [];
-    if (st.warning) fb.push(st.warning);
-    if (st.suggestions && st.suggestions.length) fb = fb.concat(st.suggestions);
-    meterFb.hidden = !fb.length;
-    meterFb.textContent = fb.join(" ");
-  }
 
   function query(req) {
     return new Promise(function (resolve, reject) {
@@ -83,9 +67,34 @@
     statusEl.className = isInfo ? "status info" : "status";
   }
 
+  // Render the live meter from the HOST-computed snapshot (score, criteria,
+  // canned feedback). The password itself never reaches this page. The weak
+  // block follows ONLY the host's staged weak_pending, so the meter, the
+  // criteria and the warning can never disagree (CD-44 A2).
+  function renderMeter(s) {
+    var st = s.strength;
+    var show = !!st && (s.capture === "setup_pass" || s.capture === "change_pass");
+    meterEl.hidden = !show;
+    weakEl.hidden = !(show && s.weak_pending);
+    if (!show) return;
+    meterEl.className = "meter s" + st.score;
+    meterFill.style.width = s.chars ? (((st.score + 1) * 20) + "%") : "0";
+    meterLabel.textContent = s.chars ? SCORE_LABELS[st.score] : " ";
+    critLen.textContent = (st.len_ok ? "✓ " : "") + st.target_len + "+ characters";
+    critLen.className = st.len_ok ? "crit met" : "crit";
+    var fb = [];
+    if (st.warning) fb.push(st.warning);
+    if (st.suggestions && st.suggestions.length) fb = fb.concat(st.suggestions);
+    meterFb.hidden = !fb.length;
+    meterFb.textContent = fb.join(" ");
+  }
+
   function render(s) {
     renderDots(s.chars || 0);
     entryEl.classList.toggle("busy", !!s.busy);
+    // The entry is live (host-captured, focused) whenever a capture is open
+    // and no worker is running - the visual focus never lies (CD-44 A1).
+    entryEl.classList.toggle("live", !!s.capture && !s.busy);
     renderMeter(s);
 
     if (s.broken) {
@@ -93,40 +102,84 @@
       subtitleEl.textContent = "Start authorization";
       hintEl.textContent =
         "The vault file failed to validate. CyberDesk stays locked rather than " +
-        "guessing — the details below say what to do.";
+        "guessing; the details below say what to do.";
       setStatus(s.broken, false);
       consequenceEl.hidden = true;
+      placeholderEl.hidden = true;
       meterEl.hidden = true;
       weakEl.hidden = true;
+      footEl.textContent = "";
       return;
     }
 
-    var setup = s.capture === "setup_pass" || s.capture === "setup_confirm";
-    var twofa = s.required === 2 && !setup;
-    if (setup) {
-      titleEl.textContent = "Set your master password";
-      subtitleEl.textContent = "First launch";
-      hintEl.textContent = s.capture === "setup_confirm"
-        ? "Re-type the master password to confirm — Enter creates the vault."
-        : "CyberDesk requires a master password before anything else starts. " +
-          "It is typed into the CyberDesk core, not this page — Enter to continue.";
-      consequenceEl.hidden = false;
-    } else {
-      titleEl.textContent = "Vault locked";
-      subtitleEl.textContent = twofa ? "Start authorization · two-factor" : "Start authorization";
-      hintEl.textContent = twofa
-        ? "Two-factor unlock: enter your master password, then confirm with " +
-          "Windows Hello. Keystrokes go to the CyberDesk core only — no page ever sees them."
-        : "Enter your master password. Keystrokes go to the CyberDesk core only — " +
-          "no page ever sees them.";
-      consequenceEl.hidden = true;
+    var twofa = s.required === 2;
+    var placeholder = "";
+    var foot = "Enter continues · Backspace edits · Esc clears the entry · Ctrl+V pastes";
+
+    switch (s.capture) {
+      case "setup_pass":
+        titleEl.textContent = "Set your master password";
+        subtitleEl.textContent = "First launch · step 1 of 2";
+        hintEl.textContent =
+          "Choose the password that protects CyberDesk. The field below is " +
+          "already focused: what you type goes straight into the CyberDesk " +
+          "core, never to any page.";
+        consequenceEl.hidden = false;
+        placeholder = "Type your master password";
+        break;
+      case "setup_confirm":
+        titleEl.textContent = "Set your master password";
+        subtitleEl.textContent = "First launch · step 2 of 2";
+        hintEl.textContent =
+          "Re-type the same password to confirm it. Enter creates the vault.";
+        consequenceEl.hidden = false;
+        placeholder = "Re-type your master password";
+        foot = "Enter creates the vault · Esc on an empty field goes back one step";
+        break;
+      case "change_pass":
+        titleEl.textContent = "Change your master password";
+        subtitleEl.textContent = "Step 1 of 2";
+        hintEl.textContent = "Type the new master password.";
+        consequenceEl.hidden = true;
+        placeholder = "Type the new master password";
+        break;
+      case "change_confirm":
+        titleEl.textContent = "Change your master password";
+        subtitleEl.textContent = "Step 2 of 2";
+        hintEl.textContent = "Re-type the new password to confirm it.";
+        consequenceEl.hidden = true;
+        placeholder = "Re-type the new password";
+        foot = "Enter applies · Esc on an empty field goes back one step";
+        break;
+      default:
+        titleEl.textContent = "Vault locked";
+        subtitleEl.textContent = twofa
+          ? "Start authorization · two-factor"
+          : "Start authorization";
+        hintEl.textContent = twofa
+          ? "Two-factor unlock: enter your master password, then confirm with " +
+            "Windows Hello. The field is already focused; keystrokes go to " +
+            "the CyberDesk core only."
+          : "Enter your master password. The field below is already focused: " +
+            "what you type goes straight into the CyberDesk core, never to " +
+            "any page.";
+        consequenceEl.hidden = true;
+        placeholder = "Enter your master password";
+        foot = "Enter unlocks · Backspace edits · Esc clears the entry · Ctrl+V pastes";
+        break;
     }
 
+    // The placeholder is the neutral empty state (never a verdict).
+    placeholderEl.textContent = placeholder;
+    placeholderEl.hidden = (s.chars || 0) > 0 || !s.capture || !!s.busy;
+    footEl.textContent = foot;
+
     if (s.hello === "assert") {
-      // The host holds the Hello modal open — the second factor (CD-43).
+      // The host holds the Hello modal open - the second factor (CD-43).
       setStatus("Second factor: confirm with Windows Hello…", true);
     } else if (s.busy) {
-      setStatus(setup ? "Creating the vault…" : "Checking…", true);
+      var setupish = s.capture === "setup_confirm" || s.capture === "setup_pass";
+      setStatus(setupish ? "Creating the vault…" : "Checking…", true);
     } else if (s.error) {
       setStatus(s.error, false);
     } else {
@@ -137,6 +190,15 @@
   window.cdVault = function (json) {
     try { render(JSON.parse(json)); } catch (e) { /* keep last good state */ }
   };
+
+  // Click-to-focus, honestly: the entry is captured by the host the whole
+  // time, so a click acknowledges the focus visually instead of moving it.
+  entryEl.addEventListener("mousedown", function () {
+    entryEl.classList.remove("pulse");
+    // Force a reflow so the animation restarts on every click.
+    void entryEl.offsetWidth;
+    entryEl.classList.add("pulse");
+  });
 
   weakUse.addEventListener("click", function () {
     query({ cmd: "vault_accept_weak" }).then(function (r) {

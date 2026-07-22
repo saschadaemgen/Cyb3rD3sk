@@ -1411,19 +1411,26 @@ fn platform_assert(
 }
 
 /// The platform capability snapshot for the honest config surface:
-/// (available, webauthn.dll API version).
-fn platform_info() -> (bool, u32) {
+/// (DLL available, webauthn.dll API version, Windows Hello set up). The
+/// Hello flag is a live machine fact re-probed per push, so the surface
+/// updates itself once a PIN/fingerprint/face is enrolled (CD-44 A3).
+fn platform_info() -> (bool, u32, bool) {
     #[cfg(test)]
     {
-        (test_prf().lock().unwrap().is_some(), 0)
+        let mocked = test_prf().lock().unwrap().is_some();
+        (mocked, 0, mocked)
     }
     #[cfg(all(not(test), windows))]
     {
-        (crate::webauthn::available(), crate::webauthn::api_version())
+        (
+            crate::webauthn::available(),
+            crate::webauthn::api_version(),
+            crate::webauthn::hello_ready(),
+        )
     }
     #[cfg(all(not(test), not(windows)))]
     {
-        (false, 0)
+        (false, 0, false)
     }
 }
 
@@ -1599,6 +1606,57 @@ pub fn key_backspace() {
     }
     r.weak_pending = false;
     refresh_strength(&mut r);
+}
+
+/// Escape, never destructive-by-surprise (CD-44 A1): with text in the entry
+/// it clears THE ENTRY only (plus any parked weak warning); with an empty
+/// entry it steps BACK one step (confirm returns to the first entry, the
+/// optional unlocked-session flows end). The mandatory flows (first-launch
+/// setup, unlock) have no further back to go, so an empty-entry Escape only
+/// clears a shown error there.
+pub fn key_escape() {
+    let mut r = rt().lock().unwrap();
+    if r.busy {
+        return;
+    }
+    let has_text = r.input.as_ref().map(|i| i.len > 0).unwrap_or(false);
+    if has_text {
+        if let Some(input) = r.input.as_mut() {
+            input.clear();
+        }
+        r.weak_pending = false;
+        r.error = None;
+        refresh_strength(&mut r);
+        return;
+    }
+    match r.capture {
+        // One step back: drop the banked first entry, re-type it.
+        Some(CaptureKind::SetupConfirm) => {
+            r.pending_pass = None;
+            r.capture = Some(CaptureKind::SetupPass);
+            r.input = SecretInput::new().ok();
+            r.error = None;
+            refresh_strength(&mut r);
+        }
+        Some(CaptureKind::ChangeConfirm) => {
+            r.pending_pass = None;
+            r.capture = Some(CaptureKind::ChangePass);
+            r.input = SecretInput::new().ok();
+            r.error = None;
+            refresh_strength(&mut r);
+        }
+        // The optional unlocked-session flows end on Escape.
+        Some(CaptureKind::ChangePass) | Some(CaptureKind::RetuneKdf) => {
+            drop(r);
+            cancel_capture();
+        }
+        // Mandatory flows: nowhere back to go; just clear a shown error.
+        Some(CaptureKind::SetupPass) | Some(CaptureKind::UnlockPass) => {
+            r.weak_pending = false;
+            r.error = None;
+        }
+        None => {}
+    }
 }
 
 /// Enter: advance the capture state machine. Cheap validations happen here;
@@ -1943,13 +2001,24 @@ pub fn begin_hello_enroll() -> std::result::Result<(), String> {
         return Err("vault is not unlocked".into());
     };
     if file.methods.iter().any(|m| m.kind == MethodKind::Passkey) {
-        return Err("a passkey is already enrolled — remove it first".into());
+        return Err("a passkey is already enrolled - remove it first".into());
     }
-    let (available, api) = platform_info();
+    let (available, api, hello_ready) = platform_info();
     if !available {
         return Err(format!(
             "Windows WebAuthn is unavailable on this system (API v{api})"
         ));
+    }
+    // The CD-44 A3 finding: with no Hello PIN/biometric enrolled, the
+    // platform MakeCredential fails as a bare NotSupportedError. Refuse
+    // up front with the actual next step instead.
+    #[cfg(all(not(test), windows))]
+    if !hello_ready {
+        return Err(crate::webauthn::HELLO_SETUP_HINT.into());
+    }
+    #[cfg(any(test, not(windows)))]
+    if !hello_ready {
+        return Err("the platform authenticator is not available".into());
     }
     r.busy = true;
     r.hello = Some("enroll");
@@ -2298,10 +2367,11 @@ pub fn state_json() -> String {
             "suggestions": s.suggestions,
         })
     });
-    // Honest platform capability for the config surface (CD-43): whether the
-    // OS WebAuthn layer can serve the passkey path at all, and the Hello
-    // modal state while a worker holds one open.
-    let (wa_available, wa_api) = platform_info();
+    // Honest platform capability for the config surface (CD-43/CD-44):
+    // whether the OS WebAuthn layer can serve the passkey path at all,
+    // whether Windows Hello is actually set up (a live fact, re-probed), and
+    // the Hello modal state while a worker holds one open.
+    let (wa_available, wa_api, wa_hello) = platform_info();
     serde_json::json!({
         "vault": vault,
         "capture": r.capture.map(|c| c.as_str()),
@@ -2312,7 +2382,7 @@ pub fn state_json() -> String {
         "strength": strength,
         "weak_pending": r.weak_pending,
         "hello": r.hello,
-        "webauthn": { "available": wa_available, "api": wa_api },
+        "webauthn": { "available": wa_available, "api": wa_api, "hello_ready": wa_hello },
         "busy": r.busy,
         "error": r.error,
         "broken": r.broken,
@@ -2902,6 +2972,30 @@ mod tests {
             state_json().contains("do not match"),
             "mismatching confirm restarts setup with an error"
         );
+
+        // Esc semantics (CD-44 A1): with text it clears the ENTRY only; on
+        // an empty confirm step it goes BACK one step; on the mandatory
+        // first step it never aborts the flow.
+        key_text(STRONG);
+        key_submit(); // → confirm step again
+        key_text("abc");
+        key_escape();
+        assert!(state_json().contains("\"chars\":0"), "Esc clears the entry");
+        assert!(
+            state_json().contains("setup_confirm"),
+            "Esc with text stays on the same step"
+        );
+        key_escape();
+        assert!(
+            state_json().contains("setup_pass"),
+            "empty Esc steps back to the first entry"
+        );
+        key_escape();
+        assert!(
+            state_json().contains("setup_pass"),
+            "the mandatory setup never Esc-aborts"
+        );
+
         key_text(STRONG);
         key_submit();
         key_text(STRONG);

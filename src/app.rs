@@ -2243,7 +2243,9 @@ impl ApplicationHandler for Shell {
                         match vk {
                             0x08 => crate::vault::key_backspace(), // Backspace
                             0x0D => crate::vault::key_submit(),    // Enter
-                            0x1B => crate::vault::cancel_capture(), // Esc
+                            // Esc: clears the entry, or steps back when empty
+                            // (never destructive-by-surprise, CD-44 A1).
+                            0x1B => crate::vault::key_escape(),
                             _ if ctrl
                                 && event.physical_key == PhysicalKey::Code(KeyCode::KeyV) =>
                             {

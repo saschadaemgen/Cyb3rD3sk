@@ -125,11 +125,31 @@ pub fn api_version() -> u32 {
     unsafe { WebAuthNGetApiVersionNumber() }
 }
 
-/// Is the PRF salt path available on this system? (Capability of the DLL —
+/// Is the PRF salt path available on this system? (Capability of the DLL;
 /// whether HELLO itself serves hmac-secret is proven empirically at enroll.)
 pub fn available() -> bool {
     api_version() >= MIN_API_VERSION
 }
+
+/// Is a user-verifying PLATFORM authenticator (Windows Hello with a PIN,
+/// fingerprint or face enrolled) available right now? A live machine fact:
+/// with attachment = PLATFORM, MakeCredential fails as NotSupportedError
+/// when this is false (the CD-44 A3 finding, isolated by probe on the
+/// target). Non-modal, cheap; consulted per state push so the config
+/// surface updates itself once Hello is set up.
+pub fn hello_ready() -> bool {
+    let mut avail: BOOL = 0;
+    let hr = unsafe { WebAuthNIsUserVerifyingPlatformAuthenticatorAvailable(&mut avail) };
+    hr == 0 && avail != 0
+}
+
+/// The plain-language next step when Hello is not set up. Used by the vault
+/// layer both as the pre-check refusal and to explain a NotSupportedError
+/// that slips through (a status display must never lie, and a raw API error
+/// name is not an explanation).
+pub const HELLO_SETUP_HINT: &str = "Windows Hello is not set up on this device. \
+Set up a PIN, fingerprint or face in Windows Settings > Accounts > Sign-in options, \
+then add the passkey.";
 
 // --- small marshalling helpers ---------------------------------------------
 
@@ -174,14 +194,36 @@ fn client_data(json: &str) -> WEBAUTHN_CLIENT_DATA {
     }
 }
 
-/// Map an HRESULT failure through WebAuthNGetErrorName. "NotAllowedError" is
-/// the W3C name webauthn.dll returns for a dismissed/timed-out prompt.
+/// Map an HRESULT failure through WebAuthNGetErrorName into plain language
+/// (CD-44 A3: a raw API error name is never the message a user sees).
+/// "NotAllowedError" is the W3C name webauthn.dll returns for a
+/// dismissed/timed-out prompt; "NotSupportedError" with no Hello enrolled is
+/// the no-platform-authenticator case isolated on the target machine.
 fn api_error(call: &'static str, hr: i32) -> WebAuthnError {
     let name = read_wide(unsafe { WebAuthNGetErrorName(hr) });
-    if name == "NotAllowedError" {
-        WebAuthnError::Cancelled
-    } else {
-        WebAuthnError::Api { call, name }
+    match name.as_str() {
+        "NotAllowedError" => WebAuthnError::Cancelled,
+        "NotSupportedError" if !hello_ready() => {
+            WebAuthnError::Response(HELLO_SETUP_HINT.into())
+        }
+        "NotSupportedError" => WebAuthnError::Response(format!(
+            "Windows reported the passkey request as not supported on this device \
+             (webauthn.dll API v{}). Check that Windows Hello works in Windows \
+             Settings, then try again.",
+            api_version()
+        )),
+        "InvalidStateError" => WebAuthnError::Response(
+            "Windows Hello reports a matching passkey already exists on this device. \
+             Remove the old CyberDesk entry under Windows Settings > Accounts > Passkeys, \
+             then try again."
+                .into(),
+        ),
+        "ConstraintError" => WebAuthnError::Response(
+            "Windows Hello could not verify you (PIN, fingerprint or face). \
+             Check the Hello sign-in options in Windows Settings, then try again."
+                .into(),
+        ),
+        _ => WebAuthnError::Api { call, name },
     }
 }
 

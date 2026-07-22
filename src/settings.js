@@ -571,9 +571,14 @@
     }
 
     var HINTS = {
-      change_pass: "New master password (at least 8 characters) — Enter to continue, Esc to cancel.",
-      change_confirm: "Re-type the new master password to confirm — Enter to change it.",
-      retune_kdf: "Enter your current master password to authorize the cost change — verified first, then re-derived under the new parameters."
+      change_pass: "New master password (at least 8 characters). Enter continues; Esc clears the entry, and cancels when it is empty.",
+      change_confirm: "Re-type the new master password. Enter changes it; Esc on an empty field goes back one step.",
+      retune_kdf: "Enter your current master password to authorize the cost change: it is verified first, then re-derived under the new parameters."
+    };
+    var PLACEHOLDERS = {
+      change_pass: "Type the new master password",
+      change_confirm: "Re-type the new password",
+      retune_kdf: "Enter your current master password"
     };
     var BUSY = {
       change_confirm: "Re-wrapping…",
@@ -585,14 +590,16 @@
     var last = {};
 
     // The live meter (CD-42 Task B), rendered purely from the host-computed
-    // snapshot — the password itself never enters this page.
+    // snapshot — the password itself never enters this page. The weak block
+    // follows ONLY the host's staged weak_pending while the meter shows, so
+    // the two can never disagree (CD-44 A2).
     function renderMeter(s) {
       var meter = document.getElementById("vault-meter");
       var weak = document.getElementById("vault-weak");
       var st = s.strength;
       var show = !!st && s.capture === "change_pass";
       meter.hidden = !show;
-      weak.hidden = !s.weak_pending;
+      weak.hidden = !(show && s.weak_pending);
       if (!show) return;
       meter.className = "vmeter s" + st.score;
       document.getElementById("vault-meter-fill").style.width =
@@ -628,6 +635,12 @@
         capHint.textContent = s.busy ? (BUSY[s.capture] || "Working…") : (HINTS[s.capture] || "");
         renderDots(s.chars || 0);
         entry.classList.toggle("busy", !!s.busy);
+        // The field IS focused while the host captures - show it, and show
+        // the neutral placeholder while it is empty (CD-44 A1/A2).
+        entry.classList.toggle("live", !s.busy);
+        var ph = document.getElementById("vault-placeholder");
+        ph.textContent = PLACEHOLDERS[s.capture] || "";
+        ph.hidden = (s.chars || 0) > 0 || !!s.busy;
       }
       renderMeter(s);
       if (s.error && (capturing || s.vault === "unlocked")) {
@@ -640,6 +653,11 @@
       // The config surface (1c): methods, policy, KDF cost — unlocked only.
       var config = document.getElementById("vault-config");
       config.hidden = s.vault !== "unlocked" || capturing;
+      // Poll only while the passkey row is blocked on Hello setup and the
+      // config surface is actually on screen.
+      var waState = s.webauthn || {};
+      var noPasskeyYet = !(s.methods || []).some(function (m) { return m.kind === "passkey"; });
+      watchHello(!config.hidden && noPasskeyYet && !!waState.available && !waState.hello_ready);
       // The Hello-modal hint rides outside the config gate: it must stay
       // visible while busy (config hides during the enroll worker).
       document.getElementById("vault-hello").hidden =
@@ -681,7 +699,15 @@
         } else if (!wa.available) {
           addBtn.disabled = true;
           addBtn.title = "Windows WebAuthn is unavailable on this system";
-          pkHint.textContent = "The optional second factor — Windows WebAuthn is unavailable on this system (API v" + (wa.api || 0) + ").";
+          pkHint.textContent = "The optional second factor. Windows WebAuthn is unavailable on this system (API v" + (wa.api || 0) + ").";
+        } else if (!wa.hello_ready) {
+          // Honest live state (CD-44 A3): Hello has no PIN/biometric set up,
+          // so enrolling would fail. Say what to do, do not offer a dead
+          // button, and re-check on every push so it lights up by itself.
+          addBtn.disabled = true;
+          addBtn.title = "Set up Windows Hello first";
+          pkHint.textContent = "The optional second factor. Windows Hello is not set up on this device yet: " +
+            "add a PIN, fingerprint or face in Windows Settings > Accounts > Sign-in options, then this becomes available.";
         } else {
           addBtn.disabled = false;
           addBtn.title = "";
@@ -699,6 +725,24 @@
     window.cdVault = function (json) {
       try { render(JSON.parse(json)); } catch (e) {}
     };
+
+    // While the passkey row is blocked on "Windows Hello is not set up", the
+    // hint promises it becomes available once Hello is configured. Re-pull
+    // the state periodically so that promise is kept without a restart: the
+    // host re-probes the live OS fact on every state build (CD-44 A3).
+    var helloWatch = null;
+    function watchHello(blocked) {
+      if (blocked && !helloWatch) {
+        helloWatch = setInterval(function () {
+          query({ cmd: "get_vault_state" }).then(function (r) {
+            try { render(JSON.parse(r)); } catch (e) {}
+          }).catch(function () {});
+        }, 4000);
+      } else if (!blocked && helloWatch) {
+        clearInterval(helloWatch);
+        helloWatch = null;
+      }
+    }
 
     cancelBtn.addEventListener("click", function () {
       query({ cmd: "vault_cancel_capture" }).then(function (r) {
