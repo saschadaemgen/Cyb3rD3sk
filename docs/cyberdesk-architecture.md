@@ -24,6 +24,62 @@ A single fullscreen application in the style of a serious cyber operating system
 - **Hard process boundary host<->CEF**, IPC only through an explicit allowlist. No Electron, no Node, no npm chain in the core. The Chromium **OS sandbox is currently deferred** (D-0008: the cef-rs Windows sandbox requires the bootstrap.exe launcher model, which breaks the plain cargo-run path - a time-boxed deviation with a hard re-enablement gate before Season 5/6); the doctrine remains "sandbox active", and the boundary today is the process split + the scheme-locked IPC allowlist.
 - **NetGuard:** no module opens connections on its own; everything goes through the central network layer (deny-by-default per zone, certificate pinning, own DNS resolver, kill switch, counters). Browser traffic attaches to the same monitor via CefRequestHandler. **One documented exception exists:** (D-0027, CD-15; extended to onion services by D-0052, CD-35) per-window Tor traffic - user-driven browsing through the Tor network when a window is toggled to Tor (embedded arti, a local per-slot SOCKS relay). The earlier second exception - the CD-13 pinned update-manifest fetch (D-0023) - was **retired in CD-22 (D-0036)**: the update surface is client-side now and the host opens no HTTP client of its own. Tor is the host's only intentional outbound path until NetGuard is built, when it becomes its first allowlist entry.
 
+## Lock screen presentation and motion (CD-47, D-0067)
+
+The lock and setup screens are a `cyberdesk://lock/` document composited over
+the live wgpu background like every other internal page, and since CD-47 they
+carry the product's own visual language rather than reading as a plain form.
+
+**Affordances.** Every capture step shows a visible primary action naming what
+it does at that step (Continue, Create vault, Change password, Unlock), with
+Enter kept as the accelerator and the key legend intact. It rides two IPC
+verbs, `vault_submit` and `vault_step_back`, which carry no password
+characters: the host already holds the entry in locked memory, so the page
+only says "go" or "back". Exactly one primary action is on screen at any
+moment, which is why the button steps aside while a weak entry is parked (the
+warning block's explicit override is the way forward there) and while a worker
+runs (there is nothing to submit). `step_back` exists separately from Escape
+because Escape carries two meanings by position (clear the entry, then step
+back) while a visible Back button must have exactly one.
+
+**The Energy Core.** The start page's motif sits behind the panel, sharing one
+grid cell with it so it is anchored to the panel's top edge, which never moves
+(D-0066), instead of to a centre that changes with every step. The `.core` box
+is zero-sized with the SVG absolutely positioned off it, so the panel geometry
+is untouched and the CD-46 stability measurements still hold.
+
+**What drives it, and why in two different ways.** The charge, the
+accepted-step pulse and the refusal are derived from the state the host
+already pushes: `data-charge` is the host's own zxcvbn score, the pulse fires
+on a real step advance, the refusal on a real error appearing, and where
+nothing is being measured the core idles rather than implying a reading it
+never took. The unlock flare cannot work that way, because the page is
+replaced by the workspace the moment the gate opens, so the host fires
+`browser::lock_effect("unlock")` from the outcome branch and holds the lock
+view for one `UNLOCK_FLARE` beat (620ms) before the handover. That hold is on
+the view only: the Argon2id work and the unlock have already completed when
+the flare starts.
+
+**The motion contract.** `appearance::Resolved::motion_vars` publishes
+`--motion` (1/0) and `--motion-play` (`running`/`paused`) alongside the theme
+tokens, from the same one resolved value as the accent. `--motion-play` drives
+`animation-play-state` on the idle loops, so motion off holds a still frame;
+`--motion` scales one-shot durations and transitions, so at 0 they complete
+instantly and every element still lands in its real state. Nothing in the
+contract removes an element or changes a size, so reduced motion is a still
+picture and never a broken layout. The system `prefers-reduced-motion`
+preference is honoured alongside the product setting.
+
+**Construction notes.** The rings rotate through the Web Animations API rather
+than CSS keyframes, because changing a CSS `animation-duration` restarts the
+timing and the ring jumps, while `playbackRate` ramps the same animation and
+the core has to spin up with strength. Each ring is two nested groups, the
+outer rotated by script and the inner scaled by CSS, since one element cannot
+carry two independent transforms. The rotation origin is `transform-origin:
+0 0`: on a `-100 -100 200 200` viewBox the centre is the user-space origin,
+and `center` resolves to `100px 100px`, the far corner, which swings every
+ring in an arc (measured, D-0067).
+
 ## Platform path
 
 Development: Windows 11 (MSVC). Later: Linux appliance. Long-term goal: CARVILON OS (Debian 13 "Trixie") booting directly into CyberDesk as its shell - the app is the first deliverable and the later heart of the OS. Nothing on the app path is throwaway work.

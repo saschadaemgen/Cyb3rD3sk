@@ -23,13 +23,18 @@ html, body {
 
 /* Top-anchored, never centred: a centred panel MOVES whenever a step changes
    its height, and that jump is what read as a second window opening (CD-46).
-   Anchoring the top makes the field sit at the same pixel on every step. */
+   Anchoring the top makes the field sit at the same pixel on every step.
+   Grid rather than flex (CD-47) so the Energy Core and the panel share ONE
+   cell: the core is then positioned off the panel's own top edge, which never
+   moves, instead of off a panel centre that changes with every step. */
 body {
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
+  display: grid;
+  grid-template-columns: 1fr;
+  justify-items: center;
+  align-content: start;
   padding: 11vh 24px 24px;
 }
+.core, .panel { grid-area: 1 / 1; }
 /* Short windows: measured, not guessed (D-0066). The tallest state (the weak
    warning during setup) is 627px, so at 11vh the panel starts overflowing
    below a 705px viewport. Giving the offset back on short windows keeps every
@@ -39,6 +44,9 @@ body {
 }
 
 .panel {
+  /* Above the core, and the only thing in the cell with a real size. */
+  position: relative;
+  z-index: 1;
   width: min(520px, 100%);
   padding: 30px 32px;
   background: var(--panel);
@@ -90,7 +98,7 @@ h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.3px; }
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand) 35%, transparent),
               0 0 14px color-mix(in srgb, var(--brand) 18%, transparent);
 }
-.entry.pulse { animation: entrypulse 260ms ease-out; }
+.entry.pulse { animation: entrypulse calc(var(--motion, 1) * 260ms) ease-out; }
 @keyframes entrypulse {
   0% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 55%, transparent); }
 }
@@ -121,7 +129,7 @@ h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.3px; }
   flex-direction: column;
   gap: 18px;
 }
-.step.turn { animation: stepin 220ms ease-out; }
+.step.turn { animation: stepin calc(var(--motion, 1) * 220ms) ease-out; }
 @keyframes stepin {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: none; }
@@ -200,7 +208,8 @@ h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.3px; }
   width: 0;
   border-radius: 3px;
   background: var(--warn);
-  transition: width 160ms ease-out, background 160ms ease-out;
+  transition: width calc(var(--motion, 1) * 160ms) ease-out,
+              background calc(var(--motion, 1) * 160ms) ease-out;
 }
 .meter.s2 #meter-fill { background: color-mix(in srgb, var(--warn) 55%, var(--brand)); }
 .meter.s3 #meter-fill, .meter.s4 #meter-fill { background: var(--brand); }
@@ -226,6 +235,181 @@ h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.3px; }
 .weak-text { font-size: 12.5px; line-height: 1.55; color: var(--warn); }
 .btn.weak-use { align-self: flex-start; border-color: var(--warn); color: var(--warn); }
 .btn.weak-use:hover { background: var(--warn); color: var(--bg); }
+
+
+/* --- The Energy Core (CD-47 Stage B) ---------------------------------------
+   The start page's motif, in the same visual language, behind the panel. It
+   is layout-neutral by construction: the .core box is zero-sized and the SVG
+   is absolutely positioned off it, so the panel geometry measured in CD-46
+   (panel top fixed, field fixed) is untouched.
+
+   Everything it shows is real: `data-charge` carries the HOST-computed
+   strength score, `idle` means no password is being measured, and the
+   one-shot classes are fired only by an actual accepted step, an actual
+   unlock, or an actual refusal. It reveals nothing the meter and the dot
+   count do not already show.
+
+   Motion honours the template setting through the injected contract
+   (--motion, --motion-play): with motion off the rings hold a still frame
+   and the one-shots complete instantly, so the composition stays coherent
+   and nothing moves. */
+.core {
+  width: 0;
+  height: 0;
+  position: relative;
+  z-index: 0;
+  pointer-events: none;
+  /* The calm idle baseline. Charge levels below only shift these. */
+  --core-size: min(660px, 92vw);
+  --core-anchor: 210px;          /* core centre, measured from the panel top */
+  --ring-op: 0.34;
+  --ring-scale: 1;
+  --core-op: 0.5;
+  --core-hue: var(--brand);
+}
+.core-svg {
+  position: absolute;
+  left: calc(var(--core-size) / -2);
+  top: calc(var(--core-anchor) - var(--core-size) / 2);
+  width: var(--core-size);
+  height: var(--core-size);
+  overflow: visible;
+  opacity: var(--core-op);
+  transition: opacity calc(var(--motion, 1) * 420ms) ease;
+  filter: drop-shadow(0 0 14px color-mix(in srgb, var(--core-hue) 40%, transparent));
+}
+
+/* The charge ladder: dim, wide and unsettled at the bottom, bright, tight and
+   settled at the top. Score 0..4 comes straight from the host's meter. */
+.core[data-charge="0"] { --ring-op: 0.30; --ring-scale: 1.06; --core-op: 0.42; }
+.core[data-charge="1"] { --ring-op: 0.42; --ring-scale: 1.02; --core-op: 0.54; }
+.core[data-charge="2"] { --ring-op: 0.56; --ring-scale: 0.99; --core-op: 0.66; }
+.core[data-charge="3"] { --ring-op: 0.74; --ring-scale: 0.95; --core-op: 0.82; }
+.core[data-charge="4"] { --ring-op: 0.95; --ring-scale: 0.91; --core-op: 1; }
+
+/* `0 0`, and it was worth measuring to be sure (D-0066). The viewBox is
+   `-100 -100 200 200`, so its centre is the USER-space origin (0,0). Chromium
+   resolves a transform-origin length in that user space without adding the
+   viewBox offset, so `0 0` lands exactly on the centre, while the seemingly
+   safer `center` resolves to `100px 100px` - the far corner, 141 units off a
+   92-unit ring - and swings all three rings in a visible arc. Measured in a
+   real engine: `center` moved the ring centres by up to 347px, `0 0` holds
+   them still. The start page uses the same origin for the same reason. */
+.ring { transform-origin: 0 0; }
+.ring-in {
+  transform-origin: 0 0;
+  transform: scale(var(--ring-scale));
+  transition: transform calc(var(--motion, 1) * 520ms) cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.arc {
+  fill: none;
+  stroke: var(--core-hue);
+  stroke-width: 5;
+  stroke-linecap: round;
+  opacity: var(--ring-op);
+  transition: opacity calc(var(--motion, 1) * 420ms) ease;
+}
+.arc-thin { stroke-width: 2.5; }
+.arc-a { stroke-dasharray: 34 16; }
+.arc-b { stroke-dasharray: 20 6 6 6; }
+.arc-c { stroke-dasharray: 7 6; }
+
+.hollow {
+  fill: none;
+  stroke: var(--core-hue);
+  stroke-width: 3;
+  animation: breathe 4.2s ease-in-out infinite;
+  animation-play-state: var(--motion-play, running);
+}
+.hollow-glow {
+  fill: none;
+  stroke: color-mix(in srgb, var(--core-hue) 70%, transparent);
+  stroke-width: 8;
+  opacity: 0.35;
+  filter: blur(4px);
+  animation: breathe 4.2s ease-in-out infinite;
+  animation-play-state: var(--motion-play, running);
+}
+.spark {
+  fill: color-mix(in srgb, var(--core-hue) 40%, #fff);
+  filter: drop-shadow(0 0 8px var(--core-hue));
+  animation: breathe 4.2s ease-in-out infinite;
+  animation-play-state: var(--motion-play, running);
+}
+@keyframes breathe {
+  0%, 100% { opacity: 0.78; }
+  50%      { opacity: 1; }
+}
+
+/* The one-shot shockwave. Idle state: nothing on screen at all. */
+.shock {
+  fill: none;
+  stroke: var(--core-hue);
+  stroke-width: 2;
+  opacity: 0;
+  transform-origin: 0 0;    /* the user-space centre, see .ring above */
+}
+.core.fx-accept .shock { animation: shock calc(var(--motion, 1) * 620ms) ease-out; }
+.core.fx-unlock .shock { animation: shock calc(var(--motion, 1) * 620ms) ease-out; }
+@keyframes shock {
+  from { opacity: 0.85; transform: scale(0.35); stroke-width: 6; }
+  to   { opacity: 0;    transform: scale(3.4);  stroke-width: 0.5; }
+}
+
+/* An accepted step: a short, warm confirmation, nothing triumphant. */
+.core.fx-accept .core-svg { animation: surge calc(var(--motion, 1) * 620ms) ease-out; }
+@keyframes surge {
+  0%   { opacity: var(--core-op); }
+  30%  { opacity: 1; }
+  100% { opacity: var(--core-op); }
+}
+
+/* The vault opening: the one moment that earns a flare. Fired by the HOST
+   after a real unlock, never by the page guessing. */
+/* 620ms and 460ms are not free numbers: the shell holds the lock view for
+   UNLOCK_FLARE (620ms), so the flare peaks and the panel has fully gone
+   before the workspace takes over. A longer animation would be cut mid-fade
+   and read as a pop. */
+.core.fx-unlock .core-svg { animation: flare calc(var(--motion, 1) * 620ms) cubic-bezier(0.16, 0.84, 0.44, 1) forwards; }
+@keyframes flare {
+  0%   { opacity: var(--core-op); transform: scale(1); }
+  22%  { opacity: 1; transform: scale(1.06); }
+  100% { opacity: 0.9; transform: scale(1.5); }
+}
+.panel.fx-unlock { animation: handover calc(var(--motion, 1) * 460ms) ease-in forwards; }
+@keyframes handover {
+  0%   { opacity: 1; transform: none; }
+  100% { opacity: 0; transform: translateY(-10px); }
+}
+
+/* A refusal: the core settles back rather than lashing out. No shake, no
+   alarm colour beyond the semantic error tone the message already uses. */
+.core.fx-reject .core-svg { animation: settle calc(var(--motion, 1) * 520ms) ease-out; }
+@keyframes settle {
+  0%   { opacity: var(--core-op); }
+  35%  { opacity: 0.12; }
+  100% { opacity: var(--core-op); }
+}
+.entry.reject { animation: entryreject calc(var(--motion, 1) * 520ms) ease-out; }
+@keyframes entryreject {
+  0%, 100% { border-color: var(--panel-border); }
+  20%, 60% { border-color: var(--error); box-shadow: 0 0 0 1px color-mix(in srgb, var(--error) 45%, transparent); }
+}
+
+/* The system preference is honoured alongside the product setting: whichever
+   asks for less motion wins. */
+@media (prefers-reduced-motion: reduce) {
+  /* On :root, so every element on the page inherits the reduced value and
+     the scripted side (`motionOn()`) sees the same truth as the stylesheet. */
+  :root { --motion: 0; }
+  .hollow, .hollow-glow, .spark { animation-play-state: paused; }
+  /* A zero-length `forwards` animation would land instantly on its END frame
+     and leave the panel invisible for the rest of the beat. With reduced
+     motion these two simply do not run, and the screen stays as it is until
+     the workspace takes over. */
+  .panel.fx-unlock, .core.fx-unlock .core-svg { animation: none; }
+}
 
 .caret {
   width: 2px;
@@ -266,7 +450,13 @@ h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.3px; }
 .btn.primary { border-color: var(--brand); color: var(--brand); }
 .btn.primary:hover { background: var(--brand); color: var(--bg); }
 
-.actions { display: flex; gap: 10px; }
+/* The action row (CD-47 Stage A). The primary sits first, where the eye
+   lands after the field; Back is quiet next to it; Quit is pushed to the far
+   end so the destructive-ish control is nowhere near the one people aim for.
+   The row wraps rather than letting anything overlap at narrow widths. */
+.actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.btn.go { font-weight: 600; }
+.btn.back { color: var(--text-dim); }
 
 .btn {
   appearance: none;
@@ -280,6 +470,11 @@ h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.3px; }
   cursor: pointer;
 }
 .btn:hover { border-color: var(--brand); color: var(--brand); }
+/* A disabled control must never look live (the CD-46 Stage B lesson): a
+   disabled button fires no click, so it has to say so before it is aimed at. */
+.btn:disabled { opacity: 0.45; cursor: not-allowed; border-style: dashed; }
+.btn:disabled:hover { border-color: var(--panel-border); color: var(--text); }
+.btn.primary:disabled:hover { border-color: var(--brand); color: var(--brand); background: transparent; }
 .btn.quit { margin-left: auto; color: var(--text-dim); }
 .btn.quit:hover { border-color: var(--warn); color: var(--warn); }
 

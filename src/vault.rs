@@ -1624,6 +1624,32 @@ pub fn key_backspace() {
 /// optional unlocked-session flows end). The mandatory flows (first-launch
 /// setup, unlock) have no further back to go, so an empty-entry Escape only
 /// clears a shown error there.
+/// Go back one step from a confirm step, whatever is typed (CD-47 Stage A).
+///
+/// Escape carries two meanings by position (clear the entry, then step back);
+/// the visible Back button has exactly one, so it gets its own entry point
+/// rather than the page having to send Escape twice and guess the state.
+/// Returns false where there is no step to go back to.
+pub fn step_back() -> bool {
+    let mut r = rt().lock().unwrap();
+    if r.busy {
+        return false;
+    }
+    let prev = match r.capture {
+        Some(CaptureKind::SetupConfirm) => CaptureKind::SetupPass,
+        Some(CaptureKind::ChangeConfirm) => CaptureKind::ChangePass,
+        _ => return false,
+    };
+    r.pending_pass = None;
+    r.weak_accepted = false;
+    r.weak_pending = false;
+    r.capture = Some(prev);
+    r.input = SecretInput::new().ok();
+    r.error = None;
+    refresh_strength(&mut r);
+    true
+}
+
 pub fn key_escape() {
     let mut r = rt().lock().unwrap();
     if r.busy {
@@ -3109,6 +3135,18 @@ mod tests {
         );
         assert!(state_json().contains("\"chars\":0"), "the confirm entry is cleared");
         assert!(state_json().contains("\"has_choice\":true"), "the choice survives");
+
+        // The visible Back button (CD-47 Stage A): one meaning, whatever is
+        // typed, and nothing to go back to from step 1.
+        key_text("half typed");
+        assert!(step_back(), "Back leaves the confirm step");
+        assert!(state_json().contains("setup_pass"));
+        assert!(state_json().contains("\"has_choice\":false"), "going back re-opens the choice");
+        assert!(state_json().contains("\"chars\":0"), "Back clears whatever was typed");
+        assert!(!step_back(), "step 1 has no step behind it");
+        key_text(STRONG);
+        key_submit();
+        assert!(state_json().contains("setup_confirm"));
 
         // Esc semantics (CD-44 A1): with text it clears the ENTRY only; on
         // an empty confirm step it goes BACK one step (dropping the banked

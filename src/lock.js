@@ -31,12 +31,117 @@
   var stepBadge = document.getElementById("step-badge");
   var chosenEl = document.getElementById("chosen");
   var chosenNote = document.getElementById("chosen-note");
+  var goEl = document.getElementById("go");
+  var backEl = document.getElementById("back");
   var offerEl = document.getElementById("offer");
   var offerAdd = document.getElementById("offer-add");
   var offerSkip = document.getElementById("offer-skip");
 
+  var coreEl = document.getElementById("core");
+  var ringEls = ["ring-a", "ring-b", "ring-c"].map(function (id) {
+    return document.getElementById(id);
+  });
+
   // The host's zxcvbn score 0..4, verbalized (D-0044: confident, accurate).
   var SCORE_LABELS = ["Very weak", "Weak", "Fair", "Strong", "Very strong"];
+
+  // --- The Energy Core (CD-47 Stage B) --------------------------------------
+  // The motif is driven from the state the host pushes and from events the
+  // host fires. It never depicts anything it was not told: the charge is the
+  // real strength score, the flare follows a real unlock. It also shows no
+  // MORE than the meter and the dot count already do.
+
+  // The product's motion setting, published with the theme tokens by the host
+  // (appearance.rs). The media query for the system preference lives in the
+  // stylesheet; this is the product switch.
+  function motionOn() {
+    // The system preference counts as well as the product setting: whichever
+    // asks for less motion wins. The media query in the stylesheet handles
+    // the CSS side; this is the same rule for the scripted side.
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      return false;
+    }
+    var v = getComputedStyle(document.documentElement).getPropertyValue("--motion");
+    return String(v).trim() !== "0";
+  }
+
+  // The rings rotate through the Web Animations API rather than CSS keyframes
+  // for one reason: changing a CSS animation-duration restarts the timing and
+  // the ring visibly jumps, while playbackRate ramps the same animation. The
+  // periods match the start page, so both screens are the same machine.
+  var RING_MS = [34000, 23000, 15000];
+  var ringAnims = ringEls.map(function (el, i) {
+    if (!el || !el.animate) return null;
+    var dir = i === 1 ? "reverse" : "normal";
+    var a = el.animate(
+      [{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }],
+      { duration: RING_MS[i], iterations: Infinity, easing: "linear", direction: dir }
+    );
+    return a;
+  });
+
+  function applyRingRate(rate) {
+    for (var i = 0; i < ringAnims.length; i++) {
+      var a = ringAnims[i];
+      if (!a) continue;
+      if (!motionOn()) {
+        // Motion off: hold a still frame. The composition stays whole, it
+        // simply stops moving (never a broken or empty core).
+        a.pause();
+        continue;
+      }
+      if (a.playState === "paused") a.play();
+      if (a.updatePlaybackRate) a.updatePlaybackRate(rate);
+      else a.playbackRate = rate;
+    }
+  }
+
+  // Charge: "idle" wherever nothing is being measured, otherwise the host's
+  // own score. Spin follows the same truth.
+  var RATE_BY_CHARGE = { idle: 1, "0": 0.8, "1": 1.05, "2": 1.35, "3": 1.75, "4": 2.2 };
+
+  // Apply the idle rate once at startup. Without this, `setCharge` would
+  // never run on a page that opens idle and stays idle (the unlock screen),
+  // so with motion OFF the rings would keep spinning: the setting would be
+  // ignored on the most common screen of all.
+  applyRingRate(RATE_BY_CHARGE.idle);
+
+  function setCharge(charge) {
+    if (coreEl.dataset.charge === charge) return;
+    coreEl.dataset.charge = charge;
+    applyRingRate(RATE_BY_CHARGE[charge] || 1);
+  }
+
+  // One-shot effects. Each is removed again so it can fire a second time, and
+  // each is a class the stylesheet owns - no inline animation here.
+  var fxTimer = null;
+  function playFx(kind, ms) {
+    coreEl.classList.remove("fx-accept", "fx-unlock", "fx-reject");
+    void coreEl.offsetWidth;                 // restart even on a repeat
+    coreEl.classList.add("fx-" + kind);
+    if (fxTimer) clearTimeout(fxTimer);
+    // The unlock flare is left standing: the shell replaces this view.
+    if (kind === "unlock") return;
+    fxTimer = setTimeout(function () {
+      coreEl.classList.remove("fx-" + kind);
+    }, ms);
+  }
+
+  // The vault-opening moment, fired by the HOST after a real unlock (the page
+  // cannot know: it is about to be replaced by the workspace).
+  window.cdLockFx = function (kind) {
+    // The page guards itself rather than trusting the caller to have checked
+    // (measured: a zero-length `forwards` fade snaps straight to its end
+    // frame, so with motion off the panel would vanish instantly instead of
+    // simply not animating). The shell skips the flare for the same reason,
+    // but a guard that lives in only one of the two is one caller away from
+    // a blank screen.
+    if (!motionOn()) return;
+    if (kind === "unlock") {
+      playFx("unlock", 620);
+      document.querySelector(".panel").classList.add("fx-unlock");
+    }
+  };
 
   function query(req) {
     return new Promise(function (resolve, reject) {
@@ -114,7 +219,52 @@
     stepEl.classList.add("turn");
   }
 
+  // What the last push said, so a real CHANGE can be told apart from a repeat
+  // render: the effects fire on transitions, never on every state push.
+  var lastCapture = null;
+  var lastError = null;
+  // The host's last real reading for the password currently banked (CD-47).
+  var heldCharge = "idle";
+
   function render(s) {
+    // The core's charge IS the host's score: it is shown only while a
+    // password is actually being measured, and it idles calmly otherwise
+    // (the unlock prompt measures nothing, so it must not pretend to).
+    var stc = s.strength;
+    var measuring = !!stc && (s.capture === "setup_pass" || s.capture === "change_pass");
+    var confirming = s.capture === "setup_confirm" || s.capture === "change_confirm";
+    if (measuring) heldCharge = (s.chars || 0) > 0 ? String(stc.score) : "idle";
+    // At the confirm step the host is measuring nothing (there is nothing to
+    // measure yet), but the chosen password is real and so was its score:
+    // the core HOLDS that reading while the choice is banked, rather than
+    // falling back to idle and reading as charge lost right after the step
+    // was accepted. Going back or finishing clears it.
+    if (!confirming || !s.has_choice) {
+      if (!measuring) heldCharge = "idle";
+    }
+    setCharge(measuring || (confirming && s.has_choice) ? heldCharge : "idle");
+
+    // An accepted step gets its own confirmation, felt as well as read
+    // (CD-47 A2): the one thing missing when an empty confirm field read as
+    // a failed submission.
+    var advanced =
+      (lastCapture === "setup_pass" && s.capture === "setup_confirm") ||
+      (lastCapture === "change_pass" && s.capture === "change_confirm");
+    if (advanced) playFx("accept", 620);
+
+    // A refusal (a mismatch, a failed unlock, a too-short entry) answers in
+    // its own register: the core settles back and the field marks the error
+    // colour. Short, controlled, never punishing.
+    var errNow = s.error || null;
+    if (errNow && errNow !== lastError) {
+      playFx("reject", 520);
+      entryEl.classList.remove("reject");
+      void entryEl.offsetWidth;
+      entryEl.classList.add("reject");
+    }
+    lastCapture = s.capture || null;
+    lastError = errNow;
+
     renderDots(s.chars || 0);
     entryEl.classList.toggle("busy", !!s.busy);
     // The entry is live (host-captured, focused) whenever a capture is open
@@ -139,6 +289,8 @@
       hintEl.textContent =
         "Your vault is ready. One optional extra: a passkey as the second factor.";
       footEl.textContent = "";
+      goEl.hidden = true;
+      backEl.hidden = true;
       var busyHello = s.hello === "enroll";
       var wa = s.webauthn || {};
       // Honest about this machine (CD-46 Stage B): when Windows Hello has no
@@ -178,6 +330,8 @@
       weakEl.hidden = true;
       chosenEl.hidden = true;
       stepBadge.hidden = true;
+      goEl.hidden = true;
+      backEl.hidden = true;
       footEl.textContent = "";
       return;
     }
@@ -185,6 +339,9 @@
     var twofa = s.required === 2;
     var placeholder = "";
     var chosen = false;
+    // The primary action names what it DOES at this step, not "OK" (D-0044).
+    var goLabel = "Continue";
+    var canBack = false;
     var foot = "Enter continues · Backspace edits · Esc clears the entry · Ctrl+V pastes";
 
     switch (s.capture) {
@@ -200,6 +357,7 @@
           "never to any page.";
         consequenceEl.hidden = false;
         placeholder = "Type your master password";
+        goLabel = "Continue";
         break;
       case "setup_confirm":
         markStep("setup2");
@@ -207,13 +365,19 @@
         subtitleEl.textContent = "First launch";
         stepBadge.hidden = false;
         stepBadge.textContent = "Step 2 of 2";
+        // Say plainly that step 1 landed (CD-47 A2). An empty confirm field
+        // with no acknowledgement reads as "that never submitted, type it
+        // again" rather than as the next step - the exact confusion reported.
         hintEl.textContent =
-          "Type it once more, so a typo cannot lock you out of your own vault.";
+          "Your first entry was accepted. Type it once more, so a typo " +
+          "cannot lock you out of your own vault.";
         // The choice is stated, not re-warned about, and never as a second
         // field (CD-46 Stage A).
         chosen = true;
         consequenceEl.hidden = true;
         placeholder = "Re-type your master password";
+        goLabel = "Create vault";
+        canBack = true;
         foot = "Enter creates the vault · Esc goes back to step 1";
         break;
       case "change_pass":
@@ -225,6 +389,7 @@
         hintEl.textContent = "Type the new master password.";
         consequenceEl.hidden = true;
         placeholder = "Type the new master password";
+        goLabel = "Continue";
         break;
       case "change_confirm":
         markStep("change2");
@@ -232,10 +397,13 @@
         subtitleEl.textContent = "Change";
         stepBadge.hidden = false;
         stepBadge.textContent = "Step 2 of 2";
-        hintEl.textContent = "Type it once more to confirm the change.";
+        hintEl.textContent =
+          "Your first entry was accepted. Type it once more to confirm the change.";
         chosen = true;
         consequenceEl.hidden = true;
         placeholder = "Re-type the new password";
+        goLabel = "Change password";
+        canBack = true;
         foot = "Enter applies the change · Esc goes back to step 1";
         foot = "Enter applies · Esc on an empty field goes back one step";
         break;
@@ -254,9 +422,26 @@
             "you type goes straight into the core, never to any page.";
         consequenceEl.hidden = true;
         placeholder = "Enter your master password";
+        // Only the unlock prompt reaches this branch on the lock page; the
+        // label stays exact rather than assuming which capture it is.
+        goLabel = s.capture === "unlock_pass"
+          ? (twofa ? "Unlock with Windows Hello" : "Unlock")
+          : "Continue";
         foot = "Enter unlocks · Backspace edits · Esc clears the entry · Ctrl+V pastes";
         break;
     }
+
+    // The primary action is the visible route forward at EVERY step, with the
+    // keyboard as the accelerator (CD-47 Stage A). Two exceptions, both so
+    // that exactly one primary action is ever on screen: while a weak entry
+    // is parked the warning block's own override IS the way forward, and
+    // while a worker runs there is nothing to submit.
+    var weakParked = !!s.weak_pending;
+    goEl.hidden = !s.capture || weakParked;
+    goEl.textContent = s.busy ? "Working…" : goLabel;
+    goEl.disabled = !!s.busy || !(s.chars > 0);
+    goEl.title = (!s.busy && !(s.chars > 0)) ? "Type your password first" : "";
+    backEl.hidden = !canBack || !!s.busy;
 
     // The settled choice, at the confirm step only: one line of plain text,
     // never a second field. It states that a weak password was accepted, and
@@ -309,6 +494,20 @@
 
   offerSkip.addEventListener("click", function () {
     query({ cmd: "vault_skip_passkey_offer" }).then(function (r) {
+      try { render(JSON.parse(r)); } catch (e) {}
+    }).catch(function (e) { setStatus(String(e), false); });
+  });
+
+  // The primary action sends no characters: the host already holds the entry
+  // in locked memory and this only tells it to proceed (the iron law stands).
+  goEl.addEventListener("click", function () {
+    query({ cmd: "vault_submit" }).then(function (r) {
+      try { render(JSON.parse(r)); } catch (e) {}
+    }).catch(function (e) { setStatus(String(e), false); });
+  });
+
+  backEl.addEventListener("click", function () {
+    query({ cmd: "vault_step_back" }).then(function (r) {
       try { render(JSON.parse(r)); } catch (e) {}
     }).catch(function (e) { setStatus(String(e), false); });
   });

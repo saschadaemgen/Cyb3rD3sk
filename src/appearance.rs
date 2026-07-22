@@ -190,7 +190,31 @@ impl Resolved {
             }
             css = rewrite_var(&css, &name, &value);
         }
+        css.push_str(&self.motion_vars());
         css
+    }
+
+    /// The motion contract the pages animate against (CD-47). The template's
+    /// motion option is a real setting, so it fans out from the same one
+    /// source as the accent instead of each page inventing its own guess:
+    ///
+    /// * `--motion-play` drives `animation-play-state` on the idle loops, so
+    ///   with motion off they hold a still frame rather than vanishing.
+    /// * `--motion` scales one-shot animations and transitions, so at 0 they
+    ///   complete instantly and every element still ends in its real state.
+    ///
+    /// Reduced motion must never mean broken layout, which is why nothing
+    /// here removes an element or changes a size.
+    pub fn motion_vars(&self) -> String {
+        format!(
+            ":root {{
+  --motion: {m};
+  --motion-play: {p};
+}}
+",
+            m = if self.motion { 1 } else { 0 },
+            p = if self.motion { "running" } else { "paused" },
+        )
     }
 }
 
@@ -253,6 +277,34 @@ mod tests {
                 assert!(
                     !SEMANTIC_VARS.contains(&name.as_str()),
                     "accent fan-out must never own the semantic property {name}"
+                );
+            }
+        }
+    }
+
+    /// The motion contract reaches the pages from the ONE resolved value,
+    /// in both directions, and never as a layout change (CD-47).
+    #[test]
+    fn motion_setting_fans_out_to_the_pages() {
+        let theme = Theme::load();
+        for motion in [true, false] {
+            let r = Resolved {
+                template_id: TEMPLATES[0].id.into(),
+                accent: "#00E5FF".into(),
+                intensity: 50,
+                glow: 50,
+                motion,
+            };
+            let css = r.css_vars(&theme);
+            let want_play = if motion { "running" } else { "paused" };
+            let want_scale = if motion { "--motion: 1" } else { "--motion: 0" };
+            assert!(css.contains(want_play), "motion={motion} must publish {want_play}");
+            assert!(css.contains(want_scale), "motion={motion} must publish {want_scale}");
+            // Nothing about the contract may touch a semantic colour or a size.
+            for name in SEMANTIC_VARS {
+                assert!(
+                    !r.motion_vars().contains(name),
+                    "the motion contract must not carry the semantic property {name}"
                 );
             }
         }

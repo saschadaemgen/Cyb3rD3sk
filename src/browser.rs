@@ -1137,6 +1137,21 @@ pub fn set_vault_state(json: &str) {
     }
 }
 
+/// Fire a one-shot effect on the lock page (CD-47 Stage B). An EVENT, not a
+/// state: the page cannot infer the vault-opening moment from a state push,
+/// because the workspace replaces this view immediately afterwards. The host
+/// calls it only when the thing it names has actually happened.
+pub fn lock_effect(kind: &str) {
+    let browser = view(Role::Internal).browser.lock().unwrap().clone();
+    if let Some(browser) = browser
+        && let Some(frame) = browser.main_frame()
+    {
+        let kind: String = kind.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+        let code = format!("window.cdLockFx&&window.cdLockFx('{kind}')");
+        frame.execute_java_script(Some(&CefString::from(code.as_str())), None, 0);
+    }
+}
+
 /// Refresh the vault state snapshot from the runtime and push it.
 pub fn push_vault_state() {
     set_vault_state(&crate::vault::state_json());
@@ -2596,6 +2611,22 @@ fn handle_internal_query(request: &str) -> Result<String, (i32, String)> {
         // OWN state has a weak submit parked - the page cannot skip ahead.
         "vault_accept_weak" => {
             crate::vault::accept_weak().map_err(|e| (3, e))?;
+            let state = crate::vault::state_json();
+            set_vault_state(&state);
+            Ok(state)
+        }
+        // The visible primary action (CD-47 Stage A): the same submit the
+        // Enter key performs. It carries no password characters - the host
+        // already holds the entry in locked memory, this only says "go".
+        "vault_submit" => {
+            crate::vault::key_submit();
+            let state = crate::vault::state_json();
+            set_vault_state(&state);
+            Ok(state)
+        }
+        // The visible Back action on a confirm step (CD-47 Stage A).
+        "vault_step_back" => {
+            crate::vault::step_back();
             let state = crate::vault::state_json();
             set_vault_state(&state);
             Ok(state)

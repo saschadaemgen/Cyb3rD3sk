@@ -5,6 +5,88 @@ Living document - maintained by Claude Code (CC), updated in the same
 commit-set as the change it records (D-0053). Append-only: historical entries
 are never rewritten; a superseded decision gets a new D-number forward.
 
+## D-0067 - 2026-07-22 - The lock and setup screens carry the CyberDesk visual language, with visible affordances and state-truthful motion (CD-47)
+
+*Decision.* The setup and unlock flow gains a visible primary action button at
+every step, with Enter retained as the accelerator, because a flow whose only
+route forward is an unlabelled keystroke stalls a normal user. Advancing from
+the first password step is visibly acknowledged, since an unacknowledged empty
+confirm field reads as a failed submission rather than a next step. The lock
+and setup screens carry the Energy Core motif and the Pulse Grid motion
+language: the core idles calmly, charges with the real host-side strength
+score, pulses when a step is accepted, flares on a successful unlock, and
+gives a distinct restrained response on failure, with step transitions
+animated inside the panel. All of it honours the chosen accent colour and the
+template motion setting, never recolours semantic status colours, never
+depicts a state that is not real, reveals no more than the strength meter and
+dot count already do, and never blocks input or the unlock path.
+
+*Why.* The background and the start page already establish the product's
+visual language, and the lock screen was the one place that broke it, at the
+exact moment a user forms their first impression. Motion here is not
+decoration: it is the acknowledgement layer the flow was missing, which is why
+it must be driven from real state rather than approximated.
+
+*How the truth is kept.* Two mechanisms, deliberately different:
+
+* **State-driven** (the charge, the accepted-step pulse, the refusal): the
+  page derives these from the state the host already pushes, and from real
+  transitions in it. `data-charge` is the host's own zxcvbn score and nothing
+  else; the pulse fires on a real step advance; the refusal fires on a real
+  error appearing. Where nothing is being measured, the core idles rather than
+  showing a score it does not have, so the unlock prompt never implies a
+  reading it never took.
+* **Event-driven** (the unlock flare): the page cannot infer the
+  vault-opening moment, because the workspace replaces the view immediately
+  after it. So the host fires `window.cdLockFx('unlock')` from the outcome
+  branch, and holds the lock view for one 620ms beat before the handover. The
+  hold is on the VIEW only: the Argon2id work and the unlock have already
+  finished when the flare starts, so nothing waits on an animation.
+
+*The motion setting fans out like the accent.* `Resolved::motion_vars`
+publishes `--motion` (1 or 0) and `--motion-play` (`running` or `paused`) with
+the theme tokens, from the one resolved appearance value, so pages animate
+against a real setting instead of each guessing. `--motion-play` drives
+`animation-play-state` on the idle loops, so motion off holds a still frame
+rather than an empty screen; `--motion` scales one-shot durations and
+transitions, so at 0 they complete instantly and every element still lands in
+its real state. Nothing in the contract removes an element or changes a size,
+which is what makes reduced motion a still picture and never a broken layout.
+The system `prefers-reduced-motion` preference is honoured alongside it, and
+whichever asks for less motion wins.
+
+*Three construction notes worth keeping.* The rings rotate through the Web
+Animations API rather than CSS keyframes: changing a CSS `animation-duration`
+restarts the timing and the ring visibly jumps, while `playbackRate` ramps the
+same animation, and the core has to spin up as the password strengthens. Each
+ring is two nested groups, the outer rotated by script and the inner scaled by
+CSS, because one element cannot carry two independent transforms without one
+overwriting the other.
+
+And the rotation origin is `transform-origin: 0 0`, not `center`. On a viewBox
+of `-100 -100 200 200` the centre IS the user-space origin, and Chromium
+resolves a transform-origin length in that user space without adding the
+viewBox offset, so `0 0` lands on the centre while `center` computes to
+`100px 100px`: the far corner, 141 units away from a 92-unit ring. Written
+from the CSS this looks backwards, which is why it was measured: `center`
+moved the three ring centres by up to 347px in a real engine while the static
+shapes beside them held perfectly still. A reviewer who "fixes" this to
+`center` will break it, and only a rendered measurement will show it.
+
+*The guard against the flare lives in both places.* The shell skips the flare
+entirely when motion is off (holding the view for an animation that will not
+play is just a stall), and the page independently refuses to run it for the
+same reason. That duplication is deliberate: measured, a zero-length
+`forwards` fade snaps straight to its end frame, so a page that trusted the
+caller would go blank the first time any future code fired the effect without
+repeating the host's check.
+
+*Layout-neutral by construction.* The core box is zero-sized with the SVG
+absolutely positioned off it, and it shares one grid cell with the panel, so
+it is anchored to the panel's top edge, which never moves (D-0066), rather
+than to a panel centre that changes with every step. The CD-46 measurements
+therefore stand unchanged, which was a requirement of adding it at all.
+
 ## D-0066 - 2026-07-22 - The setup panel is anchored, not centred; the vault gains an in-product reset; and UI is verified by rendering, never by reasoning (CD-46)
 
 *Decision.* Three things, one theme: what the user actually sees is the only

@@ -47,6 +47,12 @@ const SETTINGS_SLIDE: f32 = 1.12;
 /// short enough that a missing repaint is never a visible stall.
 const SETTINGS_PAINT_WAIT: Duration = Duration::from_millis(250);
 
+/// How long the lock view stays up after a real unlock so its Energy Core
+/// flare can play (CD-47 Stage B). It holds the VIEW, never the crypto: the
+/// Argon2id work and the unlock itself already finished when this starts, and
+/// the workspace boot follows immediately after.
+const UNLOCK_FLARE: Duration = Duration::from_millis(620);
+
 /// Ease a scalar toward a target by factor `k` (per frame), snapping when it
 /// is within epsilon so the animation actually settles (and the shell can
 /// stop requesting frames).
@@ -235,6 +241,7 @@ pub fn run(windowed: bool) {
         lock_view_started: false,
         settings_slide: 0.0,
         settings_awaiting_paint: None,
+        unlock_flare: None,
         cef_inited: false,
         views_started: false,
         scale: 1.0,
@@ -301,6 +308,9 @@ struct Shell {
     /// (nothing changed, so CEF has nothing to do), the layer opens anyway
     /// rather than hanging off-screen.
     settings_awaiting_paint: Option<Instant>,
+    /// When the vault-opening flare started, while the shell holds the lock
+    /// view up for it (CD-47 Stage B). `None` outside that one beat.
+    unlock_flare: Option<Instant>,
     window: Option<Arc<Window>>,
     renderer: Option<SurfaceRenderer>,
     theme: Theme,
@@ -1948,6 +1958,25 @@ impl Shell {
         self.restore_session_views(window, true);
     }
 
+    /// Start the vault-opening reveal (CD-47 Stage B): tell the lock page to
+    /// flare, and hold the view for exactly that beat before the workspace
+    /// takes over. Fired ONLY from a real unlock or setup outcome, so the
+    /// flare can never depict an opening that did not happen.
+    fn begin_unlock_flare(&mut self) {
+        if self.unlock_flare.is_some() {
+            return;
+        }
+        // With motion off there is nothing to wait for, and holding the view
+        // for an animation that will not play is just a stall on the way to
+        // the workspace. Open straight away.
+        if !crate::settings::appearance().motion {
+            self.open_gate();
+            return;
+        }
+        self.unlock_flare = Some(Instant::now());
+        browser::lock_effect("unlock");
+    }
+
     /// Open the start-authorization gate: the VMK exists, so the deferred
     /// boot runs (sealed identity seed first, it feeds browser creation, then
     /// the workspace) and the internal view leaves the lock page for its
@@ -2708,7 +2737,7 @@ impl ApplicationHandler for Shell {
                         browser::push_vault_state();
                         return;
                     }
-                    self.open_gate();
+                    self.begin_unlock_flare();
                 }
                 // Failures (and unlocked-session re-wraps) just re-push state.
                 _ => {}
@@ -2718,9 +2747,23 @@ impl ApplicationHandler for Shell {
 
         // The first-run passkey offer was answered (declined or enrolled):
         // boot the workspace now (CD-44 D1).
-        if self.locked && !crate::vault::passkey_offer_open() && crate::vault::is_unlocked() {
-            self.open_gate();
+        if self.locked
+            && self.unlock_flare.is_none()
+            && !crate::vault::passkey_offer_open()
+            && crate::vault::is_unlocked()
+        {
+            self.begin_unlock_flare();
             browser::push_vault_state();
+        }
+
+        // The vault-opening flare has had its beat: hand over to the
+        // workspace (CD-47 Stage B). Nothing waited on this but the view -
+        // the vault was already open when the flare started.
+        if let Some(started) = self.unlock_flare
+            && started.elapsed() >= UNLOCK_FLARE
+        {
+            self.unlock_flare = None;
+            self.open_gate();
         }
 
         // "Lock now" (CD-40, D-0059): relaunch the shell cold. The exec image
