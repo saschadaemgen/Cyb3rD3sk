@@ -696,6 +696,15 @@ impl Shell {
     fn mouse_target(&self) -> Option<(Role, (f32, f32))> {
         let (w, h) = self.renderer.as_ref().map(|r| r.size()).unwrap_or((1, 1));
         let (cx, cy) = (self.cursor_phys.x as f32, self.cursor_phys.y as f32);
+        // While the settings layer is sliding the workspace back in (CD-44
+        // Stage C), the composited rects are offset but routing reads the
+        // real geometry, so a click could land on a view that is not under
+        // the cursor yet. Route nothing until the workspace has settled: the
+        // window is ~0.3 s and the alternative is a click going somewhere the
+        // user cannot see.
+        if self.overlay != Overlay::Settings && self.settings_slide > 0.01 {
+            return None;
+        }
         // The HUD strip (CD-30) is interactive in EVERY overlay state - the Ampel
         // must stay reachable. Its rect (the top margin strip above/right of the
         // MF zone) overlaps neither the slots, the band columns, the launcher,
@@ -1704,16 +1713,9 @@ impl Shell {
     /// command band (CD-12) is driven by engage/disengage, not this path.
     fn toggle_settings(&mut self) {
         if self.overlay == Overlay::Settings {
-            // Closing the card aborts any vault capture begun from it (CD-40)
-            // - the host must not keep swallowing the keyboard for an entry
-            // field that is no longer visible.
-            if crate::vault::capture_active() {
-                crate::vault::cancel_capture();
-                browser::push_vault_state();
-            }
-            self.overlay = Overlay::Closed;
-            browser::set_focus(Role::Internal, false);
-            browser::set_focus(Role::Slot(self.active_slot), true);
+            // One close path for every caller (CD-44): it also aborts a vault
+            // capture begun from the page (CD-40).
+            self.close_settings();
             return;
         }
         // From the band or closed → the settings card. Drop any band state.
@@ -1733,9 +1735,17 @@ impl Shell {
         browser::set_focus(Role::Internal, true);
     }
 
-    /// Close the settings card back to `Closed` (ESC).
+    /// Close the settings layer back to `Closed`. The single close path: Esc,
+    /// the page's own Close button, and the gear toggle all land here, so the
+    /// vault-capture teardown can never be skipped by one of them (CD-44).
     fn close_settings(&mut self) {
         if self.overlay == Overlay::Settings {
+            // A capture begun from the settings page must not keep swallowing
+            // the keyboard for an entry field that is no longer visible.
+            if crate::vault::capture_active() {
+                crate::vault::cancel_capture();
+                browser::push_vault_state();
+            }
             self.overlay = Overlay::Closed;
             browser::set_focus(Role::Internal, false);
             browser::set_focus(Role::Slot(self.active_slot), true);

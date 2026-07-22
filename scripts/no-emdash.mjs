@@ -22,7 +22,11 @@ import { execFileSync } from "node:child_process";
 // rule text in CLAUDE.md and D-0064 names them the same careful way).
 const AMP = "&";
 const PATTERN = `\\x{2014}|\\x{2013}|${AMP}mdash;|${AMP}ndash;`;
-const PATHSPEC = [".", ":!Cargo.lock", ":!LICENSE"];
+// Top-anchored pathspecs (":/"), so the guard scans the WHOLE repository no
+// matter which directory it is run from. A CWD-relative "." would silently
+// pass when run from a subdirectory - a guard that can pass vacuously is
+// worse than no guard.
+const PATHSPEC = [":/", ":(top,exclude)Cargo.lock", ":(top,exclude)LICENSE"];
 
 let out = "";
 try {

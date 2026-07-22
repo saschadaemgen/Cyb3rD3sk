@@ -18,27 +18,33 @@ html {
   font-size: clamp(14px, 0.78vw, 19px);
 }
 
-html, body {
+html {
   height: 100%;
+  /* The layer never scrolls horizontally: the section flow reflows instead.
+     Kept on the root so the DOCUMENT stays the scroll container; a body-level
+     scroller would swallow PageDown/Home/End. */
+  overflow-x: hidden;
+}
+
+body {
+  min-height: 100%;
   background: transparent;            /* the wgpu compositor paints behind us */
   color: var(--text);
   font-family: "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
-  /* The layer never scrolls horizontally: the section grid reflows instead. */
-  overflow-x: hidden;
 }
 
 .panel {
   width: 100%;
   min-height: 100%;
-  padding: 2.2rem 2.8rem 2.8rem;
+  padding: 1.5rem 1.8rem 1.8rem;
   /* Translucent over the fixed background, not an opaque slab. */
   background: color-mix(in srgb, var(--panel) 92%, transparent);
   border: none;
   border-radius: 0;
   display: flex;
   flex-direction: column;
-  gap: 1.6rem;
+  gap: 1.1rem;
 }
 
 .panel-head {
@@ -46,6 +52,12 @@ html, body {
   align-items: center;
   gap: 1.1rem;
   padding-bottom: 1.3rem;
+  /* The shell draws the gear and the info glyph on top of this view, and
+     their hit circles reach ~133 CSS px in from the right edge. Those are
+     fixed CSS px (the host sizes them in device px and the view carries the
+     scale factor), so the reserve is fixed px too, not rem: page content must
+     never sit under host chrome. */
+  padding-right: 150px;
   border-bottom: 1px solid var(--panel-border);
 }
 .panel-title { display: flex; flex-direction: column; gap: 0.2rem; }
@@ -75,21 +87,24 @@ h1 { font-size: 1.4rem; font-weight: 600; letter-spacing: 0.3px; }
      as many equal-height columns as the width allows, so the layer fills the
      screen instead of leaving one tall column to scroll. Four columns at
      1920, more on an ultrawide, one on a narrow window. */
-  column-width: 27rem;
-  column-gap: 1.4rem;
+  column-width: 23rem;
+  column-gap: 1.1rem;
 }
 
 /* Each section is a card that is never split across a column boundary. */
 .sections > section {
   break-inside: avoid;
   -webkit-column-break-inside: avoid;
-  display: inline-block;    /* keeps the card atomic inside the column flow */
+  /* MUST stay block-level: with inline-block Chromium's multicol balancer
+     refuses to spread the cards across the available slots, which left two
+     columns empty while the page overflowed (measured, CD-44 review). */
+  display: block;
   width: 100%;
-  margin: 0 0 1.4rem;
+  margin: 0 0 1.1rem;
   background: color-mix(in srgb, var(--bg) 42%, transparent);
   border: 1px solid color-mix(in srgb, var(--panel-border) 80%, transparent);
   border-radius: var(--corner-radius);
-  padding: 1.1rem 1.3rem 1.3rem;
+  padding: 0.85rem 1rem 0.95rem;
 }
 
 .rows { display: flex; flex-direction: column; gap: 0.4rem; }
@@ -102,7 +117,7 @@ h1 { font-size: 1.4rem; font-weight: 600; letter-spacing: 0.3px; }
   justify-content: space-between;
   gap: 1rem;
   flex-wrap: wrap;
-  padding: 0.85rem 0.2rem;
+  padding: 0.5rem 0.15rem;
   border-bottom: 1px solid color-mix(in srgb, var(--panel-border) 55%, transparent);
 }
 .row > .label { flex: 1 1 14rem; min-width: 0; }
@@ -446,6 +461,15 @@ h1 { font-size: 1.4rem; font-weight: 600; letter-spacing: 0.3px; }
   border-radius: 8px;
 }
 .vault-hello[hidden] { display: none; }
+
+/* One card can grow past a full column: the per-vector Custom view adds
+   eleven rows to Tracking resistance. A card taller than the viewport cannot
+   be kept atomic without forcing a scroll, so that one is allowed to flow
+   across a column boundary while every other card stays whole. */
+.sections > section.tall {
+  break-inside: auto;
+  -webkit-column-break-inside: auto;
+}
 
 /* Collapsible explanation per section (CD-44 Stage C). The copy is unchanged
    and one click away; the card stops being a wall of prose, which is what

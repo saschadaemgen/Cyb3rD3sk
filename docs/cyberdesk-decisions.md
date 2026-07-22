@@ -89,6 +89,42 @@ Explorer. If Sascha prefers a supplied artwork file over the derived mark,
 dropping it in as `assets/cyberdesk.ico` and regenerating the RGBA is the
 whole change.
 
+*Adversarial review before the live pass.* A five-lens review over the whole
+CD-44 change confirmed twelve defects, all fixed on top of the four stage
+commits. The two that mattered most were caught by MEASUREMENT, not by
+reading: a verifier rendered the host-assembled settings page in a real
+Chromium and found (a) the page's Close button sat entirely inside the shell
+gear/info-glyph hit circles, so clicking it opened the update panel instead
+(fixed by reserving the chrome band, a fixed-px reserve because the host
+chrome is fixed CSS px), and (b) the layer overflowed 1920x1080 by 125 px
+while two of five columns stood empty. The cause of (b) was
+`display: inline-block` on the cards: Chromium's multicol balancer will not
+spread inline-level children. With `display: block` the same content packs
+into all five columns at 0 px overflow, and the one card that can outgrow a
+full column (Tracking resistance with the eleven Custom rows) is allowed to
+split via a `tall` class instead of forcing a scroll. Re-measured after the
+fix: 0 px vertical overflow at 1920x1080 normal AND Custom, 2560x1440 and
+5200x1440; 0 px horizontal overflow at every width from 800 to 5200; zero
+clipped controls. This is why the earlier static height estimate is not
+recorded as evidence: it was wrong, and only the browser could say so.
+
+The other ten: the guard's pathspec was CWD-relative, so running it from a
+subdirectory passed vacuously (now top-anchored, and proven to catch a
+root-level dash from a subdirectory); `close_settings` skipped the vault
+capture teardown that `toggle_settings` did (both now share one close path);
+unmapped WebAuthn errors still reached the screen as `call failed: NAME`
+(now plain language, raw name to the log only); declining the passkey offer
+left a stale enrollment error that Settings then showed as a live vault
+error; the on-disk privacy pill stayed green while a measured purge failure
+sat inside a collapsed disclosure (the pill now reports the measured state
+and the reason line stays visible - the same rule this ticket is enforcing);
+input routing read real geometry while the workspace was mid-slide, so a
+click during the ~0.3 s close could land on a view that was not under the
+cursor (routing now yields until the slide settles); and three doc gaps in
+cyberdesk-wire-format.md (the new `close_settings` and
+`vault_skip_passkey_offer` commands, the `offer_passkey` and
+`webauthn.hello_ready` state fields, and the corrected Esc semantics).
+
 *Why.* The vault was cryptographically sound but unusable on first contact,
 and the first screen a user ever sees decides whether the product is
 trusted. These are product-critical corrections, made without weakening the

@@ -224,6 +224,10 @@
 
     <section class="rows tor-section" aria-label="On-disk privacy">
       <h2 class="section-head">On-disk privacy <span id="residue-pill" class="tor-status"></span></h2>
+      <!-- A purge that could not complete is a MEASURED failure, so it stays
+           visible in the section itself, never folded into the collapsed
+           explanation (CD-44: a status display must never lie). -->
+      <p id="residue-reason" class="tor-reason" hidden></p>
 
       <div class="row">
         <div class="label">

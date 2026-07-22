@@ -1786,9 +1786,13 @@ pub fn passkey_offer_open() -> bool {
 
 /// Dismiss the first-run passkey offer: either declined ("not now") or
 /// finished (enrolled). The vault is unaffected either way; this only ends
-/// the UI step, and the workspace boots next.
+/// the UI step, and the workspace boots next. Any error from a failed
+/// enrollment attempt goes with it: it belonged to the offer, and letting it
+/// ride into the unlocked session would show a stale failure in Settings.
 pub fn dismiss_passkey_offer() {
-    rt().lock().unwrap().offer_passkey = false;
+    let mut r = rt().lock().unwrap();
+    r.offer_passkey = false;
+    r.error = None;
 }
 
 /// The informed override (CD-42 Task B): the user deliberately proceeds with

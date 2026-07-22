@@ -586,6 +586,15 @@ master-password setup. The retired v1 surface (`unlock_recovery`,
 `vault_setup_ack`, `vault_regen_recovery`, the `step2`/`recovery` fields) was
 REMOVED with the recovery key (D-0062).
 
+### `close_settings` (view -> host, CD-44)
+
+- Request: `{"cmd":"close_settings"}` - the Stage C settings layer is
+  full-screen, so the page carries its own way out (the shell gear sits
+  outside the page's reach while the layer owns the window).
+- Effect: queues the same overlay-close the shell uses for Esc, so the
+  workspace slides back and any vault capture begun from the page is torn
+  down on the one shared close path. Success: `{"ok":true}`.
+
 ### `cdVault(json)` (host -> view, push)
 
 Pushed to the internal view on every vault-state change (keystrokes included -
@@ -632,9 +641,20 @@ the count changes). Payload:
 - `hello` (CD-43) - `"enroll" | "assert" | null`: a Windows Hello modal is
   open on a vault worker (passkey enrollment / the 2FA unlock second
   factor); the pages render a "follow the Windows Hello prompt" hint.
-- `webauthn` (CD-43) - `{ "available": bool, "api": n }`: the OS WebAuthn
-  capability snapshot for the honest config surface (whether the passkey
-  path can be offered at all, and the webauthn.dll API level).
+- `webauthn` (CD-43; `hello_ready` added in CD-44) -
+  `{ "available": bool, "api": n, "hello_ready": bool }`: the OS WebAuthn
+  capability snapshot for the honest config surface. `available` is the
+  webauthn.dll API level check; `hello_ready` is the LIVE fact, re-probed on
+  every state build, of whether a Windows Hello factor (PIN, fingerprint or
+  face) is actually enrolled. With `hello_ready` false, enrolling a passkey
+  cannot succeed, so the host refuses it up front and the page shows the
+  setup step instead of offering a dead button (CD-44 A3).
+- `offer_passkey` (CD-44 D1) - true only on the first launch, immediately
+  after the master password is set, and only where a platform authenticator
+  could actually serve it. While it is true the vault is ALREADY unlocked but
+  the shell keeps the gate view up, and the page must render the declinable
+  offer instead of the capture UI. Answering it (either way) lets the
+  workspace boot.
 - `methods[]` passkey entries additionally mirror nothing secret: the
   credential id and PRF eval salt stay host-side in `vault.json` (non-secret
   there, but the page has no use for them - counts and states only).
@@ -723,7 +743,13 @@ retries; there is no Hello-only unlock, structurally.
 
 Key handling while a capture is active (host-side, `app.rs`): printable text →
 buffer; Backspace → UTF-8-aware delete; Enter → advance the flow (derivations
-on a worker thread, never the render loop); Esc → cancel; Ctrl+V → clipboard
+on a worker thread, never the render loop); Esc -> non-destructive
+(`vault::key_escape`, CD-44 A1): with text it clears the ENTRY only plus any
+parked weak warning, and on an EMPTY entry it steps back exactly one step
+(`setup_confirm` -> `setup_pass`, `change_confirm` -> `change_pass`), ends the
+optional unlocked-session flows (`change_pass`, `retune_kdf`), and on the
+mandatory flows (`setup_pass`, `unlock_pass`) only clears a shown error - it
+never aborts them; Ctrl+V -> clipboard
 paste read by the HOST (never through the renderer).
 
 ## Update-awareness IPC (CD-13 → CD-22, live)
@@ -736,6 +762,15 @@ vs a build-declared latest-known version), so the panel has ONE command,
 `check_updates` commands and the live manifest fetch were **retired in CD-22**
 (D-0036) - the app self-update feed returns in its own later ticket. The info glyph
 itself is **no IPC** (shell-drawn, hit-tested host-side like the gear).
+
+### `vault_skip_passkey_offer` (view -> host, CD-44)
+
+Request `{ "cmd": "vault_skip_passkey_offer" }`. Answers the first-run
+passkey offer with "not now". In-memory only: it clears the offer flag (and
+any error left by a failed enrollment attempt), never touches the vault, the
+enrolled methods or the policy. Enrolling from the offer instead uses
+`vault_enroll_passkey`, which answers the offer on success. Reply = state
+JSON; also pushed.
 
 ### `get_info_items` (view -> host)
 

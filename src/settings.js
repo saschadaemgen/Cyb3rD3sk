@@ -298,6 +298,10 @@
     // (off / below the Green floor) - the pill is a status display first.
     fpLevelPill.className = "tor-status s" + (lvl === "off" || reduced ? 3 : lvl === "red" ? 2 : 1);
     fpDetail.hidden = fpState.preset !== "custom";
+    // The Custom view adds eleven rows: mark the card so it may flow across a
+    // column boundary instead of forcing the layer to scroll (CD-44).
+    var fpCard = fpDetail.closest("section");
+    if (fpCard) fpCard.classList.toggle("tall", !fpDetail.hidden);
     VECTORS.forEach(function (k) {
       var el = document.querySelector('.switch[data-fp="' + k + '"]');
       if (el) {
@@ -499,9 +503,30 @@
         residueNow.textContent = j.on_disk_human +
           " - working profile, wiped next launch (holds no browsing content)";
       }
+      // The pill reports the MEASURED state, not just the setting: a purge
+      // that ran into trouble must not read as a clean "on" while its reason
+      // sits inside a collapsed disclosure (CD-44).
       if (residuePill) {
-        residuePill.textContent = j.enabled ? "on" : "off";
-        residuePill.className = "tor-status s" + (j.enabled ? 1 : 3);
+        if (!j.enabled) {
+          residuePill.textContent = "off";
+          residuePill.className = "tor-status s3";
+        } else if (lp.error) {
+          residuePill.textContent = "incomplete";
+          residuePill.className = "tor-status s3";
+        } else {
+          residuePill.textContent = "on";
+          residuePill.className = "tor-status s1";
+        }
+      }
+      // The reason itself stays in the section, beside the pill.
+      var residueReason = document.getElementById("residue-reason");
+      if (residueReason) {
+        if (j.enabled && lp.error) {
+          residueReason.textContent = lp.error;
+          residueReason.hidden = false;
+        } else {
+          residueReason.hidden = true;
+        }
       }
     }).catch(function () {});
   }

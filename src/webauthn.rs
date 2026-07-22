@@ -223,7 +223,18 @@ fn api_error(call: &'static str, hr: i32) -> WebAuthnError {
              Check the Hello sign-in options in Windows Settings, then try again."
                 .into(),
         ),
-        _ => WebAuthnError::Api { call, name },
+        // Anything unmapped still reaches the user in plain language (CD-44
+        // A3): the Win32 entry point and the raw W3C name are diagnostics and
+        // go to the log, never to the screen.
+        other => {
+            tracing::warn!("hello: {call} failed: {other}");
+            WebAuthnError::Response(
+                "Windows Hello could not complete the request. Close any open Hello \
+                 prompt and try again; if it keeps failing, check Windows Settings > \
+                 Accounts > Sign-in options."
+                    .into(),
+            )
+        }
     }
 }
 
